@@ -315,11 +315,15 @@ var (
 
 func loadFormulaDB() ([]FormulaEntry, error) {
 	formulaDBOnce.Do(func() {
-		paths := []string{
-			`D:\\forge\\knowledge\\古籍库\\formula_db.json`,
-			"knowledge/古籍库/formula_db.json",
-			"formula_db.json",
+		var paths []string
+		if d := os.Getenv("FORGE_DATA"); d != "" {
+			paths = append(paths, d+"/formula_db.json")
 		}
+		paths = append(paths,
+			"knowledge/古籍库/formula_db.json",
+			"data/formula_db.json",
+			"formula_db.json",
+		)
 		for _, p := range paths {
 			b, err := os.ReadFile(p)
 			if err != nil {
@@ -329,7 +333,7 @@ func loadFormulaDB() ([]FormulaEntry, error) {
 				return
 			}
 		}
-		formulaDBErr = fmt.Errorf("formula_db.json 未找到（预期路径: D:\\forge\\knowledge\\古籍库\\formula_db.json）")
+		formulaDBErr = fmt.Errorf("formula_db.json 未找到：请设置 FORGE_DATA 环境变量指向含 formula_db.json 的目录")
 	})
 	return formulaDB, formulaDBErr
 }
