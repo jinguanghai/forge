@@ -1,8 +1,8 @@
 
-# sympy_verify.py — dead-boundary math verifier
-# Usage: python sympy_verify.py '<json_input>'
-# Input: {"expr": "expression", "expected": "expected value (optional)", "action": "simplify|solve|equals|evaluate"}
-# Output: {"pass": true/false, "result": "...", "sympy_output": "..."}
+# sympy_verify.py — 死边界数学验证器
+# 用法: python sympy_verify.py '<json_input>'
+# 输入: {"expr": "表达式", "expected": "期望值(可选)", "action": "simplify|solve|equals|evaluate"}
+# 输出: {"pass": true/false, "result": "...", "sympy_output": "..."}
 
 import sys, json
 from sympy import *

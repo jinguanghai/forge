@@ -1,8 +1,8 @@
-# Fold-Unfold Memory System —— fold_memory.py (deterministic folding script)
-# Usage: python fold_memory.py '<JSON>'
-# JSON: {"name":"task name","summary":"one-line summary","detail":"details (multi-line)","status":"done|doing|shelved"}
-# Effect: 1) write archive _archive\folded_memory\<id>.md (standard template)
-#         2) append an index entry to memory.json folded_memory.items (schema v2, replace by name)
+# 折叠展开记忆系统 —— fold_memory.py（确定性折叠脚本）
+# 用法: python fold_memory.py '<JSON>'
+# JSON: {"name":"任务名","summary":"一句话摘要","detail":"细节(可多行)","status":"done|doing|shelved"}
+# 作用: ① 写档案 _archive\folded_memory\<id>.md（标准模板）
+#       ② memory.json folded_memory.items 追加一行索引（schema v2, 同名替换）
 import json, os, sys, datetime
 
 FORGE = os.environ.get("FORGE_WORK_DIR") or os.getcwd()
@@ -14,19 +14,19 @@ FOLD_DIR = os.path.join(FORGE, "_archive", "folded_memory")
 
 def main():
     if len(sys.argv) < 2:
-        print(json.dumps({"OK": False, "error": "missing parameter: JSON"}, ensure_ascii=False))
+        print(json.dumps({"OK": False, "error": "缺少参数: JSON"}, ensure_ascii=False))
         return
     try:
         p = json.loads(sys.argv[1])
     except Exception as e:
-        print(json.dumps({"OK": False, "error": f"JSON parse failed: {e}"}, ensure_ascii=False))
+        print(json.dumps({"OK": False, "error": f"JSON解析失败: {e}"}, ensure_ascii=False))
         return
     name = (p.get("name") or "").strip()
     summary = (p.get("summary") or "").strip()
     detail = (p.get("detail") or "").strip()
     status = (p.get("status") or "done").strip()
     if not name or not summary:
-        print(json.dumps({"OK": False, "error": "name/summary are required"}, ensure_ascii=False))
+        print(json.dumps({"OK": False, "error": "name/summary 必填"}, ensure_ascii=False))
         return
 
     os.makedirs(FOLD_DIR, exist_ok=True)
@@ -40,10 +40,10 @@ def main():
         n += 1
 
     doc = f"""# {name}
-- Status: {status}
-- Folded at: {today}
-- Summary: {summary}
-- Details:
+- 状态: {status}
+- 折叠日期: {today}
+- 摘要: {summary}
+- 细节:
 {detail}
 """
     with open(fp, "w", encoding="utf-8") as f:
@@ -51,7 +51,7 @@ def main():
 
     mem = json.load(open(MEM, encoding="utf-8"))
     fm = mem.setdefault("folded_memory", {})
-    fm.setdefault("_说明", "Folded items: completed / low-attention items. The normal view only shows one-line indexes (no attention cost); when the owner issues 展开<name>, Forge reads the corresponding archive to restore full details.")
+    fm.setdefault("_说明", "折叠区：已完成/暂不关注的事项。正常视角只看到items里的一行行索引（不占注意力），主人指令'展开<名称>'时铸剑炉去读对应档案恢复全部细节。")
     items = fm.setdefault("items", [])
     for i, it in enumerate(items):
         if it.get("name") == name:

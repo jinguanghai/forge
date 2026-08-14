@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Intrusion detection: parse honeypot/system logs, rule engine identifies attack behavior. Emits alert events."""
+"""入侵检测: 解析蜜罐/系统日志, 规则引擎识别攻击行为. 输出告警事件."""
 import json, os, re, datetime, collections
 
-RULE_SSH_BRUTEFORCE  = {"name": "ssh_bruteforce",  "desc": "SSH brute force: >=5 attempts from same source within 60s",  "sev": "high",   "window": 60,  "count": 5}
-RULE_PORT_SCAN       = {"name": "port_scan",       "desc": "Port scan: same source hits multiple distinct services", "sev": "medium", "window": 60,  "count": 3}
-RULE_ATTACK_UA       = {"name": "attack_ua",       "desc": "Attack-tool UA signature (sqlmap/nmap/nessus...)", "sev": "high", "window": 0, "count": 1}
-RULE_PATH_BRUTE      = {"name": "path_bruteforce", "desc": "Path brute force: >=10 distinct path requests from same source", "sev": "medium", "window": 120, "count": 10}
+RULE_SSH_BRUTEFORCE  = {"name": "ssh_bruteforce",  "desc": "SSH暴力破解: 同源5次尝试/60s",  "sev": "high",   "window": 60,  "count": 5}
+RULE_PORT_SCAN       = {"name": "port_scan",       "desc": "端口扫描: 同源命中多个不同服务", "sev": "medium", "window": 60,  "count": 3}
+RULE_ATTACK_UA       = {"name": "attack_ua",       "desc": "攻击工具UA特征(sqlmap/nmap/nessus等)", "sev": "high", "window": 0, "count": 1}
+RULE_PATH_BRUTE      = {"name": "path_bruteforce", "desc": "路径爆破: 同源10次不同路径请求", "sev": "medium", "window": 120, "count": 10}
 
 UA_ATTACK_PATTERNS = [
     r"sqlmap", r"nmap", r"nessus", r"nikto", r"masscan", r"zgrab",
@@ -13,7 +13,7 @@ UA_ATTACK_PATTERNS = [
 ]
 
 def parse_logs(logfile):
-    """Read honeypot jsonl log -> event list"""
+    """读取蜜罐jsonl日志 -> 事件列表"""
     events = []
     if not os.path.exists(logfile):
         return events
@@ -35,7 +35,7 @@ def _parse_ts(ts):
         return datetime.datetime.min
 
 def detect(events):
-    """Rule engine: return alert list [{ip, rule, sev, detail, evidence:[...]}]"""
+    """规则引擎: 返回告警列表 [{ip, rule, sev, detail, evidence:[...]}]"""
     alerts = []
     by_ip = collections.defaultdict(list)
     for ev in events:
@@ -43,36 +43,36 @@ def detect(events):
 
     for ip, evs in by_ip.items():
         evs.sort(key=lambda e: _parse_ts(e.get("ts", "")))
-        # Rule 1: SSH brute force
+        # 规则1: SSH暴力破解
         ssh = [e for e in evs if e.get("service") == "ssh"]
         if len(ssh) >= RULE_SSH_BRUTEFORCE["count"]:
             alerts.append({"ip": ip, "rule": RULE_SSH_BRUTEFORCE["name"],
                            "sev": RULE_SSH_BRUTEFORCE["sev"],
-                           "detail": f"{len(ssh)} SSH connection attempts in a short window",
+                           "detail": f"短时间内{len(ssh)}次SSH连接尝试",
                            "evidence": [e.get("data","") for e in ssh[:5]]})
-        # Rule 2: port scan (multiple service types hit)
+        # 规则2: 端口扫描(命中多个服务类型)
         svcs = {e.get("service") for e in evs}
         if len(svcs) >= RULE_PORT_SCAN["count"]:
             alerts.append({"ip": ip, "rule": RULE_PORT_SCAN["name"],
                            "sev": RULE_PORT_SCAN["sev"],
-                           "detail": f"same source probed multiple services: {sorted(svcs)}",
+                           "detail": f"同源探测多个服务: {sorted(svcs)}",
                            "evidence": []})
-        # Rule 3: attack-tool UA
+        # 规则3: 攻击工具UA
         for e in evs:
             ua = (e.get("ua") or "").lower()
             hit = [p for p in UA_ATTACK_PATTERNS if re.search(p, ua)]
             if hit:
                 alerts.append({"ip": ip, "rule": RULE_ATTACK_UA["name"],
                                "sev": RULE_ATTACK_UA["sev"],
-                                "detail": f"UA matches attack-tool signature: {hit}",
+                               "detail": f"UA匹配攻击工具特征: {hit}",
                                "evidence": [ua]})
                 break
-        # Rule 4: path brute force
+        # 规则4: 路径爆破
         paths = [e.get("request","") for e in evs if e.get("service")=="http"]
         if len(paths) >= RULE_PATH_BRUTE["count"]:
             alerts.append({"ip": ip, "rule": RULE_PATH_BRUTE["name"],
                            "sev": RULE_PATH_BRUTE["sev"],
-                           "detail": f"{len(paths)} HTTP requests (possible path brute force)",
+                           "detail": f"{len(paths)}次HTTP请求(疑似路径爆破)",
                            "evidence": paths[:5]})
     return alerts
 

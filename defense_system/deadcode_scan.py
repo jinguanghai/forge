@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""deadcode_scan.py — Forge Go-source dead-code scanner (top-level identifier zero-reference detection)
-Usage: python deadcode_scan.py [project-dir]
-Scans each .go file for top-level declarations (func/type/var/const names), counts references across
-the project; references <= 1 (declaration only) => suspected dead code. Skips _test.go. Static scan only; go build is the final word."""
+"""deadcode_scan.py — 铸剑炉 Go 源码死代码扫描（顶层标识符零引用检测）
+用法: python deadcode_scan.py [项目目录]
+说明: 提取每个 .go 文件的顶层声明(func/type/var/const 名), 统计全项目引用次数,
+      引用<=1(仅声明处) 即疑似死代码。排除 _test.go。仅静态扫描, 以 go build 兜底。
+"""
 import os, re, sys
 
 DECL = re.compile(
@@ -41,8 +42,8 @@ if __name__ == "__main__":
     root = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     dead = scan(root)
     if not dead:
-        print("OK: no dead code")
+        print("✅ 无死代码")
     else:
-        print("WARNING: %d suspected dead code(s) (verify with go build):" % len(dead))
+        print("⚠️ 疑似死代码 %d 处（以 go build 为准）:" % len(dead))
         for name, fp in dead:
             print(f"  {name}  <-  {os.path.relpath(fp, root)}")

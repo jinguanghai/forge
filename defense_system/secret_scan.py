@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Secret security self-check (secret_scan.py) - Forge defense system
-Usage:
-  python secret_scan.py                 # scan the working area (default)
-  python secret_scan.py --git-hist      # also scan git history (committed then deleted)
-  python secret_scan.py --loose         # include weak-signal patterns (more false positives)
-  python secret_scan.py <paths...>      # custom scan paths
-  python secret_scan.py --archive       # include _archive history (slow, more false positives)
-  # skipped by default: _archive (historical) / toolchain caches / third-party libs
-Exit codes: 0=no real secrets  1=real secrets found  2=error
+密钥安全自检 (secret_scan.py) - 铸剑炉防御体系
+用法:
+  python secret_scan.py                 # 默认扫描 D:\\forge 工作区
+  python secret_scan.py --git-hist      # 额外扫描 git 历史(提交过又删掉的)
+  python secret_scan.py --loose         # 包含弱信号模式(误报较多)
+  python secret_scan.py <路径...>       # 自定义扫描路径
+  python secret_scan.py --archive       # 含 _archive 历史归档(慢, 误报多)
+  # 默认跳过: _archive(历史归档) / 工具链缓存 / 第三方库
+退出码: 0=无真实密钥  1=发现真实密钥  2=错误
 """
 import os, re, sys, subprocess, time
 
@@ -28,16 +28,16 @@ MAX_FILE_SIZE = 10 * 1024 * 1024
 
 STRONG_PATTERNS = [
     ('DeepSeek/OpenAI', r'sk-[A-Za-z0-9]{20,}'),
-    ('GitHub token',      r'gh[pousr]_[A-Za-z0-9]{20,}'),
-    ('GitHub fine-grained', r'github_pat_[A-Za-z0-9_]{20,}'),
+    ('GitHub令牌',       r'gh[pousr]_[A-Za-z0-9]{20,}'),
+    ('GitHub细粒度',     r'github_pat_[A-Za-z0-9_]{20,}'),
     ('NVIDIA',           r'nvapi-[A-Za-z0-9_-]{20,}'),
-    ('AWS access key',    r'AKIA[0-9A-Z]{16}'),
+    ('AWS访问密钥',      r'AKIA[0-9A-Z]{16}'),
     ('Google',           r'AIza[0-9A-Za-z_-]{35}'),
     ('Slack',            r'xox[baprs]-[0-9A-Za-z-]{10,}'),
-    ('Private key block', r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'),
+    ('私钥块',           r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'),
 ]
 LOOSE_PATTERNS = [
-    ('Possible credential assignment', r'(?:api[_-]?key|apikey|secret|access[_-]?token|passwd|password)\s*[:=]\s*["\']?[A-Za-z0-9_\-./+]{20,}'),
+    ('疑似凭据赋值', r'(?:api[_-]?key|apikey|secret|access[_-]?token|passwd|password)\s*[:=]\s*["\']?[A-Za-z0-9_\-./+]{20,}'),
 ]
 PLACEHOLDER_HINTS = ['your-', 'your_', 'xxxx', '<your', 'example', 'sample',
                      'placeholder', 'replace', 'dummy', 'fake', 'demo',
@@ -52,12 +52,12 @@ def is_binary(content):
     return b'\x00' in content[:4096]
 
 def _looks_fake(val):
-    """Value characteristics: fake keys for testing/examples"""
+    """值特征: 测试/示例用假密钥"""
     v = val.lower()
     if v.startswith(('sk-abc', 'sk-xyz', 'sk-test', 'sk-123', 'sk-000', 'sk-111',
                      'ghp_abc', 'ghp_xxx', 'github_pat_aaaa')):
         return True
-    if re.search(r'(.)\1{4,}', val):      # 5+ identical chars in a row (e.g. AAAAAAA)
+    if re.search(r'(.)\1{4,}', val):      # 5+ 个相同字符连续(如 AAAAAAA)
         return True
     if 'example' in v or 'xxxx' in v or 'test' in v or 'dummy' in v:
         return True
@@ -70,7 +70,7 @@ def is_placeholder(line, val=''):
     return bool(val) and _looks_fake(val)
 
 def scan_file(path, loose=False):
-    # .env is the expected secret storage (and is protected by .gitignore), not a leak
+    # .env 文件是预期的密钥存储位置(且被 .gitignore 保护), 不算泄露
     if os.path.basename(path).startswith('.env'):
         return []
     hits = []
@@ -91,7 +91,7 @@ def scan_file(path, loose=False):
         for name, pat in pats:
             for m in re.finditer(pat, line):
                 val = m.group(0)
-                sev = 'placeholder' if is_placeholder(line, val) else 'danger'
+                sev = '占位符' if is_placeholder(line, val) else '危险'
                 hits.append((sev, name, mask(val), i, line.strip()[:100]))
     return hits
 
@@ -157,7 +157,7 @@ def main():
     roots = paths if paths else DEFAULT_ROOTS
 
     print('=' * 56)
-    print('  Secret security self-check  (secret_scan)')
+    print('  密钥安全自检  (secret_scan)')
     print('=' * 56)
     t0 = time.time()
     all_findings = []
@@ -165,16 +165,16 @@ def main():
     saved_skip = set(SKIP_DIR_NAMES)
     if scan_archive:
         SKIP_DIR_NAMES.discard('_archive')
-        # toolchain (Go toolchain ~18k files) always skipped: avoids timeout and has no user-secret value
+        # toolchain(Go工具链1.8万文件)永远跳过, 避免超时且无用户密钥价值
     try:
         for root in roots:
             if not os.path.isdir(root):
-                print('[error] path does not exist: %s' % root)
+                print('[错误] 路径不存在: %s' % root)
                 return 2
         t, s, f = scan_root(root, loose)
         tot_files += t; tot_skip += s
-        print('\nScanning: %s' % root)
-        print('  files %d, skipped %d (binary/large/third-party dirs)' % (t, s))
+        print('\n扫描: %s' % root)
+        print('  文件 %d 个, 跳过 %d (二进制/大文件/第三方目录)' % (t, s))
         all_findings.extend(f)
 
     finally:
@@ -191,29 +191,29 @@ def main():
                     repos.add(dirpath)
         for repo in sorted(repos):
             n, h = scan_git_history(repo, loose)
-            print('\ngit history: %s  (%d commits)' % (repo, n))
+            print('\ngit历史: %s  (%d 个提交)' % (repo, n))
             if h:
                 hist_hits.extend((repo,) + x for x in h)
 
     print('\n' + '-' * 56)
-    danger = [x for x in all_findings if x[1][0] == 'danger']
-    ph = [x for x in all_findings if x[1][0] == 'placeholder']
-    print('workspace hits: danger %d, placeholder %d' % (len(danger), len(ph)))
+    danger = [x for x in all_findings if x[1][0] == '危险']
+    ph = [x for x in all_findings if x[1][0] == '占位符']
+    print('工作区命中: 危险 %d 处, 占位符 %d 处' % (len(danger), len(ph)))
     for fp, (sev, name, val, ln, ctx) in danger:
-        print('  [DANGER] %s:%d  %s  %s' % (os.path.relpath(fp), ln, name, val))
+        print('  [危险] %s:%d  %s  %s' % (os.path.relpath(fp), ln, name, val))
     for fp, (sev, name, val, ln, ctx) in ph:
-        print('  [PLACEHOLDER] %s:%d  %s  %s' % (os.path.relpath(fp), ln, name, val))
+        print('  [占位符] %s:%d  %s  %s' % (os.path.relpath(fp), ln, name, val))
     if git_hist:
-        print('git history hits: %d' % len(hist_hits))
+        print('git历史命中: %d 处' % len(hist_hits))
         for repo, sha, name, val in hist_hits:
-            print('  [HISTORY] %s %s  %s  %s' % (os.path.basename(repo), sha, name, val))
+            print('  [历史] %s %s  %s  %s' % (os.path.basename(repo), sha, name, val))
     if not danger and not hist_hits:
-        print('\nresult: no real secrets found')
+        print('\n结果: 未发现真实密钥')
         rc = 0
     else:
-        print('\nresult: %d real secret(s) found, handle immediately!' % (len(danger) + len(hist_hits)))
+        print('\n结果: 发现 %d 处真实密钥, 请立即处理!' % (len(danger) + len(hist_hits)))
         rc = 1
-    print('elapsed: %.1fs' % (time.time() - t0))
+    print('耗时: %.1fs' % (time.time() - t0))
     return rc
 
 if __name__ == '__main__':

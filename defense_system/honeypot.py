@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Honeypot: emulate SSH/HTTP services, entrap and record attacker behavior. Listens locally only; records, never retaliates."""
+"""蜜罐: 模拟SSH/HTTP服务, 诱捕并记录攻击者行为. 只监听本机, 记录不反击."""
 import socket, threading, datetime, json, os, sys
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
@@ -55,7 +55,7 @@ def _serve(port, handler, name):
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("0.0.0.0", port))
     s.listen(50)
-    print(f"[honeypot] {name} listening on 0.0.0.0:{port}")
+    print(f"[honeypot] {name} 监听 0.0.0.0:{port}")
     while True:
         c, a = s.accept()
         threading.Thread(target=handler, args=(c, a), daemon=True).start()
@@ -63,11 +63,11 @@ def _serve(port, handler, name):
 def main():
     threading.Thread(target=_serve, args=(PORT_SSH, ssh_handler, "SSH"), daemon=True).start()
     threading.Thread(target=_serve, args=(PORT_HTTP, http_handler, "HTTP"), daemon=True).start()
-    print("[honeypot] running, Ctrl+C to exit. Log:", LOG)
+    print("[honeypot] 运行中, Ctrl+C 退出. 日志:", LOG)
     try:
         threading.Event().wait()
     except KeyboardInterrupt:
-        print("[honeypot] stopped")
+        print("[honeypot] 已停止")
 
 if __name__ == "__main__":
     main()

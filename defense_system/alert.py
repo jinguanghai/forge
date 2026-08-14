@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Alert: file log + optional Webhook/email (configure in config.json; local log only by default)."""
+"""告警: 文件日志 + 可选Webhook/邮件(需在config.json配置, 默认只写本地日志)."""
 import json, os, datetime, sys
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
@@ -21,17 +21,17 @@ def send(alerts):
         for a in alerts:
             rec = dict(a); rec["alerted_at"] = now
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    print(f"[alert] {len(alerts)} alert(s) logged -> {ALERT_LOG}")
-    # Webhook example (disabled by default)
+    print(f"[alert] 已记录 {len(alerts)} 条告警 -> {ALERT_LOG}")
+    # Webhook 示例(默认关闭)
     if cfg.get("webhook_url"):
         import urllib.request
-        payload = json.dumps({"text": f"[defense] {len(alerts)} alert(s): " + "; ".join(a['detail'] for a in alerts[:3])}).encode()
+        payload = json.dumps({"text": f"[防守反击] {len(alerts)}条告警: " + "; ".join(a['detail'] for a in alerts[:3])}).encode()
         req = urllib.request.Request(cfg["webhook_url"], data=payload, headers={"Content-Type": "application/json"})
         try:
             urllib.request.urlopen(req, timeout=5)
-            print("[alert] Webhook pushed")
+            print("[alert] Webhook已推送")
         except Exception as e:
-            print("[alert] Webhook push failed:", e)
+            print("[alert] Webhook推送失败:", e)
     return len(alerts)
 
 if __name__ == "__main__":

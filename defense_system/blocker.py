@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Auto-block: generate firewall rules from alerts (commands only; dry_run on by default; never overreach)."""
+"""自动阻断: 根据告警生成防火墙规则(只生成命令, dry_run模式默认开启, 绝不越权执行)."""
 import os, json, datetime, sys
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
@@ -18,20 +18,20 @@ def save_banlist(items):
         json.dump(items, f, ensure_ascii=False, indent=2)
 
 def build_block_cmds(ip, sev="medium", dry_run=True):
-    """Generate block commands. iptables on Linux, netsh on Windows. dry_run=True prints commands without executing."""
+    """生成阻断命令. Linux用iptables, Windows用netsh. dry_run=True只输出命令不执行."""
     cmds = []
     if os.name == "posix":
         cmds.append(f"iptables -A INPUT -s {ip} -j DROP")
         cmds.append(f"iptables -A INPUT -s {ip} -p tcp --dport 22 -j DROP")
     else:
         cmds.append(f'netsh advfirewall firewall add rule name="FORGE_BLOCK_{ip}" dir=in action=block remoteip={ip}')
-    action = "generated" if dry_run else "executed"
+    action = "生成" if dry_run else "执行"
     for c in cmds:
         print(f"[blocker] ({action}) {c}")
     return cmds
 
 def apply_alerts(alerts, dry_run=True):
-    """Dedupe alert IPs, add to blacklist and generate block commands"""
+    """对告警IP去重后加入黑名单并生成阻断命令"""
     banned = _load_banlist()
     known = {b["ip"] for b in banned}
     now = datetime.datetime.now().isoformat(timespec="seconds")
@@ -45,9 +45,9 @@ def apply_alerts(alerts, dry_run=True):
         build_block_cmds(ip, a["sev"], dry_run=dry_run)
     if added:
         save_banlist(banned)
-        print(f"[blocker] {len(added)} new IP(s) in blacklist, total {len(banned)}")
+        print(f"[blocker] 黑名单新增 {len(added)} 条, 当前共 {len(banned)} 条")
     else:
-        print(f"[blocker] nothing new, blacklist size {len(banned)}")
+        print(f"[blocker] 无新增, 当前黑名单 {len(banned)} 条")
     return added
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tracing: aggregate all behavior of an attacker IP -> fingerprint / timeline / risk score -> Markdown report."""
+"""溯源分析: 汇总攻击者IP全部行为 -> 指纹/时间线/风险评分 -> Markdown报告."""
 import json, os, datetime, collections, sys
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
@@ -38,19 +38,19 @@ def trace_ip(ip, events):
     }
 
 def gen_report(reports, outfile=None):
-    lines = ["# Attack Trace Report", "", f"Generated at: {datetime.datetime.now().isoformat(timespec='seconds')}", ""]
+    lines = ["# 攻击溯源报告", "", f"生成时间: {datetime.datetime.now().isoformat(timespec='seconds')}", ""]
     for r in reports:
-        sev = "🔴 HIGH" if r["risk_score"] >= 50 else ("🟠 MEDIUM" if r["risk_score"] >= 20 else "🟡 LOW")
-        lines += [f"## Attacker {r['ip']}  [{sev}]", "",
-                  f"- Risk score: **{r['risk_score']}/100**",
-                  f"- Events: {r['events']}",
-                  f"- Time span: {r['time_span']}",
-                  f"- Services probed: {r['services']}",
-                  f"- Source ports: {r['src_ports']}",
-                  f"- UA fingerprints: {r['uas']}",
+        sev = "🔴高危" if r["risk_score"] >= 50 else ("🟠中危" if r["risk_score"] >= 20 else "🟡低危")
+        lines += [f"## 攻击源 {r['ip']}  [{sev}]", "",
+                  f"- 风险评分: **{r['risk_score']}/100**",
+                  f"- 事件数: {r['events']}",
+                  f"- 时间跨度: {r['time_span']}",
+                  f"- 探测服务: {r['services']}",
+                  f"- 源端口: {r['src_ports']}",
+                  f"- UA指纹: {r['uas']}",
                   ""]
         if r["payloads"]:
-            lines += ["### Attack payload samples", ""]
+            lines += ["### 攻击载荷样本", ""]
             for p in r["payloads"]:
                 lines += [f"```", p[:300], "```", ""]
         lines += ["---", ""]
@@ -59,7 +59,7 @@ def gen_report(reports, outfile=None):
         os.makedirs(os.path.dirname(outfile), exist_ok=True)
         with open(outfile, "w", encoding="utf-8") as f:
             f.write(md)
-        print("[tracer] report generated:", outfile)
+        print("[tracer] 报告已生成:", outfile)
     return md
 
 def run(events, outdir=None):

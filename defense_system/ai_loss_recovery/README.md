@@ -1,18 +1,9 @@
-# AI Hallucination Damage Recovery Toolkit
+# AI幻觉致损追责工具箱
 
-A complete evidence & action kit for recovering losses caused by AI "hallucinations"
-that led to erroneous automated decisions (e.g., wrongful fund transfers).
+AI出现幻觉导致资金损失时的完整维权工具包：
+- 01_日志索取函_模板.md — 逼对方交出AI决策日志（幻觉铁证）
+- 02_投诉函_模板.md — 监管投诉文书
+- 03_证据清单_模板.md — 证据组织与时间线
+- 04_行动路线图.md — 30天行动计划
 
-> **Note:** The template documents are written in **Chinese** and target **China's legal
-> system** (Civil Code, Personal Information Protection Law, regulator hotline 12378, etc.).
-> They are kept verbatim as reference material; adapt them to your own jurisdiction.
-
-## Contents
-
-- `01_日志索取函_模板.md` — Formal letter demanding the AI decision logs (the "hallucination iron evidence")
-- `02_投诉函_模板.md` — Complaint letter to the regulator
-- `03_证据清单_模板.md` — Evidence organization & timeline
-- `04_行动路线图.md` — 30-day action plan
-
-Core logic: every AI decision leaves a log → hallucination is provable → a system defect
-is the operator's liability → failure to produce logs shifts the burden onto the operator.
+核心逻辑：AI一切决策有日志 → 幻觉可证 → 系统缺陷=运营方责任 → 举证不能的后果由对方承担。

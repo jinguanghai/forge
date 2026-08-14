@@ -1,60 +1,60 @@
-# Forge Defense & Counter-Response Charter
-> Version 1.0 · 2026-08-01 · Formal codification of the user's principles
+# 铸剑炉防守反击宪章
+> 版本 1.0 · 2026-08-01 · 用户原则的正式落地
 
-## 1. Statement of Principles (the user's own words)
+## 一、原则宣言（用户原话，一字不改）
 
-> **My core principle is simple: I am a good person, I do not harm others — but others must not harm me either. If you intend me harm, I have countermeasures ready.**
+> **核心，我就是一个原则，我是好人，我不害人，但别人也不要害我，你起坏心害我，我这里有反制手段。**
 
-## 2. Three Iron Rules
+## 二、原则的三条铁律
 
-| # | Rule | Implementation |
-|---|------|----------------|
-| 1 | **I am good and do no harm** | Every action in this system acts only on **our own assets**; no active scanning, no intrusion, no probing of any third-party system |
-| 2 | **Others must not harm me either** | Honeypot entrapment, intrusion detection, integrity guardian — discover **and leave evidence of** actions that harm us |
-| 3 | **If you intend me harm, I have countermeasures** | Escalating response: log → block → trace → evidence → legal action, all within the legal framework |
+| # | 铁律 | 落地方式 |
+|---|------|----------|
+| 1 | **我是好人，我不害人** | 体系内所有动作只作用于**自己的资产**；不主动扫描、不主动入侵、不探测任何第三方系统 |
+| 2 | **别人也不要害我** | 蜜罐诱捕、入侵检测、完整性守门人——把"害我"的动作**发现并留下证据** |
+| 3 | **你起坏心害我，我这里有反制手段** | 分级反制：记录 → 阻断 → 溯源 → 取证 → 法律处置，全部在合法框架内 |
 
-## 3. Escalating Countermeasures (matching the attacker's intent)
+## 三、反制手段分级（对应攻击者的"坏心"程度）
 
-| Level | Attack behavior | Our response | Tools | Legality |
-|-------|-----------------|--------------|-------|----------|
-| L1 Harassment | Port scan / probing | Record fingerprint + source, warn in logs | honeypot.py, ids.py | ✅ Purely defensive |
-| L2 Intrusion | Brute force / exploit | Auto-block (ban IP), honeypot entrapment | blocker.py, honeypot.py | ✅ Acts on our own system |
-| L3 Compromised | File tampering / backdoor | Integrity guardian alert (hourly) | forge_guard.py | ✅ Self-check, self-evidence |
-| L4 Adversarial | Persistent attack / data theft | Trace & collect evidence → Markdown report → **hand to cyber-security authorities / legal channel** | tracer.py | ✅ By law |
+| 级别 | 攻击行为 | 我的反制 | 工具 | 合法性 |
+|------|----------|----------|------|--------|
+| L1 骚扰 | 端口扫描/探测 | 记录指纹+来源，警告日志 | honeypot.py, ids.py | ✅ 纯防御 |
+| L2 入侵 | 暴力破解/漏洞利用 | 自动阻断（封IP），蜜罐诱捕 | blocker.py, honeypot.py | ✅ 作用在自己系统 |
+| L3 得手 | 篡改文件/植入后门 | 完整性守门人报警（每小时） | forge_guard.py | ✅ 自检自证 |
+| L4 对抗 | 持续攻击/数据窃取 | 溯源取证→Markdown报告→**移交网安部门/法律途径** | tracer.py | ✅ 依法处置 |
 
-## 4. Hard Red Lines (this system never crosses)
+## 四、边界红线（本体系永不越线）
 
-1. ❌ No counter-attack on the attacker's machine (even with known IP)
-2. ❌ No DDoS retaliation, no destruction of other systems
-3. ❌ No probing of any unauthorized third-party target
-4. ❌ No identity concealment for any network activity
-5. ✅ All evidence goes through **reporting / legal channels** — the attacker faces a court, not our own hands
+1. ❌ 不反向攻击攻击者的机器（哪怕知道对方IP）
+2. ❌ 不DDoS报复、不破坏对方系统
+3. ❌ 不探测任何未授权第三方目标
+4. ❌ 不隐藏自身身份从事任何网络行为
+5. ✅ 一切证据走**报案/法律**渠道，把攻击者送上法庭，而不是自己动手
 
-## 5. Why "Countermeasure" Stops at the Law
+## 五、为什么"反制"止步于法律
 
-- Private revenge = turning from victim into offender; you lose half the case before it starts
-- Attacker IPs are mostly proxies/zombies; striking back hits innocent machines
-- A complete evidence chain handed to the authorities yields far heavier punishment than private vendettas — with zero risk to ourselves
+- 私力报复 = 从受害者变成违法者，法律上先输一半
+- 攻击者IP多为跳板/肉鸡，打回去打的是无辜者
+- 证据链完整交给网安部门，惩罚力度远大于私斗，且自己零风险
 
-## 6. System File Map
+## 六、体系文件地图
 
 ```
 defense_system/
-├── honeypot.py       Honeypot (entrapment, records only)
-├── ids.py            Intrusion detection (rule engine)
-├── blocker.py        Auto-blocking (dry_run by default)
-├── tracer.py         Trace & evidence → incident report
-├── alert.py          Alerting (log / Webhook / email)
-├── main.py           Monitoring orchestration
-├── forge_guard.py    Forge guardian (integrity monitoring)
-├── forge_baseline.json   Hash baseline of 14 files
-├── config.json       Thresholds and switches
-└── test_sim.py       Local simulation test
+├── honeypot.py       蜜罐（诱捕，只记录）
+├── ids.py            入侵检测（规则引擎）
+├── blocker.py        自动阻断（默认dry_run）
+├── tracer.py         溯源取证→报案报告
+├── alert.py          告警（日志/Webhook/邮件）
+├── main.py           监控编排
+├── forge_guard.py    铸剑炉守门人（完整性监控）
+├── forge_baseline.json  14文件哈希基线
+├── config.json       阈值与开关
+└── test_sim.py       本地模拟测试
 ```
 
-## 7. Daily Operations
+## 七、日常操作
 
-- Hourly: guardian auto integrity check (scheduled task ForgeGuardHourly)
-- Under attack: `python main.py --once` single-round inspection
-- For evidence: `python tracer.py <event-id>` generates a Markdown report
-- On VPS: set `dry_run` to `false` in `config.json` to enable real blocking
+- 每小时：守门人自动完整性检查（计划任务 ForgeGuardHourly）
+- 攻击发生时：`python main.py --once` 单轮巡检
+- 取证时：`python tracer.py <事件ID>` 生成 Markdown 报告
+- 上VPS后：config.json 中 `dry_run` 改 `false` 启用真实阻断

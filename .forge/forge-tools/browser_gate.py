@@ -1,22 +1,23 @@
 # -*- coding: utf-8 -*-
-"""browser_gate: Forge browser gate (Playwright atomic operations)
-Input: {"action":"navigate|get_text|click|type|screenshot|extract|wait|close|status", ...}
-Output: {"ok":true,"result":...} or {"ok":false,"error":"..."}
-Security: read-only by default; click/type require explicit commands; no downloading executables; headed by default, headless configurable"""
+"""browser_gate: 铸剑炉浏览器gate (Playwright原子操作)
+输入: {"action":"navigate|get_text|click|type|screenshot|extract|wait|close|status", ...}
+输出: {"ok":true,"result":...} 或 {"ok":false,"error":"..."}
+安全: 只读为主; 点击/输入需显式指令; 禁止下载执行文件; 默认有头可配headless
+"""
 import sys, json, io, os, time
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 try:
     from playwright.sync_api import sync_playwright
 except Exception as e:
-    print(json.dumps({"ok": False, "error": f"playwright not installed: {e}"}, ensure_ascii=False)); sys.exit(0)
+    print(json.dumps({"ok": False, "error": f"playwright未安装: {e}"}, ensure_ascii=False)); sys.exit(0)
 
 _ctx = {"channel": "msedge"}
 
 _CN_DOMAINS = {".cn", "baidu.com", "qq.com", "163.com", "taobao.com", "tmall.com", "jd.com",
               "zhihu.com", "weibo.com", "douyin.com", "bilibili.com", "sina.com.cn", "sohu.com",
               "360.cn", "xinhuanet.com", "people.com.cn", "csdn.net", "gitee.com", "aliyun.com",
-              "tencent.com", "bytedance.com", "meituan.com", "dianping.com", "xueqiu.com"}
+              "tencent.com", "bytedance.com", "meituan.com", "dianping.com", "xueqiu.com", "bing.com", "microsoft.com"}
 
 def _need_proxy(url):
     from urllib.parse import urlparse
@@ -41,9 +42,12 @@ def _http_bridge_alive():
         return False
 
 def _map_proxy(p):
-    """Edge does not support socks5h (ERR_NO_SUPPORTED_PROXIES); local bridge (1081) forwards HTTP CONNECT as socks5h (DNS resolved on VPS side)"""
-    if p and p.startswith(("socks5://", "socks5h://")) and _http_bridge_alive():
-        return "http://127.0.0.1:1081"
+    """Edge 不支持 socks5h(ERR_NO_SUPPORTED_PROXIES); 本地bridge(1081)把 HTTP CONNECT 转发为 socks5h(VPS端解析DNS);
+    1081在线→走http bridge(Edge兼容); 否则回退socks5(Playwright原生支持, 去掉h前缀)"""
+    if p and p.startswith(("socks5://", "socks5h://")):
+        if _http_bridge_alive():
+            return "http://127.0.0.1:1081"
+        return "socks5://" + p.split("://", 1)[1]  # playwright不支持socks5h前缀
     return p
 
 def _ensure(proxy=None):
@@ -54,11 +58,9 @@ def _ensure(proxy=None):
     headless = _ctx.get("headless", False)
     kw = {}
     if proxy:
-        kw["proxy"] = {"server": _map_proxy(proxy)}  # socks5h passthrough: DNS resolved proxy-side to avoid pollution
+        kw["proxy"] = {"server": _map_proxy(proxy)}  # socks5h原样: 代理端解析DNS防污染
     else:
-        # direct: must prevent chromium from inheriting system proxy env vars
-        for k in ("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy"):
-            os.environ.pop(k, None)
+        # 直连: --no-proxy-server阻止chromium读系统代理; 但不清环境变量(handle里_env_proxy()还要读取)
         kw["args"] = ["--no-proxy-server"]
     browser = pw.chromium.launch(headless=headless, channel=_ctx.get("channel", "msedge"), **kw)
     page = browser.new_page()
@@ -67,9 +69,15 @@ def _ensure(proxy=None):
     return page
 
 def _close():
-    for k in ("page", "browser", "pw"):
+    # page/browser 用 .close(); pw(Playwright实例) 必须用 .stop() —— .close()不存在,
+    # 若被except吞掉会导致pw泄漏, 第二次sync_playwright().start()报asyncio错误
+    for k in ("page", "browser"):
         v = _ctx.pop(k, None)
         try: v.close() if v else None
+        except Exception: pass
+    v = _ctx.pop("pw", None)
+    if v is not None:
+        try: v.stop()
         except Exception: pass
     return {"ok": True, "result": "closed"}
 
@@ -93,7 +101,7 @@ def handle(req):
             try:
                 page.goto(url, wait_until=wu, timeout=to)
             except Exception as e:
-                return {"ok": False, "error": f"navigate failed({type(e).__name__}): {str(e)[:300]}"}
+                return {"ok": False, "error": f"navigate失败({type(e).__name__}): {str(e)[:300]}"}
             page.wait_for_timeout(int(req.get("wait_ms", 400)))
             out = {"url": page.url, "title": page.title()[:200]}
             try:
@@ -114,12 +122,12 @@ def handle(req):
             elif req.get("text"):
                 page.get_by_text(req["text"], exact=False).first.click(timeout=8000)
             else:
-                return {"ok": False, "error": "click needs selector or text"}
+                return {"ok": False, "error": "click需要selector或text"}
             page.wait_for_timeout(int(req.get("wait_ms", 800)))
             return {"ok": True, "result": {"clicked": sel or req.get("text"), "url": page.url, "title": page.title()}}
         if act == "type":
             sel = req.get("selector")
-            if not sel: return {"ok": False, "error": "type needs selector"}
+            if not sel: return {"ok": False, "error": "type需要selector"}
             page.click(sel, timeout=8000)
             page.fill(sel, str(req.get("value", "")))
             if req.get("enter"):
@@ -143,7 +151,7 @@ def handle(req):
             return {"ok": True, "result": "waited"}
         if act == "status":
             return {"ok": True, "result": {"opened": "page" in _ctx, "url": _ctx["page"].url if "page" in _ctx else None}}
-        return {"ok": False, "error": f"unknown action: {act}"}
+        return {"ok": False, "error": f"未知action: {act}"}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:500]}"}
 
@@ -155,7 +163,7 @@ def main():
     _ctx["headless"] = bool(req.get("headless", False))
     if req.get("channel"): _ctx["channel"] = req["channel"]
     if req.get("proxy"): _ctx["proxy"] = req["proxy"]
-    if "steps" in req:  # batch: sequential steps on the same page, so the LLM can decide multiple steps at once
+    if "steps" in req:  # 批处理: 同一页面顺序执行, 供LLM一次决策多步
         outs = []
         for st in req["steps"]:
             outs.append(handle(st))
