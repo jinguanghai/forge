@@ -1,30 +1,75 @@
-# 铸剑炉 (Forge)
+# Forge — General-Purpose Digital Agent
 
-通用数字智能体 — 单工具驱动多语言编译器沙箱。
+> *The forge that shapes software.* One tool. Eighteen gates. Self-evolving.
 
-铸剑炉是一个自托管的 AI 智能体引擎：一个名为 `forge` 的工具（多语言编译器沙箱，18 种 Gate），
-配合 LLM 编排层，即可完成编码、系统管理、文件处理、数据分析、网络操作与自动化等数字世界任务。
+**Forge** is a self-hosted AI agent engine built on a radical design: **a single tool** (`forge`) that compiles, executes, and destroys code across **18 language & logic gates**, paired with an LLM orchestration layer. Generation and execution are strictly separated — the LLM brain writes code, the forge runs it, and the verdict feeds back. No hidden tools, no magic.
 
-## 核心特性
+## Highlights
 
-- **单工具架构**：所有能力经由唯一工具 `forge`（编译执行、用完即销毁），生成与执行分离
-- **18 种 Gate**：python / go / sh / node / deno / rust / tcc / math / logic / system /
-  knowledge / regex / chain / eprover / repair / self / tcm / browser
-- **中文原生**：面向中文用户的思维与输出，中医知识库专项支持（tcm gate）
-- **自托管**：.env 配置，可接入 DeepSeek 等 LLM 提供商
+- Single-tool architecture — every capability flows through one `forge` tool; generated code is compiled, executed, and destroyed on the spot
+- 18 tool gates — python / go / sh / node / deno / rust / tcc / math / logic / system / knowledge / regex / chain / eprover / repair / self / tcm / browser
+- LLM brain + code body — the agent reasons in real time while the body stays deterministic; `repair` and `self` gates let the agent improve its own source code
+- Defense in depth — integrity guard, review gate, baseline audit (`defense_system/`)
+- Robust memory — atomic store (tmp+rename), fold/recall engine, event log
+- Streaming LLM client — 3-tier reasoning effort, smart routing, provider config via `.env`
+- Cross-platform — Windows first-class; platform files isolate OS specifics
 
-## 快速开始
+## Quick Start
 
-1. 克隆仓库并准备 Go 1.26+ 工具链
-2. 复制 `.env.example` 为 `.env`，填入 LLM API Key
-3. `go build` 编译主程序，运行即可
+```bash
+git clone https://github.com/jinguanghai/forge.git
+cd forge
+cp .env.example .env      # set DEEPSEEK_API_KEY (DeepSeek or any OpenAI-compatible)
+go build -o forge .
+./forge
+```
 
-## 安全说明
+## Tool Gates
 
-- 本仓库仅包含引擎源码与工具实现，**不含任何密钥、个人数据或私有知识库**
-- 私有数据（如个人知识库、医案、古籍数据等）永不进入本仓库
-- 使用前请自行审查 `.env` 与运行时文件，确保不被提交
+| Gate | Engine | Purpose |
+|---|---|---|
+| `python` | Python 3 | general scripting, data & file processing |
+| `go` / `rust` / `tcc` | Go / Rust / TinyCC | compiled execution |
+| `sh` | shell | system commands |
+| `node` / `deno` | Node / Deno | JS/TS execution |
+| `math` | CAS | symbolic computation & verification |
+| `logic` | SMT solver | prove / equivalence / consistency checks |
+| `system` | model checker | state machines, invariants, deadlock |
+| `knowledge` | KB query | knowledge-base retrieval |
+| `regex` | regex engine | validation with fullmatch semantics |
+| `chain` | orchestrator | conditional multi-gate pipelines |
+| `eprover` | E prover | TPTP first-order theorem proving |
+| `repair` | analyzer | code repair suggestions |
+| `self` | self-mod | agent self-improvement |
+| `tcm` | TCM gate | herb-pair & pattern queries (data self-hosted) |
+| `browser` | web | browser automation |
+
+## Project Layout
+
+| File | Role |
+|---|---|
+| `main.go` | entrypoint, agent loop, self-replacement |
+| `agent.go` | orchestration, infinite loop, triple protection |
+| `forge.go` | core engine: 18 gates, cache, self-mod |
+| `llm.go` | streaming client (DeepSeek & OpenAI-compatible) |
+| `config.go` | `.env` configuration |
+| `ux.go` | terminal rendering |
+| `memory_*.go` | atomic store, fold/recall, event log |
+| `guard*.go` | defense: integrity check, review gate |
+| `health_report.go` | self-diagnostics |
+| `upgrade.go` | self-update pipeline |
+| `defense_system/` | guard scripts (check / audit / init) |
+
+## Safety & Privacy
+
+- This repository contains **engine source code only** — no API keys, personal data, or private knowledge bases
+- Private data (personal knowledge, medical records, corpus data) **never** enters this repository
+- Review `.env` and runtime files before committing anything of your own
 
 ## License
 
 [MIT](LICENSE) © 2026 jinguanghai
+
+---
+
+[中文版](README.zh.md)
