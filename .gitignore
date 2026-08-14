@@ -1,0 +1,129 @@
+# 铸剑炉 .gitignore
+
+# Binaries
+forge.exe
+铸剑炉.exe
+*.exe
+
+# Environment (contains API keys)
+.env
+
+# Backup files
+*.bak
+*.bak_*
+*.old
+*.old*
+*.v2.bak
+*.pre_ping_bak
+
+# Go build artifacts
+*.o
+*.a
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Temp / test output
+_test_*/
+_*/
+*.tmp
+test_out*.txt
+test_full*.txt
+test_result*.txt
+
+# Forge internal (runtime, not source)
+.forge/history
+.forge/test_*
+.forge/memory/
+
+# Large files
+*.tar.xz
+rust.tar.xz
+
+# Dependencies in-tree (go/ is toolchain, deno/ is runtime)
+go/go/
+deno/
+
+# Python cache
+__pycache__/
+*.pyc
+
+
+# 铸剑炉守门人补充 (2026-08-01)
+# Runtime state (may contain memory/context)
+memory.json
+forge_cache.gob
+
+# --- 以下由铸剑炉 20260802 补强 (防泄露+防脏数据) ---
+.go/
+.forge/history*
+.forge/*.old
+*.bak*
+.forge/test_dir/
+.forge/test_out.txt
+.forge/forgecheck.go
+.forge/pscheck.go
+.forge/shellcheck.go
+.forge/rendertest.go
+# --- 20260802 建仓前补强：defense_system 动态数据不入库 ---
+defense_system/*.log
+defense_system/logs/
+defense_system/reports/
+defense_system/forge_baseline*.json
+defense_system/trace_demo_report.json
+
+# --- 20260802 建仓后清理：编译产物与运行时数据 ---
+.forge/forge-tools/*_gate
+.forge/episodic_memory.json
+.forge/backup/
+tcc/tcc/libtcc.dll
+media_manager/hit_predict.json
+media_manager/library.json
+media_manager/real_hit_rank.json
+media_manager/real_scan.json
+
+.forge/forge-tools/tcc_gate_src/tcc_embed/libtcc.dll
+
+# 必须显式写独立行 (tcc/libtcc.dll 不被 tcc/tcc/libtcc.dll 规则覆盖)
+tcc/libtcc.dll
+
+# --- 20260803 输入端修复后补强：会话临时目录不入库（含 gh_token 等敏感临时文件） ---
+.forge-temp/
+
+# --- 20260805 缓存度量: 运行时数据不入库 ---
+cache_stats.jsonl
+
+# --- 20260807 远端备份前补强：产物/运行时/个人知识库不入库 ---
+forge.exe.g1_old
+forge.exe~
+.forge/checkpoint.json
+.forge-tools/
+knowledge/
+
+# 隐私与泄露防护(20260807): 舌诊照片/测试样本不入库
+test_scripts/
+defense_system/test_secret_scan/fake_leak.py
+
+# 守卫事件日志 (运行时文件, 取证档案在本机即可)
+.forge/guard_log.jsonl
+
+# runtime artifacts (20260808)
+.forge/forge-tools/compilers.json
+cache_stats.jsonl
+.forge/test_out.txt
+
+# 运行时产物不入库
+.forge/events.jsonl
+.forge/events.jsonl.*
+.forge/health_watermark
+.forge/updates/
