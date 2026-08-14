@@ -3,7 +3,7 @@
 """
 密钥安全自检 (secret_scan.py) - 铸剑炉防御体系
 用法:
-  python secret_scan.py                 # 默认扫描 D:\\forge 工作区
+  python secret_scan.py                 # 默认扫描 D:\\path\\to\\forge 工作区
   python secret_scan.py --git-hist      # 额外扫描 git 历史(提交过又删掉的)
   python secret_scan.py --loose         # 包含弱信号模式(误报较多)
   python secret_scan.py <路径...>       # 自定义扫描路径

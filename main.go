@@ -258,7 +258,7 @@ func main() {
 		}
 
 		// Multi-line continuation (trailing backslash). Windows paths like
-		// D:\\forge\\ end with a backslash but must NOT be treated as a
+		// C:\\path\\to\\forge\\ end with a backslash but must NOT be treated as a
 		// continuation, otherwise pasting a path enters multiline mode.
 		trimmedLine := strings.TrimSpace(line)
 		if !pastedMultiLine && strings.HasSuffix(trimmedLine, "\\") {

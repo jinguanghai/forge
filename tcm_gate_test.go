@@ -8,7 +8,7 @@ import (
 
 func TestTCMGateIntegration(t *testing.T) {
 	cfg := &Config{MaxConcurrent: 4, CacheMaxSize: 100, RetryMax: 0}
-	f := NewForge("D:\\forge", cfg)
+	f := NewForge("D:\\path\\to\\forge", cfg)
 	defer f.Shutdown()
 
 	cases := []struct{ name, text, wantRec string }{
@@ -39,7 +39,7 @@ func TestTCMGateIntegration(t *testing.T) {
 
 func TestTCMVectorDiagnose(t *testing.T) {
 	cfg := &Config{MaxConcurrent: 4, CacheMaxSize: 100, RetryMax: 0}
-	f := NewForge("D:\\forge", cfg)
+	f := NewForge("D:\\path\\to\\forge", cfg)
 	defer f.Shutdown()
 	req, _ := json.Marshal(map[string]interface{}{"type": "diagnose", "vector": []float64{8, 5, 7, 4, 3, 5, 4, 4}, "domain": "body"})
 	_, res, err := f.Build(string(req), "tcm", "")

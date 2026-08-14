@@ -22,7 +22,7 @@ func TestBrowserGateIntegration(t *testing.T) {
 		t.Skipf("外网不可达(cn.bing.com:443 连不通), 跳过真实网络集成测试")
 	}
 	cfg := &Config{MaxConcurrent: 4, CacheMaxSize: 100, RetryMax: 0}
-	f := NewForge("D:\\forge", cfg)
+	f := NewForge("D:\\path\\to\\forge", cfg)
 	defer f.Shutdown()
 
 	// 批处理: 必应搜索->提取->截图->关闭 (真实网络)
@@ -30,7 +30,7 @@ func TestBrowserGateIntegration(t *testing.T) {
 		{"action": "navigate", "url": "https://cn.bing.com", "timeout": 30000, "wait_until": "commit"},
 		{"action": "type", "selector": "input[name='q']", "value": "铸剑炉 智能体", "enter": true, "wait_ms": 3000},
 		{"action": "extract", "selector": "h2"},
-		{"action": "screenshot", "path": "D:\\forge\\.forge-temp\\browser_test.png", "full": false},
+		{"action": "screenshot", "path": "D:\\path\\to\\forge\\.forge-temp\\browser_test.png", "full": false},
 		{"action": "close"},
 	}
 	req, _ := json.Marshal(map[string]interface{}{"headless": true, "steps": steps, "nonce": time.Now().UnixNano()})

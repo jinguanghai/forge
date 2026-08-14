@@ -80,7 +80,7 @@ def scan_dir(root):
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
-    root = args[0] if args else r'D:\forge'
+    root = args[0] if args else r'D:\path\to\forge'
     save = '--save' in sys.argv
     files, funcs, total_lines, total_cc, todos, comment_lines = scan_dir(root)
     n_files, n_funcs = len(files), len(funcs)

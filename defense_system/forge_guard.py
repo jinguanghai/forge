@@ -124,7 +124,7 @@ def audit():
     # 1. 敏感文件权限
     log("  -- 1. .env 权限 (应仅管理员/当前用户) --")
     try:
-        r = subprocess.run('icacls "D:\\forge\\.env"', shell=True, capture_output=True, text=True, timeout=10)
+        r = subprocess.run('icacls "D:\\path\\to\\forge\\.env"', shell=True, capture_output=True, text=True, timeout=10)
         for line in r.stdout.splitlines():
             if "Authenticated Users" in line or "Users" in line or "Everyone" in line:
                 log(f"  [!!] 权限过宽: {line.strip()}")
