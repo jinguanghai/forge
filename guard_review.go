@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// ─── 守卫二级裁决 (二期 DMAIC: 借鉴 Reasonix guardian) ───
+// ─── 守卫二级裁决 (借鉴 Reasonix guardian) ───
 // critical 级动作命中后, 由独立 LLM (判决者视角) 复核是否放行。
 // 裁决原则:
 //   - 默认 fail-closed: LLM 调用失败/超时/输出不可解析 → 一律 deny

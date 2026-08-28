@@ -44,9 +44,9 @@ func TestShouldAbortOnFails(t *testing.T) {
 		want             bool
 	}{
 		{0, 5, false}, {1, 5, false}, {4, 5, false},
-		{5, 5, true}, {6, 5, true},          // 达限/超限中止
-		{2, 2, true}, {2, 3, false},         // 边界
-		{0, 0, true},                        // max=0 时 0>=0 → 中止(与原逻辑一致)
+		{5, 5, true}, {6, 5, true}, // 达限/超限中止
+		{2, 2, true}, {2, 3, false}, // 边界
+		{0, 0, true}, // max=0 时 0>=0 → 中止(与原逻辑一致)
 	}
 	for _, c := range cases {
 		if got := shouldAbortOnFails(c.consecutive, c.max); got != c.want {

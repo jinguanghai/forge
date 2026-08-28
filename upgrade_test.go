@@ -65,7 +65,6 @@ func TestPruneExeBackups(t *testing.T) {
 	}
 }
 
-
 // ─── I-3 快照测试 ───
 func TestCreateCheckpoint(t *testing.T) {
 	work := t.TempDir()

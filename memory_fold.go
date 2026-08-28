@@ -1,6 +1,6 @@
 // 折叠展开记忆系统 v2.1 —— π-φ 折展节律引擎（memory_fold.go）
 //
-// 二期 DMAIC (20260806): π(展开)↔φ(折叠) 循环节律
+// π(展开)↔φ(折叠) 循环节律
 //   M1 schema v2.1: 加 pi_expansions / phi_folds / keywords / last_hinted
 //   M2 半显化: "展开<名>"→摘要先行; "深入<名>"→读全文
 //   M3 相关性触发: 对话关键词命中折叠项→静默提示一次(24h去重)
@@ -24,14 +24,14 @@ import (
 
 // FoldedItem 折叠索引条目（schema v2.1）
 type FoldedItem struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Status       string   `json:"status"` // done | doing | shelved
-	Summary      string   `json:"summary"`
-	Archive      string   `json:"archive"`
-	FoldedAt     string   `json:"folded_at"`
-	LastUnfolded string   `json:"last_unfolded"` // 最近展开时间；"" 表示从未展开
-	Tier         int      `json:"tier"`          // 1=正常, 2=超60天未展开可清理
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Status       string `json:"status"` // done | doing | shelved
+	Summary      string `json:"summary"`
+	Archive      string `json:"archive"`
+	FoldedAt     string `json:"folded_at"`
+	LastUnfolded string `json:"last_unfolded"` // 最近展开时间；"" 表示从未展开
+	Tier         int    `json:"tier"`          // 1=正常, 2=超60天未展开可清理
 	// ── π-φ 节律字段 (v2.1) ──
 	PiExpansions int      `json:"pi_expansions"`         // π: 累计展开次数
 	PhiFolds     int      `json:"phi_folds"`             // φ: 累计折叠次数
@@ -71,6 +71,8 @@ func foldedItems(workDir string) ([]FoldedItem, error) {
 }
 
 // updateFoldedItems 通用回写: 只允许改字段，不允许增删条目。原子写(tmp+rename)。
+// 实现: 折叠段按 map 解析, 只替换 items, 其余字段(含未来新增)原样保留 ——
+// 避免固定结构体重写把未知字段静默丢弃(schema 演进安全)。
 func updateFoldedItems(workDir string, fn func(items []FoldedItem) []FoldedItem) error {
 	data, _, err := LoadMemory(workDir)
 	if err != nil {
@@ -84,21 +86,26 @@ func updateFoldedItems(workDir string, fn func(items []FoldedItem) []FoldedItem)
 	if !ok {
 		return fmt.Errorf("memory.json 缺少 folded_memory 段")
 	}
-	var fm struct {
-		Version json.RawMessage `json:"version"`
-		Scope   string       `json:"scope"`
-		System  string       `json:"system"`
-		Explain string       `json:"_说明"`
-		Items   []FoldedItem `json:"items"`
-	}
+	var fm map[string]json.RawMessage
 	if err := json.Unmarshal(fmRaw, &fm); err != nil {
 		return err
 	}
-	before := len(fm.Items)
-	fm.Items = fn(fm.Items)
-	if len(fm.Items) != before {
+	var items []FoldedItem
+	if raw, ok := fm["items"]; ok {
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return err
+		}
+	}
+	before := len(items)
+	items = fn(items)
+	if len(items) != before {
 		return fmt.Errorf("updateFoldedItems 不允许增删条目")
 	}
+	newItems, err := json.Marshal(items)
+	if err != nil {
+		return err
+	}
+	fm["items"] = newItems
 	newFm, err := json.Marshal(fm)
 	if err != nil {
 		return err
@@ -273,10 +280,10 @@ func MemDiagMetrics(workDir string) *MemDiagResult {
 		avgPi = float64(totalPi) / float64(total)
 	}
 	vec := []float64{
-		clampF(2+float64(totalPi), 0, 10),                  // 阳
-		clampF(4+float64(total), 0, 10),                    // 阴
-		8,                                                  // 表(索引可读)
-		clampF(2+avgPi*2, 0, 10),                           // 里(循环深度)
+		clampF(2+float64(totalPi), 0, 10), // 阳
+		clampF(4+float64(total), 0, 10),   // 阴
+		8,                                 // 表(索引可读)
+		clampF(2+avgPi*2, 0, 10),          // 里(循环深度)
 		clampF(10-float64(never)*10/float64(total), 0, 10), // 寒(僵化反向)
 		clampF(3+float64(totalPi), 0, 10),                  // 热(活跃)
 		clampF(float64(tier2)*4, 0, 10),                    // 虚(Tier-2流失)

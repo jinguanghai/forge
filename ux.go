@@ -65,11 +65,7 @@ type span struct {
 // highlightLine applies syntax highlighting to a single line of code
 func highlightLine(line, lang string) string {
 	normalized := normalizeLang(lang)
-
-	// Collect all highlights: {start, end, color}
 	var spans []span
-
-	// Helper: add span if within bounds
 	addSpan := func(s span) {
 		if s.start >= 0 && s.end > s.start && s.start < len(line) {
 			if s.end > len(line) {
@@ -78,71 +74,31 @@ func highlightLine(line, lang string) string {
 			spans = append(spans, s)
 		}
 	}
-
-	// Find all matches from patterns
-	patterns := []struct {
-		re    *regexp.Regexp
-		color string
-	}{
-		{reBlockComment, ansi.dim}, // block comments first (dim)
-	}
-
-	for _, p := range patterns {
-		for _, m := range p.re.FindAllStringIndex(line, -1) {
-			addSpan(span{m[0], m[1], p.color})
-		}
-	}
-
-	// Strings
-	for _, m := range reStringDQ.FindAllStringIndex(line, -1) {
-		if !overlapsAny(m, spans) {
-			addSpan(span{m[0], m[1], ansi.green})
-		}
-	}
-	for _, m := range reStringSQ.FindAllStringIndex(line, -1) {
-		if !overlapsAny(m, spans) {
-			addSpan(span{m[0], m[1], ansi.green})
-		}
-	}
-	for _, m := range reBacktick.FindAllStringIndex(line, -1) {
-		if !overlapsAny(m, spans) {
-			addSpan(span{m[0], m[1], ansi.yellow})
-		}
-	}
-
-	// Line comments (check after strings to avoid coloring inside strings)
-	for _, m := range reLineComment.FindAllStringIndex(line, -1) {
-		if !overlapsAny(m, spans) {
-			addSpan(span{m[0], m[1], ansi.dim})
-		}
-	}
-
-	// Numbers
-	for _, m := range reNumber.FindAllStringIndex(line, -1) {
-		if !overlapsAny(m, spans) {
-			addSpan(span{m[0], m[1], ansi.magenta})
-		}
-	}
-
-	// Keywords (pre-compiled patterns)
-	if kws, ok := langKeywordRE[normalized]; ok {
-		for _, reKW := range kws {
-			for _, m := range reKW.FindAllStringIndex(line, -1) {
-				if !overlapsAny(m, spans) {
-					addSpan(span{m[0], m[1], ansi.cyan})
-				}
+	collectRegex := func(re *regexp.Regexp, color string) {
+		for _, m := range re.FindAllStringIndex(line, -1) {
+			if !overlapsAny(m, spans) {
+				addSpan(span{m[0], m[1], color})
 			}
 		}
 	}
 
-	// Type keywords (bold cyan)
-	for _, m := range reType.FindAllStringIndex(line, -1) {
-		if !overlapsAny(m, spans) {
-			addSpan(span{m[0], m[1], ansi.yellow})
+	// block comments first (dim)
+	for _, m := range reBlockComment.FindAllStringIndex(line, -1) {
+		addSpan(span{m[0], m[1], ansi.dim})
+	}
+	collectRegex(reStringDQ, ansi.green)
+	collectRegex(reStringSQ, ansi.green)
+	collectRegex(reBacktick, ansi.yellow)
+	collectRegex(reLineComment, ansi.dim)
+	collectRegex(reNumber, ansi.magenta)
+	if kws, ok := langKeywordRE[normalized]; ok {
+		for _, reKW := range kws {
+			collectRegex(reKW, ansi.cyan)
 		}
 	}
+	collectRegex(reType, ansi.yellow)
 
-	// Sort spans by start
+	// Sort spans by start (insertion)
 	for i := 0; i < len(spans); i++ {
 		for j := i + 1; j < len(spans); j++ {
 			if spans[j].start < spans[i].start {
@@ -151,11 +107,9 @@ func highlightLine(line, lang string) string {
 		}
 	}
 
-	// Build highlighted line
 	if len(spans) == 0 {
 		return line
 	}
-
 	var result strings.Builder
 	pos := 0
 	for _, s := range spans {
@@ -172,7 +126,6 @@ func highlightLine(line, lang string) string {
 	if pos < len(line) {
 		result.WriteString(line[pos:])
 	}
-
 	return result.String()
 }
 
@@ -393,4 +346,102 @@ func renderMarkdownLine(line string) string {
 	}
 
 	return l
+}
+
+// ========================== Streaming Reasoning renderer ==========================
+// 把模型的推理内容渲染为可读的缩进块 (流式, 按行缓冲)。
+// 独立于正文渲染器, 输出到 stderr, 与正文 (stdout) 分离。
+
+type reasoningRenderer struct {
+	opened  bool
+	closed  bool
+	lineBuf strings.Builder
+}
+
+func newReasoningRenderer() *reasoningRenderer {
+	return &reasoningRenderer{}
+}
+
+// feed 增量渲染推理 chunk, 返回 ANSI 文本。
+// 首块时输出起始标题; 按换行拆行, 每行加竖线前缀缩进。
+func (r *reasoningRenderer) feed(chunk string) string {
+	var out strings.Builder
+	if !r.opened {
+		r.opened = true
+		out.WriteString("\n" + ansi.magenta + ansi.bold + "🧠 推理" + ansi.reset + "\n")
+	}
+	for _, ch := range chunk {
+		if ch == '\n' {
+			line := r.lineBuf.String()
+			r.lineBuf.Reset()
+			r.renderLine(line, &out)
+		} else {
+			r.lineBuf.WriteRune(ch)
+		}
+	}
+	return out.String()
+}
+
+// renderLine 渲染单行推理内容。空行保持竖线连续, 非空行超宽时按终端宽度软换行。
+func (r *reasoningRenderer) renderLine(line string, out *strings.Builder) {
+	if strings.TrimSpace(line) == "" {
+		out.WriteString(ansi.cyan + "│" + ansi.reset + "\n")
+		return
+	}
+	for _, seg := range wrapReasoningLine(line) {
+		out.WriteString(ansi.cyan + "│ " + ansi.reset + ansi.dim + seg + ansi.reset + "\n")
+	}
+}
+
+// wrapReasoningLine 按终端显示宽度把超长推理行软换行 (中英文按显示宽度计)。
+// 竖线前缀+间隔占 2 列, 续行缩进对齐。
+func wrapReasoningLine(line string) []string {
+	avail := terminalAvail()
+	if avail <= 0 || displayWidth(line) <= avail {
+		return []string{line}
+	}
+	var segs []string
+	var sb strings.Builder
+	w := 0
+	for _, r := range line {
+		rw := runeWidth(r)
+		if w+rw > avail && w > 0 {
+			segs = append(segs, sb.String())
+			sb.Reset()
+			w = 0
+		}
+		sb.WriteRune(r)
+		w += rw
+	}
+	if sb.Len() > 0 {
+		segs = append(segs, sb.String())
+	}
+	return segs
+}
+
+// terminalAvail 返回推理行可用显示宽度 (自适应终端宽度, 非 tty 时用保守默认)。
+func terminalAvail() int {
+	w := getTermWidth()
+	if w <= 20 {
+		return 72
+	}
+	return w - 3
+}
+
+// close 输出收尾边框 (若有内容输出过), 并清空缓冲。仅第一次调用生效。
+func (r *reasoningRenderer) close() string {
+	if r.closed {
+		return ""
+	}
+	r.closed = true
+	if !r.opened {
+		return ""
+	}
+	var out strings.Builder
+	if r.lineBuf.Len() > 0 {
+		r.renderLine(r.lineBuf.String(), &out)
+		r.lineBuf.Reset()
+	}
+	out.WriteString(ansi.magenta + "└" + strings.Repeat("─", 12) + "┘" + ansi.reset + "\n\n")
+	return out.String()
 }

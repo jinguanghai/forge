@@ -71,10 +71,10 @@ func TestFitWidth(t *testing.T) {
 		maxW int
 		want string
 	}{
-		{"hello", 10, "hello"},                 // 不超宽原样
-		{"hello", 5, "hello"},                  // 恰好
-		{"hello world", 5, "hell…"},            // 截断到 maxW-1 + 省略号
-		{"中文测试", 5, "中文…"},                 // 中文按 2 列
+		{"hello", 10, "hello"},                              // 不超宽原样
+		{"hello", 5, "hello"},                               // 恰好
+		{"hello world", 5, "hell…"},                         // 截断到 maxW-1 + 省略号
+		{"中文测试", 5, "中文…"},                                  // 中文按 2 列
 		{"\x1b[32mhello\x1b[0m", 5, "\x1b[32mhello\x1b[0m"}, // ANSI 不占宽
 		{"\x1b[32mhello\x1b[0m", 3, "\x1b[32mhe…"},          // ANSI 保留+截断
 	}
@@ -124,10 +124,10 @@ func TestUnbalancedDelimiters(t *testing.T) {
 		{"(abc)", false},
 		{`"unclosed`, true},
 		{`"closed"`, false},
-		{`("a(b)")`, false},        // 字符串内括号不计数
+		{`("a(b)")`, false}, // 字符串内括号不计数
 		{`{a: "x"}`, false},
-		{`foo("bar\")")`, false},   // 转义引号
-		{`]`, false},               // 错配视为完整
+		{`foo("bar\")")`, false}, // 转义引号
+		{`]`, false},             // 错配视为完整
 		{"`tick", true},
 		{"a[b]c", false},
 		{"def foo():\n    return (1+2", true},
@@ -362,8 +362,11 @@ func TestHandleCommand_Tools(t *testing.T) {
 	out := captureStdout(t, func() {
 		handleCommand("/tools", agent, cfg, hist, &sr)
 	})
-	if !strings.Contains(out, "17 gates") || !strings.Contains(out, "python") {
+	if !strings.Contains(out, "12 gates") || !strings.Contains(out, "python") {
 		t.Fatalf("tools output = %q", out[:min(300, len(out))])
+	}
+	if !strings.Contains(out, "tcm") || !strings.Contains(out, "browser") {
+		t.Fatalf("tools output 缺保留 gate: %q", out[:min(300, len(out))])
 	}
 	if !strings.Contains(out, "builds=") {
 		t.Fatalf("tools output missing stats: %q", out)

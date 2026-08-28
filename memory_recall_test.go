@@ -108,14 +108,24 @@ func TestLoadKeyFindingsMixed(t *testing.T) {
 	}
 }
 
-// ── 端到端: 真实召回 ──
+// ── 端到端: 召回主流程 ──
+// 注: 自包含 fixture (t.TempDir), 不依赖工作目录真实 memory.json ——
+// 真实数据可能被清理/精简导致测试与运行环境耦合, 回归测试必须稳定。
 func TestRecallMemoryEndToEnd(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
+	dir := t.TempDir()
+	mem := map[string]interface{}{
+		"key_findings": []interface{}{
+			map[string]interface{}{"title": "前缀缓存", "content": "DeepSeek 前缀缓存命中率97.5%，system保持恒定(20260813)"},
+			map[string]interface{}{"title": "蚁群", "content": "蚁群 8 异质LLM 费用 9 倍不划算(20260701)"},
+			map[string]interface{}{"title": "热替换", "content": "热替换 exe 备份轮转(20260501)"},
+			map[string]interface{}{"title": "缓存", "content": "缓存命中率 86 跨模型(20260715)"},
+		},
+	}
+	data, _ := json.Marshal(mem)
+	if err := os.WriteFile(filepath.Join(dir, "memory.json"), data, 0644); err != nil {
 		t.Fatal(err)
 	}
-	// 真实 memory.json
-	block, n := RecallMemory(wd, "DeepSeek 前缀缓存 命中率", 3)
+	block, n := RecallMemory(dir, "DeepSeek 前缀缓存 命中率", 3)
 	if n == 0 {
 		t.Fatal("缓存主题应命中")
 	}
@@ -129,11 +139,11 @@ func TestRecallMemoryEndToEnd(t *testing.T) {
 		t.Fatal("缺少新鲜度标记")
 	}
 	// 无命中场景
-	if b2, n2 := RecallMemory(wd, "qqxzzz12345", 3); n2 != 0 || b2 != "" {
+	if b2, n2 := RecallMemory(dir, "qqxzzz12345", 3); n2 != 0 || b2 != "" {
 		t.Fatalf("无关查询应无召回: n=%d b=%q", n2, b2)
 	}
 	// topK<=0 默认 5
-	if _, n3 := RecallMemory(wd, "测试", 0); n3 < 0 || n3 > 5 {
+	if _, n3 := RecallMemory(dir, "测试", 0); n3 < 0 || n3 > 5 {
 		t.Fatalf("默认topK越界: %d", n3)
 	}
 }

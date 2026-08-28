@@ -2,7 +2,7 @@ package main
 
 // health_report.go — 躯壳自检: 消费 events.jsonl, 主动报告躯壳问题
 //
-// 设计 (20260812 DMAIC 抄作业 exo event log 的"消费者层"):
+// 设计 (借鉴 exo event log 的"消费者层"):
 //   - 信号源: error 事件 + tool_result ok=false 事件 (工具执行失败)
 //   - 问题定义: 同模块失败 ≥ 阈值(3次) 才算问题 —— 单次失败多为环境, 防误报
 //   - 水位线: .forge\health_watermark 记录已扫描行号, 每轮只报新错误, 杜绝重复报告
@@ -22,10 +22,10 @@ import (
 )
 
 const (
-	healthThreshold  = 3                     // 同模块失败 ≥3 次才算"问题"
-	healthMaxBytes   = 5 * 1024 * 1024       // events.jsonl 超 5MB 轮转
-	healthMaxLines   = 50000                 // 或超 5 万行轮转
-	healthTimeWindow = 24 * time.Hour        // 启动报告只看最近 24h
+	healthThreshold  = 3               // 同模块失败 ≥3 次才算"问题"
+	healthMaxBytes   = 5 * 1024 * 1024 // events.jsonl 超 5MB 轮转
+	healthMaxLines   = 50000           // 或超 5 万行轮转
+	healthTimeWindow = 24 * time.Hour  // 启动报告只看最近 24h
 )
 
 // HealthIssue 一个问题: 同模块失败聚合
@@ -209,7 +209,11 @@ func rotateEventsIfNeeded(workDir string, maxBytes, maxLines int64) {
 	}
 	if st.Size() < maxBytes {
 		// 行数阈值: 读一遍数行 (5MB 上限内可接受)
-		if n, _ := countLines(path); n < maxLines {
+		n, cntErr := countLines(path)
+		if cntErr != nil {
+			return // 读行数失败: 保守不轮转, 下次再试
+		}
+		if n < maxLines {
 			return
 		}
 	}

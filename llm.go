@@ -27,7 +27,68 @@ type ChatMessage struct {
 	ReasoningContent string     `json:"reasoning_content,omitempty"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string     `json:"tool_call_id,omitempty"`
-	ID               string     `json:"id"`
+	// Images 多模态图片 (识图, 官方模型 deepseek-v4-flash-vision-exp)。
+	// json:"-" → 不落盘 history / 不参与 Summarize 等复用路径, 仅当轮请求内存。
+	// 非空时自定义 MarshalJSON 把 content 输出为 [text + image_url...] 数组
+	// (OpenAI 兼容多模态块); 无图时输出与旧格式字节级一致 (前缀缓存兼容)。
+	Images []ImagePart `json:"-"`
+	// ID 仅内部占位, 绝不序列化上线 (omitempty + 恒空):
+	// ① DeepSeek 前缀缓存按 token 前缀匹配, 任何随机字段都可能是断裂点;
+	// ② 请求体必须字节级确定性 (deepseek-harness serialize 不带消息 id,
+	//    工具调用 id / tool_call_id 才必需)。实测 20260805 随机 id"无害"是
+	//    服务端忽略该字段, 而非缓存容忍随机性 —— 直接不发更稳、token 更省。
+	ID string `json:"id,omitempty"`
+}
+
+// ImagePart 多模态图片块 (vision)。URL 为 base64 data URL 或公开 http(s) 链接;
+// Detail: low(512×512 预处理, 快省) | high/original(保原图) | auto。
+type ImagePart struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// MarshalJSON 自定义序列化: 有图 → content 输出多模态数组块 (OpenAI 兼容);
+// 无图 → 委托原结构 (字节级一致, 前缀缓存不受影响)。
+func (m ChatMessage) MarshalJSON() ([]byte, error) {
+	if len(m.Images) == 0 {
+		type alias ChatMessage // 新类型避免递归; 字段 tag 与原类型一致
+		return json.Marshal(alias(m))
+	}
+	parts := make([]json.RawMessage, 0, 1+len(m.Images))
+	if m.Content != "" {
+		tb, err := json.Marshal(struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}{Type: "text", Text: m.Content})
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, tb)
+	}
+	for _, img := range m.Images {
+		ib, err := json.Marshal(struct {
+			Type     string    `json:"type"`
+			ImageURL ImagePart `json:"image_url"`
+		}{Type: "image_url", ImageURL: img})
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, ib)
+	}
+	wire := struct {
+		Role             string            `json:"role"`
+		Content          []json.RawMessage `json:"content"`
+		ReasoningContent string            `json:"reasoning_content,omitempty"`
+		ToolCalls        []ToolCall        `json:"tool_calls,omitempty"`
+		ToolCallID       string            `json:"tool_call_id,omitempty"`
+	}{
+		Role:             m.Role,
+		Content:          parts,
+		ReasoningContent: m.ReasoningContent,
+		ToolCalls:        m.ToolCalls,
+		ToolCallID:       m.ToolCallID,
+	}
+	return json.Marshal(wire)
 }
 
 type ToolCall struct {
@@ -47,21 +108,23 @@ type StreamEvent struct {
 	Content         string     `json:"content,omitempty"`
 	Error           error      `json:"-"`
 	ToolCalls       []ToolCall `json:"tool_calls,omitempty"`
-	Truncated       bool       `json:"truncated,omitempty"`       // finish_reason=length: max_tokens 截断
+	Truncated       bool       `json:"truncated,omitempty"`        // finish_reason=length: max_tokens 截断
 	ReasoningTokens int        `json:"reasoning_tokens,omitempty"` // 本次推理消耗 token 数 (V4 系列)
+	CacheHit        int        `json:"cache_hit,omitempty"`        // 本次请求缓存命中 token (会话命中率)
+	CacheMiss       int        `json:"cache_miss,omitempty"`       // 本次请求缓存未命中 token (会话命中率)
 }
 
 type chatRequest struct {
-	Model          string            `json:"model"`
-	Messages       []ChatMessage     `json:"messages"`
-	Stream         bool              `json:"stream"`
-	MaxTokens      int               `json:"max_tokens,omitempty"`
-	Temperature    float64           `json:"temperature,omitempty"`
-	TopP           float64           `json:"top_p,omitempty"`
-	Tools          []json.RawMessage `json:"tools,omitempty"`
-	Thinking       *ThinkingConfig   `json:"thinking,omitempty"`
-	ReasoningEffort string             `json:"reasoning_effort,omitempty"` // V4-Pro: low|high|max
-	StreamOptions  *StreamOptions    `json:"stream_options,omitempty"` // 要求流式末尾返回 usage (缓存度量)
+	Model           string            `json:"model"`
+	Messages        []ChatMessage     `json:"messages"`
+	Stream          bool              `json:"stream"`
+	MaxTokens       int               `json:"max_tokens,omitempty"`
+	Temperature     float64           `json:"temperature,omitempty"`
+	TopP            float64           `json:"top_p,omitempty"`
+	Tools           []json.RawMessage `json:"tools,omitempty"`
+	Thinking        *ThinkingConfig   `json:"thinking,omitempty"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"` // V4-Pro: low|high|max
+	StreamOptions   *StreamOptions    `json:"stream_options,omitempty"`   // 要求流式末尾返回 usage (缓存度量)
 }
 
 // StreamOptions requests extra stream metadata. include_usage makes DeepSeek
@@ -263,8 +326,88 @@ func estimateTokens(msgs []ChatMessage) int {
 				total++
 			}
 		}
+		// 识图: 官方文档规定每图自动缩放后 ≤384 tokens (800×800 量级)
+		for range m.Images {
+			total += 384
+		}
 	}
 	return total
+}
+
+// Summarize 非流式摘要 (前缀缓存复用):
+// 把 messages 压缩成 ≤maxLen 字中文摘要。
+// 用于历史压缩 (compactHistory): 超 token 阈值时先把最旧段浓缩成摘要再丢弃原文。
+// 轻量模型优先 (ModelFlash), 显式关闭 thinking 省 token; 失败返回 error, 调用方降级不阻塞。
+//
+// 前缀缓存复用: 旧实现把 messages 拍扁成单条 user 消息 → 请求前缀
+// 与真实对话请求完全不同 → 每次摘要 100% 缓存未命中 (付费 token)。
+// 新实现: messages 原样作为请求前缀 (调用方保证含 system), 摘要指令追加为最后一条
+// user 消息 (最后一条已是 user 则合并进其 Content, 避免连续两条 user) →
+// 请求 = [system, 历史前段..., 指令] 与真实请求共享前缀 → DeepSeek 前缀缓存命中,
+// 只有指令 token 是新增付费。
+func (c *LLMClient) Summarize(ctx context.Context, messages []ChatMessage, maxLen int) (string, error) {
+	instruction := fmt.Sprintf(
+		"你是会话摘要器。请用中文把以上对话压缩成不超过 %d 字的摘要。必须保留: ①原始任务/目标 ②关键决策与结论 ③已完成事项 ④未完成事项 ⑤重要约定/约束。只输出摘要正文，不要任何前缀、标题或解释。", maxLen)
+	reqMsgs := make([]ChatMessage, 0, len(messages)+1)
+	reqMsgs = append(reqMsgs, messages...)
+	if n := len(reqMsgs); n > 0 && reqMsgs[n-1].Role == "user" {
+		reqMsgs[n-1].Content += "\n\n" + instruction // 合并: 保持前缀不变, 避免连续两条 user
+	} else {
+		reqMsgs = append(reqMsgs, ChatMessage{Role: "user", Content: instruction})
+	}
+	model := c.cfg.Model
+	if c.cfg.ModelFlash != "" {
+		model = c.cfg.ModelFlash
+	}
+	reqBody := chatRequest{
+		Model:       model,
+		Messages:    reqMsgs,
+		Stream:      false,
+		MaxTokens:   maxLen * 3,
+		Temperature: 0.2,
+		Thinking:    &ThinkingConfig{Type: "disabled"},
+	}
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal summarize request: %w", err)
+	}
+	apiURL := strings.TrimRight(c.cfg.BaseURL, "/") + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("create summarize request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("summarize http: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, rerr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if rerr != nil {
+			return "", fmt.Errorf("summarize read error body: %w", rerr)
+		}
+		return "", fmt.Errorf("summarize failed status=%d body=%s", resp.StatusCode, string(body))
+	}
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("decode summarize response: %w", err)
+	}
+	if len(out.Choices) == 0 || strings.TrimSpace(out.Choices[0].Message.Content) == "" {
+		return "", fmt.Errorf("summarize: empty content")
+	}
+	summary := strings.TrimSpace(out.Choices[0].Message.Content)
+	if runes := []rune(summary); len(runes) > maxLen*2 {
+		summary = string(runes[:maxLen*2])
+	}
+	return summary, nil
 }
 
 func (c *LLMClient) doStream(
@@ -284,7 +427,7 @@ func (c *LLMClient) doStream(
 			Type: "context_length_exceeded",
 		}
 	}
-	// ─── 前缀指纹守卫 (六西格玛 Control) ──────
+	// ─── 前缀指纹守卫 ──────
 	// system 前缀进程内应恒定; 若变化 (运行中 memory.json 被改) 立即告警,
 	// 并记录 sys_changed 事件到 cache_stats.jsonl 供 /cache 汇总。
 	sysChanged = false
@@ -295,15 +438,40 @@ func (c *LLMClient) doStream(
 	}
 	lastSystemHash = currentSystemHash
 
+	// ── FORGE_DEBUG_REQ: 打印请求消息构成 (缓存诊断) ──
+	if os.Getenv("FORGE_DEBUG_REQ") != "" {
+		var sb strings.Builder
+		totalCh := 0
+		fmt.Fprintf(&sb, "[debug-req] model=%s msgs=%d estTokens=%d\n", model, len(messages), estimateTokens(messages))
+		for i, m := range messages {
+			ch := len([]rune(m.Content))
+			totalCh += ch
+			role := m.Role
+			if m.ToolCallID != "" {
+				role += "(toolcall)"
+			}
+			if len(m.ToolCalls) > 0 {
+				role += "(toolcalls)"
+			}
+			preview := m.Content
+			if len(preview) > 90 {
+				preview = preview[:90] + "..."
+			}
+			preview = strings.ReplaceAll(preview, "\n", "\\n")
+			fmt.Fprintf(&sb, "  [%d] %s ch=%d: %q\n", i, role, ch, preview)
+		}
+		fmt.Fprintf(&sb, "  totalChars=%d\n", totalCh)
+		fmt.Fprintln(os.Stderr, sb.String())
+	}
 	reqBody := chatRequest{
-		Model:          model,
-		Messages:       messages,
-		Stream:         true,
-		MaxTokens:      c.cfg.MaxTokens,
-		Temperature:    c.cfg.Temperature,
-		TopP:           c.cfg.TopP,
-		Tools:          tools,
-		StreamOptions:  &StreamOptions{IncludeUsage: true}, // 流式末尾返回 usage → 缓存度量
+		Model:         model,
+		Messages:      messages,
+		Stream:        true,
+		MaxTokens:     c.cfg.MaxTokens,
+		Temperature:   c.cfg.Temperature,
+		TopP:          c.cfg.TopP,
+		Tools:         tools,
+		StreamOptions: &StreamOptions{IncludeUsage: true}, // 流式末尾返回 usage → 缓存度量
 	}
 
 	// Thinking 模式显式声明 (deepseek-harness finding #1):
@@ -350,7 +518,10 @@ func (c *LLMClient) doStream(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		body, rerr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if rerr != nil {
+			return fmt.Errorf("stream read error body: %w", rerr)
+		}
 		msg := string(body)
 		// Try to parse JSON error body for cleaner message
 		var errResp struct {
@@ -382,15 +553,12 @@ func (c *LLMClient) parseSSE(ctx context.Context, body io.Reader, ch chan<- Stre
 	// Use larger buffer for long SSE lines (tool call arguments can be large)
 	scanner.Buffer(make([]byte, 256*1024), 1024*1024)
 
-	var toolCallAccum []ToolCall
-	var lastUsage *Usage // 流式末尾 usage 块 (含 reasoning_tokens), 供 done 事件携带
-	var pendingFinish string // 已见 terminal finish_reason (stop/length), 收尾时判定截断
-	sentEvents := 0
+	st := &sseState{}
 
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			if sentEvents > 0 {
+			if st.sentEvents > 0 {
 				return errPartialStream
 			}
 			return ctx.Err()
@@ -401,7 +569,6 @@ func (c *LLMClient) parseSSE(ctx context.Context, body io.Reader, ch chan<- Stre
 		if line == "" || strings.HasPrefix(line, ":") {
 			continue
 		}
-
 		if !strings.HasPrefix(line, "data:") {
 			continue // not a data line
 		}
@@ -409,9 +576,10 @@ func (c *LLMClient) parseSSE(ctx context.Context, body io.Reader, ch chan<- Stre
 		if data == "" {
 			continue
 		}
-
 		if strings.TrimSpace(data) == "[DONE]" {
-			ch <- StreamEvent{Type: "done", Truncated: pendingFinish == "length", ReasoningTokens: usageReasoningTokens(lastUsage)}
+			if !st.toolDone {
+				ch <- StreamEvent{Type: "done", Truncated: st.pendingFinish == "length", ReasoningTokens: usageReasoningTokens(st.lastUsage)}
+			}
 			return nil
 		}
 
@@ -419,94 +587,118 @@ func (c *LLMClient) parseSSE(ctx context.Context, body io.Reader, ch chan<- Stre
 		if err := json.Unmarshal([]byte(data), &cr); err != nil {
 			continue // skip malformed lines
 		}
-
-		// API-level error in streaming response
-		if cr.Error != nil {
-			return &LLMError{
-				Message: cr.Error.Message,
-				Type:    cr.Error.Type,
-			}
-		}
-
-		// Usage block: with stream_options.include_usage=true DeepSeek sends a
-		// final chunk whose choices is empty and usage carries cache hit/miss.
-		// Must be handled BEFORE the choices==0 skip below.
-		if cr.Usage != nil {
-			lastUsage = cr.Usage // 保存供 done 事件携带 (推理消耗度量)
-		}
-		if cr.Usage != nil && (cr.Usage.PromptCacheHitTokens > 0 || cr.Usage.PromptCacheMissTokens > 0) {
-			// 双字段归一化 (§4.3): DeepSeek native 与 OpenAI shape 同时存在, 取 max 防漂移
-			hit := cr.Usage.PromptCacheHitTokens
-			if cr.Usage.PromptTokensDetails != nil && cr.Usage.PromptTokensDetails.CachedTokens > hit {
-				hit = cr.Usage.PromptTokensDetails.CachedTokens
-			}
-			miss := cr.Usage.PromptCacheMissTokens
-			recordCacheStat(model, hit, miss, currentSystemHash, sysChanged)
-		} else if sysChanged {
-			// 前缀断裂事件即使无 usage 也记录, 供 /cache 汇总 (六西格玛守卫)
-			recordCacheStat(model, 0, 0, currentSystemHash, sysChanged)
-		}
-
-		if len(cr.Choices) == 0 {
-			continue
-		}
-		choice := cr.Choices[0]
-
-		// Reasoning content (DeepSeek R1)
-		if choice.Delta.ReasoningContent != "" {
-			sentEvents++
-			ch <- StreamEvent{Type: "reasoning", Content: choice.Delta.ReasoningContent}
-		}
-
-		// Text content
-		if choice.Delta.Content != "" {
-			sentEvents++
-			ch <- StreamEvent{Type: "content", Content: choice.Delta.Content}
-		}
-
-		// Tool call deltas
-		if len(choice.Delta.ToolCalls) > 0 {
-			sentEvents++
-			for _, tc := range choice.Delta.ToolCalls {
-				ch <- StreamEvent{Type: "tool_call_delta", ToolCalls: []ToolCall{tc}}
-			}
-			toolCallAccum = append(toolCallAccum, choice.Delta.ToolCalls...)
-		}
-
-		// Terminal states
-		switch choice.FinishReason {
-		case "tool_calls":
-			merged := mergeToolCalls(toolCallAccum)
-			ch <- StreamEvent{Type: "tool_call_done", ToolCalls: merged}
-			return nil
-		case "stop", "length":
-			// DeepSeek 偶发在工具调用 delta 已发出后仍返回 stop/length（max_tokens 截断或
-			// 模型怪癖）。此时 toolCallAccum 是未合并的原始分片：若直接发 done，agent 会把
-			// 每个分片（含空 ID、部分 arguments）当成独立工具执行，产生 tool 响应 ID 与
-			// assistant.tool_calls 不匹配 → API 400 "did not have response messages"。
-			// 因此只要累积了工具调用 delta，就必须统一合并后再收尾。
-			if len(toolCallAccum) > 0 {
-				merged := mergeToolCalls(toolCallAccum)
-				ch <- StreamEvent{Type: "tool_call_done", ToolCalls: merged}
-				return nil
-			}
-			// 延迟收尾: 继续等 usage 块([DONE] 前)到达, 以便 done 携带 reasoning_tokens;
-			// Truncated 标记统一在收尾处判定 (finish_reason=length ⇒ max_tokens 截断)
-			pendingFinish = choice.FinishReason
-		case "content_filter":
-			return &LLMError{Message: "content filter triggered", Type: "content_filter"}
+		if stop, err := c.handleSSEChunk(st, ch, model, cr); stop || err != nil {
+			return err
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		if sentEvents > 0 {
+		if st.sentEvents > 0 {
 			return errPartialStream
 		}
 		return fmt.Errorf("read stream: %w", err)
 	}
 
-	ch <- StreamEvent{Type: "done", Truncated: pendingFinish == "length", ReasoningTokens: usageReasoningTokens(lastUsage)}
+	if !st.toolDone {
+		ch <- StreamEvent{Type: "done", Truncated: st.pendingFinish == "length", ReasoningTokens: usageReasoningTokens(st.lastUsage)}
+	}
 	return nil
+}
+
+// sseState 封装 parseSSE 循环内的可变状态，供 handleSSEChunk 读写。
+type sseState struct {
+	toolCallAccum []ToolCall
+	lastUsage     *Usage
+	pendingFinish string
+	toolDone      bool
+	sentEvents    int
+}
+
+// handleSSEChunk 处理一个已解析的流式 chunk。返回 stop=true 表示应结束解析
+// （content_filter 等终止情况），err 非 nil 表示遇到错误。
+func (c *LLMClient) handleSSEChunk(st *sseState, ch chan<- StreamEvent, model string, cr chatResponse) (bool, error) {
+	// API-level error in streaming response
+	if cr.Error != nil {
+		return true, &LLMError{Message: cr.Error.Message, Type: cr.Error.Type}
+	}
+
+	// Usage block: with stream_options.include_usage=true DeepSeek sends a
+	// final chunk whose choices is empty and usage carries cache hit/miss.
+	// Must be handled BEFORE the choices==0 skip below.
+	if cr.Usage != nil {
+		st.lastUsage = cr.Usage // 保存供 done 事件携带 (推理消耗度量)
+	}
+	if cr.Usage != nil && (cr.Usage.PromptCacheHitTokens > 0 || cr.Usage.PromptCacheMissTokens > 0) {
+		// 双字段归一化 (§4.3): DeepSeek native 与 OpenAI shape 同时存在, 取 max 防漂移
+		hit := cr.Usage.PromptCacheHitTokens
+		if cr.Usage.PromptTokensDetails != nil && cr.Usage.PromptTokensDetails.CachedTokens > hit {
+			hit = cr.Usage.PromptTokensDetails.CachedTokens
+		}
+		miss := cr.Usage.PromptCacheMissTokens
+		recordCacheStat(model, hit, miss, currentSystemHash, sysChanged)
+		// 会话级实时命中率: 经事件通道把本次 hit/miss 带回 agent.stats。
+		// 收尾阶段(toolDone)不再发事件, 保持只读收尾契约(与 reasoning/content/delta 一致)。
+		if !st.toolDone {
+			ch <- StreamEvent{Type: "cache_usage", CacheHit: hit, CacheMiss: miss}
+		}
+	} else if sysChanged {
+		// 前缀断裂事件即使无 usage 也记录, 供 /cache 汇总
+		recordCacheStat(model, 0, 0, currentSystemHash, sysChanged)
+	}
+
+	if len(cr.Choices) == 0 {
+		return false, nil
+	}
+	choice := cr.Choices[0]
+
+	// Reasoning content (DeepSeek R1)
+	if !st.toolDone && choice.Delta.ReasoningContent != "" {
+		st.sentEvents++
+		ch <- StreamEvent{Type: "reasoning", Content: choice.Delta.ReasoningContent}
+	}
+
+	// Text content
+	if !st.toolDone && choice.Delta.Content != "" {
+		st.sentEvents++
+		ch <- StreamEvent{Type: "content", Content: choice.Delta.Content}
+	}
+
+	// Tool call deltas
+	if !st.toolDone && len(choice.Delta.ToolCalls) > 0 {
+		st.sentEvents++
+		for _, tc := range choice.Delta.ToolCalls {
+			ch <- StreamEvent{Type: "tool_call_delta", ToolCalls: []ToolCall{tc}}
+		}
+		st.toolCallAccum = append(st.toolCallAccum, choice.Delta.ToolCalls...)
+	}
+
+	// Terminal states
+	switch choice.FinishReason {
+	case "tool_calls":
+		merged := mergeToolCalls(st.toolCallAccum)
+		ch <- StreamEvent{Type: "tool_call_done", ToolCalls: merged}
+		// 工具轮次同样延迟收尾: 继续读流(不再发事件)直到 usage 块/[DONE],
+		// 使每个工具轮次的缓存命中/未命中都进入度量闭环, 而非只记最终轮。
+		st.toolDone = true
+	case "stop", "length":
+		// DeepSeek 偶发在工具调用 delta 已发出后仍返回 stop/length（max_tokens 截断或
+		// 模型怪癖）。此时 toolCallAccum 是未合并的原始分片：若直接发 done，agent 会把
+		// 每个分片（含空 ID、部分 arguments）当成独立工具执行，产生 tool 响应 ID 与
+		// assistant.tool_calls 不匹配 → API 400 "did not have response messages"。
+		// 因此只要累积了工具调用 delta，就必须统一合并后再收尾。
+		if len(st.toolCallAccum) > 0 {
+			merged := mergeToolCalls(st.toolCallAccum)
+			ch <- StreamEvent{Type: "tool_call_done", ToolCalls: merged}
+			st.toolDone = true
+		} else {
+			// 延迟收尾: 继续等 usage 块([DONE] 前)到达, 以便 done 携带 reasoning_tokens;
+			// Truncated 标记统一在收尾处判定 (finish_reason=length ⇒ max_tokens 截断)
+			st.pendingFinish = choice.FinishReason
+		}
+	case "content_filter":
+		return true, &LLMError{Message: "content filter triggered", Type: "content_filter"}
+	}
+	return false, nil
 }
 
 // usageReasoningTokens 从末尾 usage 块提取推理消耗 (V4 系列 reasoning_tokens),
@@ -571,19 +763,24 @@ func isRetryable(err error) bool {
 // This prevents the "An assistant message with 'tool_calls' must be followed
 // by tool messages" error from the API.
 func sanitizeMessages(messages []ChatMessage) []ChatMessage {
+	out := deepCopyMessages(messages)
+	out = dropOrphanToolMessages(out)
+	out = injectMissingToolResponses(out)
+	fixEmptyAssistantContent(out)
+	return out
+}
+
+func deepCopyMessages(messages []ChatMessage) []ChatMessage {
+
 	if messages == nil {
 		return nil
 	}
 	out := make([]ChatMessage, len(messages))
 	for i, msg := range messages {
 		out[i] = msg
-		// Generate a fresh message-level ID for API tracking
-		b := make([]byte, 8)
-		if _, err := rand.Read(b); err != nil {
-			out[i].ID = fmt.Sprintf("msg_%d", time.Now().UnixNano())
-		} else {
-			out[i].ID = "msg_" + hex.EncodeToString(b)
-		}
+		// v3.0: 不再生成消息级随机 id —— 请求体必须字节级确定性 (前缀缓存铁律)。
+		// ID 字段 omitempty 且恒空 → 不上线。工具调用 id / tool_call_id 是 API
+		// 必需字段, 仍按需补齐 (见下)。
 
 		// Deep-copy tool calls and ensure every tool call has valid id and type
 		if len(msg.ToolCalls) > 0 {
@@ -604,6 +801,11 @@ func sanitizeMessages(messages []ChatMessage) []ChatMessage {
 			out[i].ToolCalls = nil
 		}
 
+		// Deep-copy image parts (base64 字符串不可变, 复制 slice 头防共享即可)
+		if len(msg.Images) > 0 {
+			out[i].Images = append([]ImagePart(nil), msg.Images...)
+		}
+
 		// For tool role messages, ensure tool_call_id is present
 		if out[i].Role == "tool" {
 			if out[i].ToolCallID == "" {
@@ -614,27 +816,41 @@ func sanitizeMessages(messages []ChatMessage) []ChatMessage {
 		}
 	}
 
-	// Remove orphan tool messages: a tool message whose tool_call_id matches NO
-	// assistant tool_call anywhere. DeepSeek rejects these with
-	// "tool_call_ids did not have response messages" (it treats the orphan id as
-	// an unresolved assistant tool call). Must run BEFORE the placeholder pass so
-	// placeholders are only inserted for genuinely missing responses.
+	return out
+}
+
+func dropOrphanToolMessages(out []ChatMessage) []ChatMessage {
+	// Remove orphan / misplaced tool messages: DeepSeek rejects any tool message
+	// that is NOT a response to the immediately-preceding assistant(tool_calls)
+	// block ("Messages with role 'tool' must be a response to a preceding message
+	// with 'tool_calls'"). The prior check only matched the id anywhere in the
+	// array, so a tool could survive when its block was reordered/truncated
+	// upstream — then the API 400'd. Rewritten as a block scan: a tool is valid
+	// only if it sits inside the tool-call block opened by the nearest preceding
+	// assistant(tool_calls) (with only tool messages in between), and its id
+	// matches that block. Anything else is dropped; the placeholder pass below
+	// refills genuinely-missing responses.
 	for i := 0; i < len(out); i++ {
 		if out[i].Role != "tool" {
 			continue
 		}
-		matched := false
-		for j := 0; j < len(out); j++ {
-			if j != i && out[j].Role == "assistant" {
-				for _, tc := range out[j].ToolCalls {
-					if tc.ID == out[i].ToolCallID {
-						matched = true
-						break
-					}
-				}
-			}
-			if matched {
+		blockStart := -1
+		for k := i - 1; k >= 0; k-- {
+			if out[k].Role == "assistant" && len(out[k].ToolCalls) > 0 {
+				blockStart = k
 				break
+			}
+			if out[k].Role != "tool" {
+				break // 前面是 user/普通assistant/其他 → 无合法块
+			}
+		}
+		matched := false
+		if blockStart >= 0 {
+			for _, tc := range out[blockStart].ToolCalls {
+				if tc.ID == out[i].ToolCallID {
+					matched = true
+					break
+				}
 			}
 		}
 		if !matched {
@@ -643,6 +859,10 @@ func sanitizeMessages(messages []ChatMessage) []ChatMessage {
 		}
 	}
 
+	return out
+}
+
+func injectMissingToolResponses(out []ChatMessage) []ChatMessage {
 	// Consistency check: for every assistant message with tool_calls,
 	// ensure there are subsequent tool messages with matching tool_call_ids.
 	// If a tool response is missing, inject a placeholder to prevent API errors.
@@ -674,16 +894,17 @@ func sanitizeMessages(messages []ChatMessage) []ChatMessage {
 						ToolCallID: tc.ID,
 						Content:    "[system] tool result unavailable",
 					}
-					b4 := make([]byte, 8)
-					rand.Read(b4)
-					placeholder.ID = "msg_" + hex.EncodeToString(b4)
-					// Insert at position
+					// 插入位置
 					out = append(out[:insertAt], append([]ChatMessage{placeholder}, out[insertAt:]...)...)
 				}
 			}
 		}
 	}
 
+	return out
+}
+
+func fixEmptyAssistantContent(out []ChatMessage) {
 	// Final guard: never send an assistant message with BOTH empty content and
 	// empty tool_calls — the API rejects it with HTTP 400
 	// ("Invalid assistant message: content or tool_calls must be set").
@@ -698,8 +919,6 @@ func sanitizeMessages(messages []ChatMessage) []ChatMessage {
 			}
 		}
 	}
-
-	return out
 }
 
 // ─── Tool call merging

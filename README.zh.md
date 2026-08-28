@@ -1,34 +1,35 @@
-# 铸剑炉 (Forge) — 通用数字智能体
+# 铸剑炉 — 通用数字智能体
 
-> *The forge that shapes software.* 单一工具 · 十八道门 · 自我进化
+> 塑造软件之炉。一个工具，十二道 Gate，内核确定性。
 
-**铸剑炉**是一个自托管的 AI 智能体引擎，基于一个激进的设计：**唯一工具** `forge`（多语言编译器沙箱，18 种 Gate）+ LLM 编排层。生成与执行严格分离——LLM 大脑写代码，铸剑炉执行，结果回传。无隐藏工具，无魔法。
+**铸剑炉** 是一个自托管 AI Agent 引擎，基于一个刻意设计：**单一工具**（`forge`）负责编译、执行、销毁跨 **12 种语言与逻辑 Gate** 的代码，并配合 LLM 编排层。生成与执行严格分离 —— LLM 大脑写代码，铸剑炉执行，判定回灌。
 
-## 核心特性
+核心哲学是**结构性的确定性**：LLM 是活的、统计的系统，实时推理且会漂移；身体是确定的程序，负责执行、验证、兜底。所有能力流经一个工具，无隐藏钩子，无魔法。
 
-- **单工具架构**：一切能力经由唯一 `forge` 工具，生成的代码即时编译、执行、销毁
-- **18 种 Gate**：python / go / sh / node / deno / rust / tcc / math / logic / system / knowledge / regex / chain / eprover / repair / self / tcm / browser
-- **LLM 大脑 + 代码身体**：大脑实时推理，身体保持确定性；`repair`/`self` 门让智能体改进自身源码
-- **纵深防御**：完整性守卫、审查门、基线审计（`defense_system/`）
-- **稳健记忆**：原子写入（tmp+rename）、折叠/召回引擎、事件日志
-- **流式 LLM 客户端**：三档推理强度、智能路由、`.env` 配置
-- **跨平台**：Windows 一等公民；平台差异由独立文件隔离
+## 亮点
+
+- **单工具架构** —— 所有能力经一个 `forge` 工具；生成的代码现场编译、执行、销毁
+- **12 道 Gate** —— python / go / sh / node / math / logic / regex / knowledge / tcm / browser / chain / self
+- **LLM 大脑 + 代码身体** —— Agent 实时推理，身体保持确定性；`chain` 编排多 Gate 管道，`self` 允许 Agent 改进自身源码（需审批）
+- **纵深防御** —— 完整性守卫、评审 Gate、基线检查
+- **健壮记忆** —— 原子存储（tmp+rename）、折叠/召回引擎、事件日志
+- **流式 LLM 客户端** —— 三级 reasoning_effort、智能路由、`.env` provider 配置
+- **跨平台** —— Windows 一等公民；平台文件隔离 OS 差异
 
 ## 快速开始
 
 ```bash
 git clone https://github.com/jinguanghai/forge.git
 cd forge
-cp .env.example .env      # 填入 DEEPSEEK_API_KEY
+cp .env.example .env      # 设置 DEEPSEEK_API_KEY（任意 OpenAI 兼容 provider）
 go build -o forge .
 ./forge
 ```
 
-## 安全与隐私
+## 架构
 
-- 本仓库仅含**引擎源码**——不含任何密钥、个人数据或私有知识库
-- 私有数据（个人知识、医案、古籍数据等）**永不**进入本仓库
+身体是一小段 Go 程序：`agent.go` 编排 LLM 循环，`forge.go` 实现 Gate，`llm.go` 从 provider 流式读取，`config.go` 管理配置，`ux.go` 渲染终端。会话统计与展示助手各居其文件（`stats.go`、`style.go`）以分离职责。
 
-## License
+## 许可证
 
-[MIT](LICENSE) © 2026 jinguanghai
+MIT

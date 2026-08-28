@@ -78,3 +78,53 @@ func TestCursorPosMath(t *testing.T) {
 		t.Errorf("宽字符光标: (%d,%d) want (0,4)", row, col)
 	}
 }
+
+// ---------- cursorBlockPos: 与 wrapText 同模型的光标定位 ----------
+// 修复回归: 原取模定位在"宽字符恰好到行末被折到下一行"时错位1列,
+// 表现为输入到行末后光标/文字错乱, 看不到自己写了什么。
+func TestCursorBlockPos(t *testing.T) {
+	cases := []struct {
+		name   string
+		prompt string
+		termW  int
+		buf    string
+		cursor int
+		wantR  int
+		wantC  int
+	}{
+		{"空缓冲", "> ", 10, "", 0, 0, 2},
+		{"普通ASCII", "> ", 10, "abc", 3, 0, 5},
+		{"恰好满宽回绕", "> ", 10, "abcdefgh", 8, 1, 0}, // 2+8=10 满宽 → 终端回绕到下行行首
+		{"超宽折行", "> ", 10, "abcdefghi", 9, 1, 1},  // 2+9=11>10: 第1行"abcdefgh", 第2行"i"
+		{"宽字符不折", "> ", 10, "abc中", 4, 0, 7},      // 2+3+2=7<=10 一行
+		{"宽字符满宽", "> ", 10, "abcdef中", 7, 1, 0},   // 2+6+2=10 满宽 → 回绕
+		{"宽字符跨行折", "> ", 10, "abcdefg中", 8, 1, 2}, // 2+7=9, +2=11>10: 中折到下行
+		{"中文长行", "> ", 10, "一二三四五六", 6, 1, 4},     // 2+8=10 满: "一二三四" 满宽, "五六"下行
+		{"多行缓冲光标尾", "> ", 10, "ab\ncd", 4, 1, 1},  // buf[:4]="ab\nc", 光标在 'c' 后
+		{"多行缓冲光标中", "> ", 10, "ab\ncd", 2, 0, 4},  // 光标在 "ab" 后: "> ab" 宽4 第1行
+	}
+	for _, c := range cases {
+		r, col := cursorBlockPos(c.prompt, c.termW, []rune(c.buf), c.cursor)
+		if r != c.wantR || col != c.wantC {
+			t.Errorf("%s: (%d,%d) want (%d,%d)", c.name, r, col, c.wantR, c.wantC)
+		}
+	}
+}
+
+// ---------- wrapText 对 '\n' 强制换行（多行编辑重绘不拼行） ----------
+func TestWrapTextNewline(t *testing.T) {
+	lines := wrapText("ab\ncd", 10)
+	if len(lines) != 2 || lines[0] != "ab" || lines[1] != "cd" {
+		t.Errorf("\\n 应强制换行: %q", lines)
+	}
+	// 行内折行与 \n 并存: "abcdefghij" 满宽10, \n 换行, "xyz" 第3行
+	lines = wrapText("abcdefghij\nxyz", 10)
+	if len(lines) != 2 || lines[0] != "abcdefghij" || lines[1] != "xyz" {
+		t.Errorf("折行+\\n 组合错误: %q", lines)
+	}
+	// 连续 \n 产生空行
+	lines = wrapText("a\n\nb", 10)
+	if len(lines) != 3 || lines[0] != "a" || lines[1] != "" || lines[2] != "b" {
+		t.Errorf("连续\\n 应产生空行: %q", lines)
+	}
+}

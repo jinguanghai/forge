@@ -9,7 +9,7 @@ package main
 func runeWidth(r rune) int {
 	switch {
 	case r == 0x26A1, // ⚡ 闪电（Emoji_Presentation，Windows 终端按 2 列渲染）
-		r >= 0x1100 && r <= 0x11FF, // 谚文字母 (Hangul Jamo)
+		r >= 0x1100 && r <= 0x11FF,                                  // 谚文字母 (Hangul Jamo)
 		r >= 0x2E80 && r <= 0x2EFF,                                  // CJK部首补充
 		r >= 0x2F00 && r <= 0x2FDF,                                  // 康熙部首
 		r >= 0x2FF0 && r <= 0x2FFF,                                  // 表意文字描述

@@ -1,6 +1,6 @@
 package main
 
-// event_log.go — 行为事件日志 (抄作业 exo Event Log, 单机精简版)
+// event_log.go — 行为事件日志 (借鉴 exo Event Log, 单机精简版)
 //
 // 设计: .forge\events.jsonl 追加式 JSON Lines, 永不覆盖。
 //   - 8 种事件: turn_started / tool_called / tool_result / self_modified
@@ -29,20 +29,31 @@ const (
 	EvMemoryUpdate = "memory_updated" // 记忆写入
 	EvError        = "error"          // 任务/工具错误
 	EvGuardBlocked = "guard_blocked"  // 输入护栏阻断
+	EvApproved     = "approved"       // 三期 I2: 危险操作经主人批准执行
+	EvGoalUpdate   = "goal_update"    // 三期 I5: 目标状态变更 (create/pause/resume/blocked/complete/clear)
 )
 
 // Event 一条事件记录
 type Event struct {
-	Ts     string      `json:"ts"`
-	Type   string      `json:"type"`
-	Detail string      `json:"detail,omitempty"`
-	Data   interface{} `json:"data,omitempty"`
+	Ts      string      `json:"ts"`
+	Type    string      `json:"type"`
+	Detail  string      `json:"detail,omitempty"`
+	Data    interface{} `json:"data,omitempty"`
+	Session string      `json:"session,omitempty"` // 三期 I1: 所属会话; 空 = legacy 全局事件
 }
 
 var (
-	evMu       sync.Mutex
-	eventsPath string
+	evMu         sync.Mutex
+	eventsPath   string
+	eventSession string // 三期 I1: 当前事件会话 (空 = legacy)
 )
+
+// setEventSession 设置当前事件归属会话; 会话切换时必须调用, 否则事件串味。
+func setEventSession(id string) {
+	evMu.Lock()
+	defer evMu.Unlock()
+	eventSession = id
+}
 
 // initEventLog 初始化事件日志路径 (在 main 中调用一次)
 func initEventLog(workDir string) {
@@ -59,10 +70,11 @@ func logEvent(typ, detail string, data interface{}) {
 		return
 	}
 	ev := Event{
-		Ts:     time.Now().Format(time.RFC3339),
-		Type:   typ,
-		Detail: truncateCN(detail, 200),
-		Data:   data,
+		Ts:      time.Now().Format(time.RFC3339),
+		Type:    typ,
+		Detail:  truncateCN(detail, 200),
+		Data:    data,
+		Session: eventSession,
 	}
 	b, err := json.Marshal(ev)
 	if err != nil {

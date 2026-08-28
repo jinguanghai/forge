@@ -55,45 +55,6 @@ func TestParseNodeErr(t *testing.T) {
 	}
 }
 
-func TestParseRustErr(t *testing.T) {
-	text := "error[E0308]: mismatched types\n --> src\\main.rs:5:9\n  |"
-	errs := parseRustErr(text)
-	if len(errs) != 1 {
-		t.Fatalf("want 1 error, got %d", len(errs))
-	}
-	e := errs[0]
-	if e.Line != 5 || e.Col != 9 {
-		t.Errorf("pos = %d:%d, want 5:9", e.Line, e.Col)
-	}
-	if !strings.Contains(e.Msg, "mismatched") {
-		t.Errorf("Msg = %q", e.Msg)
-	}
-}
-
-func TestParseTccErr(t *testing.T) {
-	text := "test.c:7: error: 'x' undeclared"
-	errs := parseTccErr(text)
-	if len(errs) != 1 {
-		t.Fatalf("want 1 error, got %d", len(errs))
-	}
-	e := errs[0]
-	if e.Line != 7 || !strings.Contains(e.Msg, "undeclared") {
-		t.Errorf("err = %+v", e)
-	}
-}
-
-func TestParseDenoErr(t *testing.T) {
-	text := "error: Uncaught TypeError: x is not a function\n  at file:///a.ts:10:20"
-	errs := parseDenoErr(text)
-	if len(errs) != 1 {
-		t.Fatalf("want 1 error, got %d", len(errs))
-	}
-	e := errs[0]
-	if e.Line != 10 || e.Col != 20 {
-		t.Errorf("pos = %d:%d, want 10:20", e.Line, e.Col)
-	}
-}
-
 func TestParseCompilerError_ANSIStrip(t *testing.T) {
 	text := "\x1b[31mmain.go:1:1: boom\x1b[0m"
 	errs := parseCompilerError("go", text)
@@ -135,12 +96,11 @@ func TestShouldFallback(t *testing.T) {
 }
 
 func TestPickFallback(t *testing.T) {
+	// 四期 I: deno/tcc/rust 已裁剪, 不再有 fallback 分支
 	cases := map[string]string{
 		"sh": "python", "bash": "python",
 		"python": "node", "node": "python", "js": "python",
-		"deno": "node", "ts": "node",
-		"tcc": "go", "c": "go",
-		"go": "", "rust": "",
+		"go": "", "deno": "", "ts": "", "tcc": "", "c": "", "rust": "",
 	}
 	for in, want := range cases {
 		if got := pickFallback(in); got != want {
@@ -266,8 +226,9 @@ func TestForgeDetectLang(t *testing.T) {
 		{"import math\nprint(math.pi)", "python"},
 		{"console.log('x')", "node"},
 		{"const a = 1;", "node"},
-		{"#include <stdio.h>\nint main() { return 0; }", "tcc"},
-		{"let x: string = \"a\";", "deno"},
+		// 四期 I: tcc/deno 已裁剪, C/TS 代码无特征 → 默认 python
+		{"#include <stdio.h>\nint main() { return 0; }", "python"},
+		{"let x: string = \"a\";", "python"},
 		{"def f():\n    return 1", "python"},
 		{"random text here", "python"}, // 默认 fallback
 	}

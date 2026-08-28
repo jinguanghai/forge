@@ -16,30 +16,37 @@ import (
 // ─── Config ─────────────────────────────────────────────────
 
 type Config struct {
-	APIKey              string
-	BaseURL             string
-	Model               string
-	ModelFlash          string // 轻量模型 (简单任务)
-	ModelPro            string // 重量模型 (复杂任务)
-	RouterMode          string // auto | flash | pro | fixed
-	MaxTokens           int
-	Temperature         float64
-	TopP                float64
-	RequestTimeout      time.Duration
-	StreamTimeout       time.Duration
-	ToolTimeout         time.Duration
-	MaxConsecutiveFails int
-	MaxHistoryMessages  int
-	ShowReasoning       bool
-	ReasoningEffort     string // "low"|"high"|"max" (V4-Pro 思考强度), 空=官方默认
-	MaxCodeSize         int
-	MaxOutputLength     int
-	MaxConcurrent       int
-	CacheMaxSize        int
-	RetryMax            int
-	RetryBackoff        time.Duration
-	WorkDir             string
-	CachePersistFile    string
+	APIKey                string
+	BaseURL               string
+	Model                 string
+	ModelFlash            string // 轻量模型 (简单任务)
+	ModelPro              string // 重量模型 (复杂任务)
+	ModelVision           string // 视觉模型 (识图, 官方 deepseek-v4-flash-vision-exp)
+	RouterMode            string // auto | flash | pro | fixed
+	MaxTokens             int
+	Temperature           float64
+	TopP                  float64
+	RequestTimeout        time.Duration
+	StreamTimeout         time.Duration
+	ToolTimeout           time.Duration
+	MaxConsecutiveFails   int
+	MaxLoopStrikes        int // 循环拦截次数上限: 无进展检测拦截 N 次后自动收尾 (非回合上限)
+	MaxHistoryMessages    int
+	CompactEnabled        bool // 历史压缩开关 (六西格玛立项20260815): 超阈值先摘要再裁剪
+	CompactTokenThreshold int  // 触发压缩的历史 token 估算阈值
+	CompactMinTurns       int  // 压缩冷却: 距上次压缩最少间隔轮数 (防前缀频繁变)
+	ShowReasoning         bool
+	ReasoningEffort       string // "low"|"high"|"max" (V4-Pro 思考强度), 空=官方默认
+	MaxCodeSize           int
+	MaxOutputLength       int
+	MaxConcurrent         int
+	CacheMaxSize          int
+	RetryMax              int
+	RetryBackoff          time.Duration
+	WorkDir               string
+	CachePersistFile      string
+	GatesEnabled          []string // 三期 I3: 启用的自托管 gate 列表; 空 = 全部启用
+	PluginReleaseDir      string   // forge-gates 插件发布根目录 (默认 forge_release 相对路径, 可 FORGE_PLUGIN_RELEASE_DIR 覆盖)
 }
 
 // ─── Sentinel errors ────────────────────────────────────────
@@ -53,7 +60,11 @@ var (
 // ─── Production-grade defaults ──────────────────────────────
 
 func DefaultConfig() *Config {
-	wd, _ := os.Getwd()
+	wd, err := os.Getwd()
+	if err != nil {
+		// Getwd 失败(罕见): 回退当前目录, 避免 WorkDir 空串
+		wd = "."
+	}
 	// 本体回退：若当前目录无 forge.go（例如从其他目录启动），
 	// 则退回可执行文件所在目录——铸剑炉的本体在 exe 旁边
 	if _, err := os.Stat(filepath.Join(wd, "forge.go")); err != nil {
@@ -64,26 +75,32 @@ func DefaultConfig() *Config {
 		}
 	}
 	return &Config{
-		BaseURL:             "https://api.deepseek.com/v1",
-		Model:               "deepseek-v4-pro",
-		ModelFlash:          "deepseek-v4-flash",
-		ModelPro:            "deepseek-v4-pro",
-		RouterMode:          RouterAuto,
-		MaxTokens:           65536, // V4-Pro 推理+正文共享总预算; 按实际输出计费, 设大仅防截断
-		Temperature:         0.7,
-		TopP:                0.95,
-		RequestTimeout:      120 * time.Second,
-		StreamTimeout:       300 * time.Second,
-		ToolTimeout:         60 * time.Second,
-		MaxConsecutiveFails: 5,
-		MaxHistoryMessages:  80,              // V4-Flash 1M 上下文: 历史容量 40 → 80（公理三: 记忆仍须梳理，骨架优先）
-		MaxCodeSize:         1 * 1024 * 1024, // 1MB (was 512KB)
-		MaxOutputLength:     24000,           // V4-Flash 1M 上下文: 工具输出截断 16KB → 24KB
-		MaxConcurrent:       4,
-		CacheMaxSize:        256, // (was 128)
-		RetryMax:            3,
-		RetryBackoff:        1 * time.Second,
-		WorkDir:             wd,
+		BaseURL:               "https://api.deepseek.com/v1",
+		Model:                 "deepseek-v4-flash-vision-exp", // 2026-08-24 金光海: 默认模型切 Vision-Exp (与 DSH 默认一致, 支持识图)
+		ModelFlash:            "deepseek-v4-flash",
+		ModelPro:              "deepseek-v4-pro",
+		ModelVision:           "deepseek-v4-flash-vision-exp",
+		RouterMode:            RouterAuto,
+		MaxTokens:             65536, // V4-Pro 推理+正文共享总预算; 按实际输出计费, 设大仅防截断
+		Temperature:           0.7,
+		TopP:                  0.95,
+		RequestTimeout:        120 * time.Second,
+		StreamTimeout:         300 * time.Second,
+		ToolTimeout:           60 * time.Second,
+		MaxConsecutiveFails:   5,
+		MaxLoopStrikes:        4,  // 循环拦截 4 次后带进展收尾; 无回合上限, 真正干活可无限跑
+		MaxHistoryMessages:    80, // V4-Flash 1M 上下文: 历史容量 40 → 80（公理三: 记忆仍须梳理，骨架优先）
+		CompactEnabled:        getEnvInt("AGENT_COMPACT_ENABLED", 1) == 1,
+		CompactTokenThreshold: getEnvInt("AGENT_COMPACT_TOKEN_THRESHOLD", 20000),
+		CompactMinTurns:       getEnvInt("AGENT_COMPACT_MIN_TURNS", 10),
+		MaxCodeSize:           1 * 1024 * 1024, // 1MB (was 512KB)
+		MaxOutputLength:       24000,           // V4-Flash 1M 上下文: 工具输出截断 16KB → 24KB
+		MaxConcurrent:         4,
+		CacheMaxSize:          256, // (was 128)
+		RetryMax:              3,
+		RetryBackoff:          1 * time.Second,
+		WorkDir:               wd,
+		PluginReleaseDir:      "forge_release",
 	}
 }
 
@@ -91,7 +108,10 @@ func DefaultConfig() *Config {
 
 func LoadConfig() (*Config, error) {
 	// Load .env from forge.exe directory (absolute path)
-	exePath, _ := os.Executable()
+	exePath, execErr := os.Executable()
+	if execErr != nil {
+		exePath = os.Args[0] // 失败回退: 用可执行文件参数
+	}
 	envFile := filepath.Join(filepath.Dir(exePath), ".env")
 	if _, err := os.Stat(envFile); err == nil {
 		_ = godotenv.Load(envFile)
@@ -129,6 +149,9 @@ func LoadConfig() (*Config, error) {
 	if v := os.Getenv("DEEPSEEK_MODEL_PRO"); v != "" {
 		cfg.ModelPro = strings.TrimSpace(v)
 	}
+	if v := os.Getenv("DEEPSEEK_MODEL_VISION"); v != "" {
+		cfg.ModelVision = strings.TrimSpace(v)
+	}
 	if v := os.Getenv("DEEPSEEK_ROUTER"); v != "" {
 		cfg.RouterMode = strings.ToLower(strings.TrimSpace(v))
 	}
@@ -140,6 +163,9 @@ func LoadConfig() (*Config, error) {
 	}
 	if cfg.ModelPro == "" {
 		cfg.ModelPro = "deepseek-v4-pro"
+	}
+	if cfg.ModelVision == "" {
+		cfg.ModelVision = "deepseek-v4-flash-vision-exp"
 	}
 	switch cfg.RouterMode {
 	case RouterFlash, RouterPro, RouterFixed:
@@ -158,7 +184,11 @@ func LoadConfig() (*Config, error) {
 	cfg.StreamTimeout = getEnvDuration("LLM_STREAM_TIMEOUT", cfg.StreamTimeout)
 	cfg.ToolTimeout = getEnvDuration("FORGE_TOOL_TIMEOUT", cfg.ToolTimeout)
 	cfg.MaxConsecutiveFails = getEnvInt("AGENT_MAX_CONSECUTIVE_FAILS", cfg.MaxConsecutiveFails)
+	cfg.MaxLoopStrikes = getEnvInt("AGENT_MAX_LOOP_STRIKES", cfg.MaxLoopStrikes)
 	cfg.MaxHistoryMessages = getEnvInt("AGENT_MAX_HISTORY", cfg.MaxHistoryMessages)
+	cfg.CompactEnabled = getEnvInt("AGENT_COMPACT_ENABLED", 1) == 1
+	cfg.CompactTokenThreshold = getEnvInt("AGENT_COMPACT_TOKEN_THRESHOLD", cfg.CompactTokenThreshold)
+	cfg.CompactMinTurns = getEnvInt("AGENT_COMPACT_MIN_TURNS", cfg.CompactMinTurns)
 	cfg.MaxConcurrent = getEnvInt("FORGE_MAX_CONCURRENT", cfg.MaxConcurrent)
 	cfg.CacheMaxSize = getEnvInt("FORGE_CACHE_SIZE", cfg.CacheMaxSize)
 	cfg.MaxCodeSize = getEnvInt("FORGE_MAX_CODE_SIZE", cfg.MaxCodeSize)
@@ -168,6 +198,16 @@ func LoadConfig() (*Config, error) {
 
 	// Cache persistence
 	cfg.CachePersistFile = getEnv("FORGE_CACHE_PERSIST_FILE", cfg.CachePersistFile)
+
+	// gate 启用配置 (逗号分隔; 空 = 全部启用)
+	if v := os.Getenv("FORGE_GATES_ENABLED"); strings.TrimSpace(v) != "" {
+		for _, g := range strings.Split(v, ",") {
+			g = strings.TrimSpace(g)
+			if g != "" {
+				cfg.GatesEnabled = append(cfg.GatesEnabled, g)
+			}
+		}
+	}
 
 	if v := os.Getenv("FORGE_SHOW_REASONING"); v != "" {
 		cfg.ShowReasoning, _ = strconv.ParseBool(strings.TrimSpace(v))
@@ -186,16 +226,22 @@ func LoadConfig() (*Config, error) {
 	if v := os.Getenv("FORGE_WORK_DIR"); v != "" {
 		cfg.WorkDir = v
 	}
+	if v := os.Getenv("FORGE_PLUGIN_RELEASE_DIR"); v != "" {
+		cfg.PluginReleaseDir = v
+	}
 
 	// Clamp to safe ranges
 	cfg.MaxConsecutiveFails = clamp(cfg.MaxConsecutiveFails, 1, 50)
+	cfg.MaxLoopStrikes = clamp(cfg.MaxLoopStrikes, 1, 20)
 	cfg.MaxHistoryMessages = clamp(cfg.MaxHistoryMessages, 4, 500)
+	cfg.CompactTokenThreshold = clamp(cfg.CompactTokenThreshold, 1000, 200000)
+	cfg.CompactMinTurns = clamp(cfg.CompactMinTurns, 1, 100)
 	cfg.MaxConcurrent = clamp(cfg.MaxConcurrent, 1, 64)
 	cfg.CacheMaxSize = clamp(cfg.CacheMaxSize, 0, 10000)
 	cfg.MaxCodeSize = clamp(cfg.MaxCodeSize, 1024, 50*1024*1024) // up to 50MB
 	cfg.RetryMax = clamp(cfg.RetryMax, 0, 10)
 	cfg.MaxOutputLength = clamp(cfg.MaxOutputLength, 256, 512*1024) // up to 512KB
-	cfg.MaxTokens = clamp(cfg.MaxTokens, 256, 262144) // V4 输出上限 384K
+	cfg.MaxTokens = clamp(cfg.MaxTokens, 256, 262144)               // V4 输出上限 384K
 	cfg.Temperature = clampFloat(cfg.Temperature, 0, 2.0)
 	cfg.TopP = clampFloat(cfg.TopP, 0, 1.0)
 

@@ -1,10 +1,10 @@
 // 记忆召回引擎 v2.2 —— BM25 关键词检索 + 新鲜度三态（memory_recall.go）
 //
-// 一期 DMAIC (20260807, 借鉴 DeepSeek-Reasonix Context Engine):
-//   I1 BM25 自动召回: key_findings 不再全量进 system, 按用户输入打分取 top-K
-//   I2 新鲜度三态: fresh(<7天)/current(<30天)/stale(≥30天) 降权, 超60天不召回
-//   I3 低权威声明: 召回块自带宽泛免责前缀(可能过期/不得覆盖常驻指令)
-//   I4 缓存守护: 动态内容只进用户轮次, system 保持纯锚点恒定 → DeepSeek 前缀缓存不破
+// 借鉴 DeepSeek-Reasonix Context Engine:
+//   BM25 自动召回: key_findings 不再全量进 system, 按用户输入打分取 top-K
+//   新鲜度三态: fresh(<7天)/current(<30天)/stale(≥30天) 降权, 无硬截断（stale 权重 0.5）
+//   低权威声明: 召回块自带宽泛免责前缀(可能过期/不得覆盖常驻指令)
+//   缓存守护: 动态内容只进用户轮次, system 保持纯锚点恒定 → DeepSeek 前缀缓存不破
 //
 // 与 Reasonix 的关键差异: 我们用内存中的 memory.json(锚点) 而非文件树,
 // 检索目标是 key_findings(既往工程经验), 不检索项目文件。
@@ -26,6 +26,7 @@ type KeyFinding struct {
 	Title    string   `json:"title"`
 	Content  string   `json:"content"`
 	Keywords []string `json:"keywords,omitempty"`
+	Session  string   `json:"session,omitempty"` // 三期 I1: 归属会话; 空 = 全局经验
 }
 
 // loadKeyFindings 读取 memory.json 的 key_findings 段; 兼容 {title,content} 与纯字符串。
@@ -63,6 +64,7 @@ func loadKeyFindings(workDir string) ([]KeyFinding, error) {
 			Title    string   `json:"title"`
 			Content  string   `json:"content"`
 			Keywords []string `json:"keywords,omitempty"`
+			Session  string   `json:"session,omitempty"`
 		}
 		if err := json.Unmarshal(r, &d); err == nil && d.Content != "" {
 			if d.Title == "" {
@@ -73,7 +75,7 @@ func loadKeyFindings(workDir string) ([]KeyFinding, error) {
 					d.Title = d.Content
 				}
 			}
-			out = append(out, KeyFinding{Title: d.Title, Content: d.Content, Keywords: d.Keywords})
+			out = append(out, KeyFinding{Title: d.Title, Content: d.Content, Keywords: d.Keywords, Session: d.Session})
 		}
 	}
 	return out, nil
@@ -211,6 +213,20 @@ func RecallMemory(workDir, input string, topK int) (block string, hitCount int) 
 	if err != nil || len(kfs) == 0 {
 		return "", 0
 	}
+	// 会话隔离 —— 当前会话非空时, 只召回"全局经验 + 当前会话经验";
+	// 旧条目无 session 字段 = 全局经验, 全部保留 (向后兼容)。
+	if sid := currentSession(); sid != "" {
+		filtered := kfs[:0]
+		for _, kf := range kfs {
+			if kf.Session == "" || kf.Session == sid {
+				filtered = append(filtered, kf)
+			}
+		}
+		kfs = filtered
+		if len(kfs) == 0 {
+			return "", 0
+		}
+	}
 	docs := make([][]string, len(kfs))
 	for i, kf := range kfs {
 		docs[i] = tokenizeCN(kf.Title + " " + kf.Content)
@@ -245,9 +261,12 @@ func RecallMemory(workDir, input string, topK int) (block string, hitCount int) 
 		}
 		n++
 		content := it.kf.Content
-		// 去掉与标题重复的前缀(旧格式 title 是 content 开头截断)
-		if strings.HasPrefix(content, it.kf.Title) {
-			content = strings.TrimPrefix(content, it.kf.Title)
+		// 去掉与标题重复的前缀(旧格式 title 是 content 开头截断+"…"后缀)。
+		// 注意: 旧格式 title = 前28字+"…", 而 content 开头并没有"…",
+		// 直接 HasPrefix(content, title) 永远 false → 先剥离"…"再比较。
+		titlePrefix := strings.TrimSuffix(it.kf.Title, "…")
+		if titlePrefix != "" && strings.HasPrefix(content, titlePrefix) {
+			content = strings.TrimPrefix(content, titlePrefix)
 		}
 		content = strings.TrimLeft(content, ":： \n")
 		runes := []rune(content)

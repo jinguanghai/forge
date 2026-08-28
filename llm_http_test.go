@@ -197,6 +197,77 @@ func TestParseSSE_UsageRecordsCacheStat(t *testing.T) {
 	}
 }
 
+// ---- parseSSE: 工具轮次 (finish_reason=tool_calls) 也延迟收尾读 usage ----
+func TestParseSSE_ToolCallsUsageRecorded(t *testing.T) {
+	oldPath := cacheStatPath
+	tmp := filepath.Join(t.TempDir(), "cache_stats.jsonl")
+	cacheStatPath = tmp
+	defer func() { cacheStatPath = oldPath }()
+
+	body := sseLine(`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"forge","arguments":"{}"}}]},"finish_reason":null}]}`) +
+		sseLine(`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`) +
+		sseLine(`{"choices":[],"usage":{"prompt_tokens":200,"completion_tokens":5,"total_tokens":205,"prompt_cache_hit_tokens":180,"prompt_cache_miss_tokens":20}}`) +
+		"data: [DONE]\n\n"
+	ch := make(chan StreamEvent, 32)
+	err := testLLMClient().parseSSE(context.Background(), strings.NewReader(body), ch, "cache-tool-model")
+	if err != nil {
+		t.Fatalf("parseSSE error: %v", err)
+	}
+	events := drainEvents(ch)
+	// 事件序列: [tool_call_delta, tool_call_done]; 收尾阶段 (usage/[DONE])
+	// 被消费但不发多余事件 (无人消费) —— 不能出现第三个 "done" 事件。
+	if len(events) != 2 || events[1].Type != "tool_call_done" {
+		t.Fatalf("events = %v, want [tool_call_delta tool_call_done]", typesOf(events))
+	}
+	data, rerr := os.ReadFile(tmp)
+	if rerr != nil {
+		t.Fatalf("cache stats not written: %v", rerr)
+	}
+	if !strings.Contains(string(data), `"hit":180`) || !strings.Contains(string(data), `"miss":20`) {
+		t.Fatalf("cache stat content = %s", string(data))
+	}
+}
+
+// ---- 请求体字节级确定性 (前缀缓存铁律守卫) ----
+// 相同 messages 的两次请求, 序列化后的 body 必须逐字节相同 —— 任何随机字段
+// (如消息级 id) 都会在首个消息处断裂 DeepSeek 前缀缓存。
+func TestDoStream_DeterministicBody(t *testing.T) {
+	saveGlobals(t)
+	var mu sync.Mutex
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(b))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sseLine(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+	c := newClientWithServer(t, srv)
+	msgs := []ChatMessage{
+		{Role: "system", Content: "SYS"},
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Function: FunctionCall{Name: "forge", Arguments: `{"lang":"python"}`}}}},
+		{Role: "tool", ToolCallID: "c1", Content: "42"},
+	}
+	for i := 0; i < 2; i++ {
+		ch := make(chan StreamEvent, 16)
+		if err := c.doStream(context.Background(), msgs, nil, ch, "test-model"); err != nil {
+			t.Fatalf("doStream: %v", err)
+		}
+		drainEvents(ch)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want 2", len(bodies))
+	}
+	if bodies[0] != bodies[1] {
+		t.Fatalf("请求体非确定性 —— 前缀缓存将被首个差异处断裂:\n%s\nvs\n%s", bodies[0], bodies[1])
+	}
+}
+
 // ---- parseSSE: API 错误块 -> LLMError ----
 func TestParseSSE_APIError(t *testing.T) {
 	body := sseLine(`{"error":{"message":"bad api key","type":"auth","code":"401"}}`)
@@ -831,5 +902,34 @@ func TestLLMClient_HealthyAndShutdown(t *testing.T) {
 	c.Shutdown()
 	if !c.IsHealthy() {
 		t.Fatal("shutdown should not mark unhealthy")
+	}
+}
+
+// TestSanitizeMessages_MisplacedToolRebuilt 回归防护 (v3.0.0 修复):
+// DeepSeek 以 "Messages with role 'tool' must be a response to a preceding
+// message with 'tool_calls'" 拒绝任何非"直接前置 assistant(tool_calls) 块内"
+// 的 tool 消息。旧实现只按 id 全数组匹配, 上游错位/截断(压缩/恢复/裁剪)后
+// 一条 tool 若 id 仍匹配某 assistant, 会被保留 → 请求前置非 tool_calls → 400。
+// 修复: 按"块"扫描, tool 必须位于最近前置 assistant(tool_calls) 之后且 id
+// 匹配该块, 否则丢弃 (占位 pass 补真缺响应)。
+func TestSanitizeMessages_MisplacedToolRebuilt(t *testing.T) {
+	in := []ChatMessage{
+		{Role: "user", Content: "hi"},
+		// 错位: tool 紧跟 user (id 匹配后面的 assistant), 上游截断导致
+		{Role: "tool", ToolCallID: "c1", Content: "res"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Function: FunctionCall{Name: "f", Arguments: "{}"}}}},
+	}
+	out := sanitizeMessages(in)
+	for j, m := range out {
+		if m.Role != "tool" {
+			continue
+		}
+		prev := ""
+		if j > 0 {
+			prev = out[j-1].Role
+		}
+		if prev != "assistant" || len(out[j-1].ToolCalls) == 0 {
+			t.Fatalf("[%d] tool 前置=%q (非 assistant(tool_calls)) → 会触发 400", j, prev)
+		}
 	}
 }

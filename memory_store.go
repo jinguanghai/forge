@@ -1,6 +1,6 @@
 package main
 
-// memory_store.go — memory.json 双版本保护(方案A, 借鉴 MemHop A/B 双头思想)
+// memory_store.go — memory.json 双版本保护(借鉴 MemHop A/B 双头思想)
 //
 // 核心: 任何时刻工作目录中至少有一份完整 JSON。
 //   - memory.json      = 最新成功版本
@@ -64,13 +64,22 @@ func SaveMemory(workDir string, data []byte) error {
 	if !json.Valid(data) {
 		return fmt.Errorf("SaveMemory: 数据不是合法 JSON")
 	}
+	// 写入前体检 (UTF-8 + 必填锚点字段)
+	if err := memHealthLint(data); err != nil {
+		return fmt.Errorf("SaveMemory: %v", err)
+	}
+	// 频率护栏 (同日第 2 次写锚点 → 错误, 要求合并改动)
+	if err := anchorGuardCheck(workDir); err != nil {
+		return err
+	}
 	path := memoryFilePath(workDir)
 	// ① 旧主文件(有效时)升为 .bak; 首次保存时 .bak 初始化本次数据
-	if old, err := os.ReadFile(path); err == nil && json.Valid(old) {
-		if err := atomicWrite(backupMemoryPath(workDir), old); err != nil {
+	oldData, readErr := os.ReadFile(path)
+	if readErr == nil && json.Valid(oldData) {
+		if err := atomicWrite(backupMemoryPath(workDir), oldData); err != nil {
 			return fmt.Errorf("SaveMemory: 备份旧版失败: %v", err)
 		}
-	} else if os.IsNotExist(err) {
+	} else if os.IsNotExist(readErr) {
 		if err := atomicWrite(backupMemoryPath(workDir), data); err != nil {
 			return fmt.Errorf("SaveMemory: 初始化备份失败: %v", err)
 		}
@@ -79,6 +88,8 @@ func SaveMemory(workDir string, data []byte) error {
 	err := atomicWrite(path, data)
 	if err == nil {
 		logEvent(EvMemoryUpdate, "SaveMemory", nil)
+		// 审计留痕 (改了什么字段)
+		anchorGuardAudit(workDir, anchorChangedFields(oldData, data), "")
 	}
 	return err
 }

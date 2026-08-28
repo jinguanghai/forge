@@ -47,7 +47,10 @@ func probeConsoleProcs() {
 	procGetConsoleMode.Call(uintptr(h), uintptr(unsafe.Pointer(&mode)))
 	procSetConsoleMode.Call(uintptr(h), uintptr(mode))
 	procPeekConsoleInput.Call(uintptr(h), uintptr(unsafe.Pointer(&rec)), 1, uintptr(unsafe.Pointer(&numRead)))
-	procReadConsoleInput.Call(uintptr(h), uintptr(unsafe.Pointer(&rec)), 1, uintptr(unsafe.Pointer(&numRead)))
+	// 仅在确有输入时才 ReadConsoleInput: 避免无输入时阻塞(启动探针/首轮 drawStatusBar 场景)
+	if numRead > 0 {
+		procReadConsoleInput.Call(uintptr(h), uintptr(unsafe.Pointer(&rec)), 1, uintptr(unsafe.Pointer(&numRead)))
+	}
 	procSetConsoleCursorPosition.Call(uintptr(h), 0)
 	// procMBToWideChar is used only for GBK decoding – try it with an empty buffer.
 	var dummy byte
@@ -67,9 +70,9 @@ const (
 
 // 粘贴突发检测参数
 const (
-	newlineProbe   = 30 * time.Millisecond  // 换行后跨批探测窗口(粘贴批间<1ms; 手动回车后打字不被吞)
-	burstIdle      = 150 * time.Millisecond // 粘贴流空闲判定（兜底, 批尾探测实际用30ms）
-	readBatchSize  = 8192                   // 批量读取缓冲（替代逐字节读取）
+	newlineProbe  = 30 * time.Millisecond  // 换行后跨批探测窗口(粘贴批间<1ms; 手动回车后打字不被吞)
+	burstIdle     = 150 * time.Millisecond // 粘贴流空闲判定（兜底, 批尾探测实际用30ms）
+	readBatchSize = 8192                   // 批量读取缓冲（替代逐字节读取）
 )
 
 // keyEvent 是 INPUT_RECORD 的事件类型常量
@@ -140,6 +143,7 @@ func newLineEditor(prompt string) *lineEditor {
 
 // runeWidth 已移至 width.go（跨平台共享，覆盖假名/韩文/扩展区）。
 // wrapText 按显示宽度将文本折成多行（每行 <= width 列）。
+// '\n' 视为强制换行（多行粘贴留在编辑区后 redraw 不会把换行拼成一行）。
 func wrapText(s string, width int) []string {
 	if width <= 0 {
 		width = 80
@@ -147,7 +151,50 @@ func wrapText(s string, width int) []string {
 	var lines []string
 	var cur strings.Builder
 	w := 0
-	for _, r := range s {
+	i := 0
+	for i < len(s) {
+		// ANSI 转义序列不计显示宽度：跳过其字节，但保留在输出里。
+		if s[i] == 0x1b {
+			// CSI: ESC [ params ... final-byte (m 等)。final ∈ 0x40..0x7e。
+			j := i + 1
+			if j < len(s) && s[j] == '[' {
+				j++ // past '['
+				for j < len(s) {
+					c := s[j]
+					j++
+					if c >= 0x40 && c <= 0x7e { // final byte
+						break
+					}
+				}
+				cur.WriteString(s[i:j])
+				i = j
+				continue
+			}
+			// 非 CSI 的 ESC 序列：至少消费 ESC + 下一个字节，不破坏折行。
+			if j < len(s) {
+				cur.WriteString(s[i : j+1])
+				i = j + 1
+				continue
+			}
+			cur.WriteByte(s[i])
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			// 无效字节，按单宽处理避免死循环
+			cur.WriteByte(s[i])
+			w++
+			i++
+			continue
+		}
+		if r == '\n' {
+			lines = append(lines, cur.String())
+			cur.Reset()
+			w = 0
+			i += size
+			continue
+		}
 		rw := runeWidth(r)
 		if w > 0 && w+rw > width {
 			lines = append(lines, cur.String())
@@ -156,6 +203,7 @@ func wrapText(s string, width int) []string {
 		}
 		cur.WriteRune(r)
 		w += rw
+		i += size
 	}
 	lines = append(lines, cur.String())
 	if len(lines) == 0 {
@@ -187,6 +235,24 @@ func setCursorPos(x, y int) {
 	h := syscall.Handle(os.Stdout.Fd())
 	v := uint32(uint16(x)) | uint32(uint16(y))<<16
 	procSetConsoleCursorPosition.Call(uintptr(h), uintptr(v))
+}
+
+// cursorBlockPos 计算 buf[:cursor] 在 prompt+termW 下的块内 (行, 列)。
+// 与 wrapText 共用同一折行模型（宽字符不跨行、行宽<=termW）。
+// 修复: 原来 redraw 用 curW % termW 取模定位——当宽字符恰好到行末被 wrapText
+// 折到下一行时, 上一行不满宽, 取模会把光标算进上一行末尾, 错位1列,
+// 表现为"输入到行末后文字/光标错乱, 看不到自己写了什么"。
+func cursorBlockPos(prompt string, termW int, buf []rune, cursor int) (row, col int) {
+	prefix := prompt + string(buf[:cursor])
+	lines := wrapText(prefix, termW)
+	row = len(lines) - 1
+	col = displayWidth(lines[row])
+	if col >= termW {
+		// 最后一行恰好满宽: 终端已自动回绕, 光标在下一行行首
+		row++
+		col = 0
+	}
+	return row, col
 }
 
 // redraw 折行感知重绘：清掉旧块 -> 重绘新块 -> 绝对定位光标。
@@ -228,10 +294,8 @@ func (ed *lineEditor) redraw() {
 		fmt.Print("\033[K")
 	}
 
-	// 光标目标位置（块内行/列）
-	curW := ed.promptW + displayWidth(string(ed.buf[:ed.cursor]))
-	curRow := curW / ed.termW
-	curCol := curW % ed.termW
+	// 光标目标位置：与 wrapText 同模型（宽字符行末不取模, 见 cursorBlockPos）
+	curRow, curCol := cursorBlockPos(ed.prompt, ed.termW, ed.buf, ed.cursor)
 
 	ed.lastLines = actualN
 	ed.cursorRow = curRow
@@ -430,6 +494,11 @@ func (s *inputSession) handleByte(ch byte) (bool, error) {
 // commit 提交当前缓冲：重绘确保显示正确，打印换行，清空 pending。
 func (s *inputSession) commit() (bool, error) {
 	s.redrawFn()
+	// 多行输入时编辑光标可能在块中间：先把光标移到块底再换行,
+	// 否则后续输出从中间行开始会覆盖块下方内容("看不到自己写了什么")。
+	if s.ed.lastLines > 0 && consoleProcsOK {
+		setCursorPos(0, s.ed.lastTop+s.ed.lastLines-1)
+	}
 	s.echoNewline()
 	flushPending(s.ed, &s.pending)
 	return true, nil
@@ -728,6 +797,11 @@ func insertRune(ed *lineEditor, r rune) {
 		// 若 cursorRow 不更新，后续 redraw 的块顶推算 (光标Y-cursorRow) 会错位花屏。
 		if pos, ok := getCursorPos(); ok && int(pos.Y) >= ed.lastTop {
 			ed.cursorRow = int(pos.Y) - ed.lastTop
+			// 同步块高：超宽回绕后块占多行，lastLines 不更新会导致
+			// 后续 redraw 清旧块时漏清多余行（残留花屏）。
+			if h := ed.cursorRow + 1; h > ed.lastLines {
+				ed.lastLines = h
+			}
 		}
 	} else {
 		ed.redraw()
