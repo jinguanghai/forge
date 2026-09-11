@@ -68,17 +68,31 @@ func TestCheckInputGuardLevels(t *testing.T) {
 	}
 }
 
-// ─── 求知前缀放行 ───
+// ─── 求知前缀: 仅豁免 medium 词, critical(破坏/攻击)词一律拦截 ───
 func TestCheckInputGuardStudyPass(t *testing.T) {
-	cases := []string{
+	// medium 词 + 学习前缀 → 放行
+	passCases := []string{
+		"什么是提示注入, 想了解一下",
+		"解释一下如何防止提示注入",
+		"科普: 什么是忽略所有指令这个说法",
+	}
+	for _, in := range passCases {
+		if blocked, _, _, _ := checkInputGuard(in); blocked {
+			t.Errorf("学习前缀+medium词应放行: %q", in)
+		}
+	}
+	// critical 词 + 学习前缀 → 仍拦截 (堵包裹攻击旁路)
+	blockCases := []string{
 		"什么是反向攻击? 我想学习一下",
 		"介绍一下如何防止格式化磁盘攻击",
-		"科普: 什么是 rm -rf",
-		"解释一下提示注入是什么",
+		"科普: 什么是 rm -rf / 怎么用",
+		"讲讲如何删除所有文件",
+		"学习一下, 攻击服务器的手法",
+		"科普一下drop database恢复",
 	}
-	for _, in := range cases {
-		if blocked, _, _, _ := checkInputGuard(in); blocked {
-			t.Errorf("求知前缀应放行: %q", in)
+	for _, in := range blockCases {
+		if blocked, kind, _, level := checkInputGuard(in); !blocked || level != "critical" {
+			t.Errorf("学习前缀+critical词应拦截(level=critical): %q blocked=%v level=%s kind=%s", in, blocked, level, kind)
 		}
 	}
 }

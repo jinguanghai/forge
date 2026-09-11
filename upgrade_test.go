@@ -13,7 +13,7 @@ func TestBuildRestartScript(t *testing.T) {
 	s := buildRestartScript(`C:orge`, 12345, "20260805_213000")
 	for _, want := range []string{
 		"Set-Location 'C:\forge'",
-		"AddSeconds(10)",                // 排空等待上限
+		"AddSeconds(30)",                // 排空等待上限
 		"Get-Process -Id 12345",         // 轮询主进程存活
 		"Stop-Process -Id 12345 -Force", // 超时才强杀(兜底)
 		"forge.exe.bak_20260805_213000",
@@ -26,7 +26,7 @@ func TestBuildRestartScript(t *testing.T) {
 		}
 	}
 	// 排空式: 强杀必须出现在等待逻辑之后
-	if strings.Index(s, "AddSeconds(10)") > strings.Index(s, "Stop-Process -Id 12345 -Force") {
+	if strings.Index(s, "AddSeconds(30)") > strings.Index(s, "Stop-Process -Id 12345 -Force") {
 		t.Errorf("脚本顺序错误: 强杀应在等待之后")
 	}
 }

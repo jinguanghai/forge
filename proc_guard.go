@@ -1,3 +1,5 @@
+// proc_guard.go: 进程防护: 单实例 / 崩溃自愈保护
+
 package main
 
 import (
@@ -20,6 +22,15 @@ func runWithTimeout(ctx context.Context, cmd *exec.Cmd) error {
 	go func() { done <- cmd.Run() }()
 	select {
 	case err := <-done:
+		// 竞态兜底：exec.CommandContext 会在 ctx 到期时自行 Kill 直接子进程，
+		// 使 done 可能先于 ctx.Done() 就绪，从而跳过下面的杀树路径 —— 孙进程
+		// 于是成为孤儿（实测泄漏 34 个 PING.EXE / 17 个 cmd.exe，约 190MB）。
+		// 此处补一次杀树；并把返回值归一为 ctx.Err()，使调用方可用
+		// errors.Is(err, context.DeadlineExceeded) 确定性判定超时。
+		if cerr := ctx.Err(); cerr != nil {
+			killProcessTree(cmd)
+			return cerr
+		}
 		return err
 	case <-ctx.Done():
 		killProcessTree(cmd)

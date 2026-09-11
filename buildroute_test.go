@@ -15,9 +15,9 @@ func TestBuildRouteText(t *testing.T) {
 		wantSub string
 		notWant string
 	}{
-		{"单模型(Flash==Pro)", "deepseek-v4-flash-vision-exp", "deepseek-v4-flash-vision-exp", "auto", 47, "未分档", " ⚡ ↔ "},
-		{"单模型深度(仅未分档不重复模型名)", "deepseek-v4-flash-vision-exp", "deepseek-v4-flash-vision-exp", "auto", 47, "未分档（自动路由）", "vision-exp ⚡"},
-		{"双模型(Flash!=Pro)", "deepseek-v4-flash", "deepseek-v4-pro", "auto", 47, "⚡", ""},
+		{"单模型(Flash==Pro)", "deepseek-flash", "deepseek-flash", "auto", 47, "未分档", " ⚡ ↔ "},
+		{"单模型深度(仅未分档不重复模型名)", "deepseek-flash", "deepseek-flash", "auto", 47, "未分档（自动路由）", "vision-exp ⚡"},
+		{"双模型(Flash!=Pro)", "deepseek-flash", "deepseek-v4-pro", "auto", 47, "⚡", ""},
 	}
 	for _, c := range cases {
 		cfg := &Config{ModelFlash: c.flash, ModelPro: c.pro, RouterMode: c.mode}

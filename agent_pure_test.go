@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -284,5 +285,43 @@ func TestCompletePairs(t *testing.T) {
 	// ⑧ 空/边界: start>=end 直接返回
 	if s, e := completePairs(msgs, 2, 2); s != 2 || e != 2 {
 		t.Fatalf("start>=end 应原样: %d,%d", s, e)
+	}
+}
+
+// TestGoalAnchorRef 六西格玛 P0① 落盘引用:
+// 小输出走原 goalAnchor 内联逻辑 (不改变模型可见性);
+// 大输出 (>12000 rune) 触发全文落盘 + 内联头/尾摘要 + 文件指针。
+func TestGoalAnchorRef(t *testing.T) {
+	// 小输出: 保持 goalAnchor 原逻辑, 内联全文 + 任务锚点 + 轮次
+	small := goalAnchorRef("out", "任务X", 5, t.TempDir())
+	if !strings.Contains(small, "out") || !strings.Contains(small, "任务X") || !strings.Contains(small, "第6轮") {
+		t.Errorf("小输出应走原 goalAnchor 逻辑, 实际: %q", small)
+	}
+
+	// 大输出 (>12000 rune): 触发落盘引用
+	big := strings.Repeat("x", 15000) // 15000 ascii rune > 12000 阈值
+	ref := goalAnchorRef(big, "任务Y", 3, t.TempDir())
+	if !strings.Contains(ref, "落盘保存到") || !strings.Contains(ref, "省略") || !strings.Contains(ref, "任务Y") {
+		t.Errorf("大输出应包含落盘指针+摘要+任务锚点, 实际: %q", ref[:200])
+	}
+	if !strings.Contains(ref, "toolcache") {
+		t.Errorf("落盘引用应含 toolcache 路径, 实际: %q", ref[:150])
+	}
+}
+
+// TestStoreToolOutputRef: 落盘文件真实存在且内容等于原文。
+func TestStoreToolOutputRef(t *testing.T) {
+	wd := t.TempDir()
+	out := strings.Repeat("hello", 300)
+	p := storeToolOutputRef(out, 1, wd)
+	if p == "" {
+		t.Fatal("落盘返回空路径")
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("读取落盘文件失败: %v", err)
+	}
+	if string(b) != out {
+		t.Errorf("落盘内容与原文不一致: got %d, want %d", len(b), len(out))
 	}
 }

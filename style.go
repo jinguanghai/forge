@@ -1,3 +1,5 @@
+// style.go: ANSI 样式常量与终端配色
+
 package main
 
 import (
@@ -55,12 +57,6 @@ func startSpinner(msg string) *spinner {
 	return s
 }
 
-func (s *spinner) setMsg(msg string) {
-	s.mu.Lock()
-	s.msg = msg
-	s.mu.Unlock()
-}
-
 func (s *spinner) stop() {
 	select {
 	case <-s.stopCh:
@@ -91,10 +87,11 @@ func displayToolCode(code, lang string) {
 	fmt.Fprintf(os.Stderr, "  %s %s\n", emoji, color(ansi.cyan, "─── "+langLabel+" "+strings.Repeat("─", max(0, 40-len(langLabel)))))
 
 	codeLines := strings.Split(code, "\n")
-	maxShow := 30
+	maxShow := codeMaxLines()
 	showLines := codeLines
 	truncated := false
-	if len(codeLines) > maxShow {
+	// maxShow<=0 表示全量(不截断), 这是六西格玛控制阶段默认
+	if maxShow > 0 && len(codeLines) > maxShow {
 		showLines = codeLines[:maxShow]
 		truncated = true
 	}

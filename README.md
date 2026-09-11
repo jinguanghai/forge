@@ -1,8 +1,8 @@
-# Forge — General-Purpose Digital Agent
+# Forge — LLM-Powered Multi-Language Compiler Sandbox
 
 > The forge that shapes software. One tool. Twelve gates. Deterministic at the core.
 
-**Forge** is a self-hosted AI agent engine built on a deliberate design: **a single tool** (`forge`) that compiles, executes, and destroys code across **12 language & logic gates**, paired with an LLM orchestration layer. Generation and execution are strictly separated — the LLM brain writes code, the forge runs it, and the verdict feeds back.
+**Forge** is a self-hosted LLM-powered execution framework built on a deliberate design: **a single tool** (`forge`) that compiles, executes, and destroys code across **12 language & logic gates**, paired with an LLM orchestration layer. Generation and execution are strictly separated — the LLM brain writes code, the forge runs it, and the verdict feeds back.
 
 The core philosophy is **determinism by construction**: the LLM is a live, statistical system that reasons in real time and can drift; the body is a deterministic program that enforces, verifies, and bails out. Every capability flows through one tool, so there are no hidden hooks and no magic.
 

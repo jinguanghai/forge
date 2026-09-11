@@ -20,8 +20,12 @@ func runSelfReplace() {
 		oldExe := filepath.Join(exeDir, "forge.exe")
 		newExe := filepath.Join(exeDir, "forge_new.exe")
 		if _, err := os.Stat(newExe); err == nil {
-			os.Remove(oldExe)
-			os.Rename(newExe, oldExe)
+			if err := os.Remove(oldExe); err != nil {
+				fmt.Fprintf(os.Stderr, "%s 自替换: 删除旧 exe 失败: %v\n", color(ansi.yellow, "⚠"), err)
+			}
+			if err := os.Rename(newExe, oldExe); err != nil {
+				fmt.Fprintf(os.Stderr, "%s 自替换: 替换 exe 失败: %v\n", color(ansi.yellow, "⚠"), err)
+			}
 		}
 	}
 }
@@ -38,6 +42,8 @@ func parseFlags() (showReasoning bool, nonFlagArgs []string) {
 		switch arg {
 		case "--reasoning", "-r":
 			showReasoning = true
+		case "--no-reasoning", "-nr":
+			showReasoning = false
 		case "--help", "-h":
 			printHelp()
 			os.Exit(0)
@@ -50,6 +56,8 @@ func parseFlags() (showReasoning bool, nonFlagArgs []string) {
 	}
 	if showReasoning {
 		os.Setenv("FORGE_SHOW_REASONING", "true")
+	} else {
+		os.Setenv("FORGE_SHOW_REASONING", "false")
 	}
 	return showReasoning, nonFlagArgs
 }
@@ -102,6 +110,11 @@ func installSignals(agent *AgentRunner) {
 			if !agentBusy.Load() && sig == os.Interrupt {
 				fmt.Fprintln(os.Stderr)
 				fmt.Fprintf(os.Stderr, "%s 再见。\n", color(ansi.yellow, "⚡"))
+				// os.Exit 会跳过 main 的 defer agent.Shutdown(), 缓存不落盘 →
+				// 下次冷启动全量 miss。闲时退出也必须显式保存。
+				if agent != nil {
+					agent.Shutdown()
+				}
 				os.Exit(0)
 			}
 			fmt.Fprintf(os.Stderr, "\n%s Received signal: %v — shutting down...\n",

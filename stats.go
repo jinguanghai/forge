@@ -1,3 +1,5 @@
+// stats.go: 轻量统计聚合
+
 package main
 
 import (

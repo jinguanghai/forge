@@ -21,7 +21,7 @@ import (
 
 // ─── System prompt ──────────────────────────────────────────
 
-const systemPrompt = `你是 铸剑炉，通用数字智能体。你拥有一个多语言编译器沙箱（铸剑炉），可以写代码、编译执行、销毁。通过它你能完成数字世界的一切任务——编码、系统管理、文件处理、数据分析、网络操作、自动化等。
+const systemPrompt = `你是 铸剑炉，LLM 驱动的多语言编译器沙箱。你拥有一个多语言编译器沙箱（铸剑炉），可以写代码、编译执行、销毁。通过它你能完成数字世界的一切任务——编码、系统管理、文件处理、数据分析、网络操作、自动化等。
 
 <critical_rules>
 1. 你只有 forge（铸剑炉）一个工具，调用时工具名用 "forge"。不要尝试调用 bash、edit、view、grep、ls、glob、write 或任何训练数据中的其他工具——它们不存在，调用必定失败。
@@ -508,7 +508,8 @@ type AgentRunner struct {
 	headCached        bool
 	initialMemText    string
 	initialFoldedText string
-	SaveCheckpoint    bool // 是否保存检查点 (单次查询=false, 避免污染主会话)
+
+	SaveCheckpoint bool // 是否保存检查点 (单次查询=false, 避免污染主会话)
 }
 
 func NewAgentRunner(cfg *Config) (*AgentRunner, error) {
@@ -624,41 +625,8 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 		recordCacheStat(a.cfg.Model, 0, 0, currentSystemHash, true)
 	}
 
-	// Build messages: system + history + current user message
-	messages := make([]ChatMessage, len(a.history)+1)
-	copy(messages, a.history)
-	// 跨 user turn 清理 reasoning_content (deepseek-harness §1.3 规则3):
-	// 见 stripCrossTurnReasoning 注释。仅清理无 tool_calls 的 assistant,
-	// 工具循环内 (messages 局部变量) 不受影响。
-	cleaned := stripCrossTurnReasoning(messages[:len(a.history)])
-	copy(messages, cleaned)
-	// v2.2: BM25 动态召回既往经验注入当前用户轮次(不进 system → 缓存前缀恒定)。
-	// v3.0 缓存铁律 (deepseek-harness 回放逐字节一致): userContent 是"线上真实发送
-	// 的用户轮次"。历史落盘必须原样存 userContent —— 若存 plain input, 下一轮回放
-	// 的历史 [user(input)] 与上一轮线上 [user(recalled+input)] 首 token 即不同,
-	// 导致 system 之后的全部历史前缀断裂 → 跨轮/跨重启全量 miss (实测: 命中恒等于
-	// system 长度, 历史永不命中)。wire ≡ f(history) 后, 回放天然命中。
-	userContent := input
-	if a.cfg != nil {
-		if recalled, _ := RecallMemory(a.cfg.WorkDir, input, 5); recalled != "" {
-			userContent = recalled + "\n" + input
-		}
-	}
-	userMsg := ChatMessage{Role: "user", Content: userContent}
-	// ── 识图 (vision): 输入含图片路径 → 读文件 base64 挂当轮请求 ──
-	// 图片只在当轮内存 (json:"-" 不落盘 history → 重放/压缩路径安全)。
-	images, _ := detectImages(input, a.cfg.WorkDir)
-	if len(images) > 0 {
-		// 负能力门控 (DSH): 无视觉模型 (ModelVision 空) → 禁止挂图, 降级 text-only,
-		// 避免把图发给非视觉模型被服务端 400。有视觉模型才挂图。
-		if visionCapable(a.cfg) {
-			userMsg.Images = images
-			fmt.Fprintf(os.Stderr, "  %s %s\n", color(ansi.blue, "🖼"), dim(fmt.Sprintf("识图 %d 张 → %s", len(images), a.cfg.ModelVision)))
-		} else {
-			fmt.Fprintf(os.Stderr, "  %s %s\n", color(ansi.yellow, "🖼"), dim(fmt.Sprintf("检出 %d 张图但未配置视觉模型, 已降级为纯文本", len(images))))
-		}
-	}
-	messages[len(a.history)] = userMsg
+	// Build messages: system + history + current user message (生命分形: 前置装配提取为 buildStreamMessages)
+	messages, userContent, images := a.buildStreamMessages(input)
 
 	tools := []json.RawMessage{ForgeToolSchema()}
 
@@ -680,8 +648,9 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 	// ── 动态模型路由 ──
 	// 简单任务→flash(便宜)，复杂任务→pro(强)。失败时自动升级：
 	// flash 连续失败 1 次后升级到 pro 重试，防止 flash 能力不足导致任务失败。
+	// 2026-09-11 V4.1 起 Flash==Pro(同一规范名 deepseek-flash)，升级分支自动短路。
 	curModel := pickModel(a.cfg, input)
-	// 识图 → 强制视觉模型 (deepseek-v4-flash-vision-exp);
+	// 识图 → 强制视觉模型 (deepseek-flash: V4.1-Flash 是唯一支持图像理解的模型);
 	// 视觉模型 ≠ ModelFlash, 循环拦截升级逻辑不会把它误升级成 pro。
 	if len(images) > 0 && a.cfg.ModelVision != "" {
 		curModel = a.cfg.ModelVision
@@ -726,6 +695,11 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 		return nil
 	}
 
+	// ── 无剑求值感知 (FORGE_NOSWORD=1): 死程序嗅探求值锚点, 反馈注入让 LLM 修正继续生成 ──
+	// 上限控制: 防 LLM 反复生成锚点导致的死循环 (默认关, 行为与现状完全一致)
+	maxNSWRounds := 2
+	nswRounds := 0
+	verifyStrikes := 0 // 虚报强干预计数(与maxVerifyStrikes配合防死循环)
 	// 回合数限制已取消：无限循环，直到任务完成、无进展拦截收尾、连续失败中止或上下文取消。
 	for turn := 0; ; turn++ {
 		select {
@@ -753,7 +727,6 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 				for i := range messages {
 					messages[i].Images = nil
 				}
-				userMsg.Images = nil
 				fmt.Fprintf(os.Stderr, "  %s %s\n", color(ansi.yellow, "🖼"), dim("服务端拒绝图片 (unsupported image), 已剥离图片降级为纯文本重试"))
 				continue // 重进循环, 用纯文本重新请求
 			}
@@ -781,6 +754,31 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 		// No tool calls -> final response
 		if len(toolCallAccum) == 0 {
 			asst := extractAssistantText(&assistantContent, &reasoningBuf)
+			// ── 无剑求值感知 (FORGE_NOSWORD=1): 死程序嗅探 asst 中的求值锚点,
+			// 命中则把稳定反馈作为 user 消息注入, continue 让 LLM 看到反馈后
+			// 修正继续生成 (公理五: 判据由死程序把守, LLM据此自然调整). ──
+			if nswEnabled() && nswRounds < maxNSWRounds {
+				// 复述过滤 (20260911 缺陷M): 原文已含同形正确结论的锚点不再反馈, 切断
+				// "引用算式 -> 反馈 -> 再引用"的自激循环; 写错/未给结论的照常反馈。
+				if fb, fresh, total := nswFeedbackTextFresh(asst); fb != "" {
+					nswRounds++
+					nswAudit(a, asst, fresh, total)
+					messages = append(messages,
+						ChatMessage{Role: "assistant", Content: asst, ReasoningContent: reasoningBuf.String()},
+						ChatMessage{Role: "user", Content: fb},
+					)
+					continue
+				}
+			}
+			// 虚报检测 gate (增强版, 无剑闭环): 完成态声称+无工具证据 -> 注入真实状态证据, 强制模型修正
+			if verifyClaimEnabled() && verifyStrikes < maxVerifyStrikes && detectUnverifiedClaim(asst, messages) {
+				verifyStrikes++
+				messages = append(messages,
+					ChatMessage{Role: "assistant", Content: asst, ReasoningContent: reasoningBuf.String()},
+					ChatMessage{Role: "user", Content: verifyInterventionMsg(runVerification())},
+				)
+				continue
+			}
 			a.history = append(a.history,
 				ChatMessage{Role: "user", Content: userContent},
 				ChatMessage{Role: "assistant", Content: asst, ReasoningContent: reasoningBuf.String()},
@@ -799,6 +797,15 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 		if len(toolCallAccum) == 0 {
 			// All fragments were invalid — treat as a plain (non-tool) response
 			asst := extractAssistantText(&assistantContent, &reasoningBuf)
+			// 虚报检测 gate (增强版, 无剑闭环): 完成态声称+无工具证据 -> 注入真实状态证据, 强制模型修正
+			if verifyClaimEnabled() && verifyStrikes < maxVerifyStrikes && detectUnverifiedClaim(asst, messages) {
+				verifyStrikes++
+				messages = append(messages,
+					ChatMessage{Role: "assistant", Content: asst, ReasoningContent: reasoningBuf.String()},
+					ChatMessage{Role: "user", Content: verifyInterventionMsg(runVerification())},
+				)
+				continue
+			}
 			a.history = append(a.history,
 				ChatMessage{Role: "user", Content: userContent},
 				ChatMessage{Role: "assistant", Content: asst, ReasoningContent: reasoningBuf.String()},
@@ -877,7 +884,16 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 			fmt.Fprintf(os.Stderr, "  %s %s\n", dim("⚙"), dim("执行中…"))
 			toolStart := time.Now()
 			logEvent(EvToolCalled, params.Lang, map[string]string{"code": truncateCN(params.Code, 300), "lang": params.Lang})
+			// 把本次 run 的 ctx 交给 Forge: 第一次 Ctrl+C 即可中断正在执行的工具
+			a.forge.SetRunCtx(runCtx)
 			output, result, execErr := a.forge.Build(params.Code, params.Lang, params.Input)
+			a.forge.SetRunCtx(nil)
+			// 用户按 Ctrl+C 取消了本次 run: 立即结束, 不计为工具失败
+			// (否则取消会被当成失败计分, 进而误判"连续失败中止")
+			if cerr := runCtx.Err(); cerr != nil {
+				fmt.Fprintf(os.Stderr, "  %s %s\n", color(ansi.yellow, "⏹"), dim("已取消本次执行"))
+				return cerr
+			}
 			toolDuration := time.Since(toolStart)
 			lastRawOutput = output // 供无进展检测: 成功与失败的输出都算
 			toolOK := execErr == nil && result != nil && result.OK && result.ExitCode == 0
@@ -955,8 +971,8 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 					}
 					for i := 0; i < showOut; i++ {
 						ol := outLines[i]
-						if len(ol) > 120 {
-							ol = ol[:120] + "..."
+						if r := []rune(ol); len(r) > 120 {
+							ol = string(r[:120]) + "..."
 						}
 						fmt.Fprintf(os.Stderr, "  %s %s\n", dim("│"), ol)
 					}
@@ -973,7 +989,8 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 			a.lastOutMu.Unlock()
 
 			// Goal anchor
-			warnedOutput := goalAnchor(output, taskAnchor, turn)
+			// 大输出落盘引用: 超阈值(12000 rune)时头尾摘要+全文落盘, 否则走 pruneToolOutput
+			warnedOutput := goalAnchorRef(output, taskAnchor, turn, a.cfg.WorkDir)
 
 			messages = append(messages, ChatMessage{
 				Role: "tool", ToolCallID: tc.ID, Content: warnedOutput,
@@ -1237,6 +1254,39 @@ func appendAuditLine(a *AgentRunner, entry map[string]interface{}) {
 	fh.Write(append(data, '\n'))
 }
 
+// nswAudit 无剑埋点 (20260911): 让"触发几次 / 其中多少是空转"可度量。
+// 此前 gate_audit.jsonl 20637 行里零条 nsw 记录 -> 触发率、空转率完全不可测,
+// 谈扩语法只能盲扩(无法回答"木剑是在拦幻觉还是在自己制造开销")。
+// corrected = 原文写错被纠正 (无剑的核心价值); completed = 原文只写算式未给结论。
+// 被复述过滤掉的纯冗余只进 skipped 计数。
+func nswAudit(a *AgentRunner, asst string, fresh []nswAnchor, total int) {
+	if len(fresh) == 0 {
+		return
+	}
+	corrected, completed := 0, 0
+	exprs := make([]string, 0, 8)
+	for _, an := range fresh {
+		if nswClassifyAnchor(asst, an) == "corrected" {
+			corrected++
+		} else {
+			completed++
+		}
+		if len(exprs) < 8 {
+			exprs = append(exprs, an.expr+"="+an.val)
+		}
+	}
+	appendAuditLine(a, map[string]interface{}{
+		"event":     "nosword",
+		"ts":        time.Now().Format(time.RFC3339Nano),
+		"anchors":   total,
+		"fresh":     len(fresh),
+		"skipped":   total - len(fresh),
+		"corrected": corrected,
+		"completed": completed,
+		"exprs":     exprs,
+	})
+}
+
 func (a *AgentRunner) trimHistory() {
 	a.maybeCompact() // 六西格玛立项20260815: 硬裁剪前先尝试摘要压缩 (背景保留+token节省)
 	maxHist := a.cfg.MaxHistoryMessages
@@ -1365,4 +1415,48 @@ func buildUnknownToolMsg(name string) string {
 func checkRepeatedCall(callHash string, callHistory map[string]int, maxRepeated int) (bool, int) {
 	callHistory[callHash]++
 	return callHistory[callHash] > maxRepeated, callHistory[callHash]
+}
+
+// ─── 生命分形单元: buildStreamMessages ──────────────────────
+// 每个 agent 生命周期都始于"装配消息":
+//
+//	输入 input ──→ 清理历史 ──→ 召回记忆 ──→ 挂识图 ──→ 输出 messages/userContent/images
+//
+// 与 RunStream 主循环共享同一"输入→处理→输出"模式 (自相似小循环, 分形层级的一级)。
+func (a *AgentRunner) buildStreamMessages(input string) ([]ChatMessage, string, []ImagePart) {
+	messages := make([]ChatMessage, len(a.history)+1)
+	copy(messages, a.history)
+	// 跨 user turn 清理 reasoning_content (deepseek-harness §1.3 规则3):
+	// 见 stripCrossTurnReasoning 注释。仅清理无 tool_calls 的 assistant,
+	// 工具循环内 (messages 局部变量) 不受影响。
+	cleaned := stripCrossTurnReasoning(messages[:len(a.history)])
+	copy(messages, cleaned)
+	// v2.2: BM25 动态召回既往经验注入当前用户轮次(不进 system → 缓存前缀恒定)。
+	// v3.0 缓存铁律 (deepseek-harness 回放逐字节一致): userContent 是"线上真实发送
+	// 的用户轮次"。历史落盘必须原样存 userContent —— 若存 plain input, 下一轮回放
+	// 的历史 [user(input)] 与上一轮线上 [user(recalled+input)] 首 token 即不同,
+	// 导致 system 之后的全部历史前缀断裂 → 跨轮/跨重启全量 miss (实测: 命中恒等于
+	// system 长度, 历史永不命中)。wire ≡ f(history) 后, 回放天然命中。
+	userContent := input
+	if a.cfg != nil {
+		if recalled, _ := RecallMemory(a.cfg.WorkDir, input, 5); recalled != "" {
+			userContent = recalled + "\n" + input
+		}
+	}
+	userMsg := ChatMessage{Role: "user", Content: userContent}
+	// ── 识图 (vision): 输入含图片路径 → 读文件 base64 挂当轮请求 ──
+	// 图片只在当轮内存 (json:"-" 不落盘 history → 重放/压缩路径安全)。
+	images, _ := detectImages(input, a.cfg.WorkDir)
+	if len(images) > 0 {
+		// 负能力门控 (DSH): 无视觉模型 (ModelVision 空) → 禁止挂图, 降级 text-only,
+		// 避免把图发给非视觉模型被服务端 400。有视觉模型才挂图。
+		if visionCapable(a.cfg) {
+			userMsg.Images = images
+			fmt.Fprintf(os.Stderr, "  %s %s\n", color(ansi.blue, "🖼"), dim(fmt.Sprintf("识图 %d 张 → %s", len(images), a.cfg.ModelVision)))
+		} else {
+			fmt.Fprintf(os.Stderr, "  %s %s\n", color(ansi.yellow, "🖼"), dim(fmt.Sprintf("检出 %d 张图但未配置视觉模型, 已降级为纯文本", len(images))))
+		}
+	}
+	messages[len(a.history)] = userMsg
+	return messages, userContent, images
 }

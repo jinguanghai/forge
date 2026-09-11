@@ -27,7 +27,7 @@ type ChatMessage struct {
 	ReasoningContent string     `json:"reasoning_content,omitempty"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string     `json:"tool_call_id,omitempty"`
-	// Images 多模态图片 (识图, 官方模型 deepseek-v4-flash-vision-exp)。
+	// Images 多模态图片 (识图, 官方模型 deepseek-flash)。
 	// json:"-" → 不落盘 history / 不参与 Summarize 等复用路径, 仅当轮请求内存。
 	// 非空时自定义 MarshalJSON 把 content 输出为 [text + image_url...] 数组
 	// (OpenAI 兼容多模态块); 无图时输出与旧格式字节级一致 (前缀缓存兼容)。
@@ -474,16 +474,28 @@ func (c *LLMClient) doStream(
 		StreamOptions: &StreamOptions{IncludeUsage: true}, // 流式末尾返回 usage → 缓存度量
 	}
 
+	// 提供商路由: 解析本次请求端点 (MiniMax 高峰省钱)
+	// 必须在 Thinking 参数之前解析: MiniMax 与 DeepSeek 的思考参数协议不同 ——
+	// MiniMax = thinking.type:adaptive (且不认 reasoning_effort);
+	// DeepSeek = thinking.type:enabled + reasoning_effort。
+	ep := c.resolveEndpoint(model, messages)
+	reqBody.Model = ep.Model
+
 	// Thinking 模式显式声明 (deepseek-harness finding #1):
-	// deepseek-v4-pro/flash 默认 thinking=enabled —— 若用户关闭 ShowReasoning 而
+	// deepseek-flash / deepseek-v4-pro 默认 thinking=enabled —— 若用户关闭 ShowReasoning 而
 	// 不显式传 thinking:disabled, 服务端仍按默认开启 → 平凡提示也烧 ~30 reasoning
 	// tokens (账单 2-5 倍)。因此两种状态都显式下发。
 	if c.cfg.ShowReasoning {
-		reqBody.Thinking = &ThinkingConfig{Type: "enabled"}
-		// V4-Pro 思考强度 (2026-08 新增 low/high/max): 平凡任务用 low 省输出token(输出计价),
-		// 复杂任务用 high/max。仅在思考开启时下发, 避免 API 400。
-		if c.cfg.ReasoningEffort != "" {
-			reqBody.ReasoningEffort = c.cfg.ReasoningEffort
+		if ep.Provider == EndpointMiniMax {
+			// MiniMax-M3 走 adaptive 自适应思考; reasoning_effort 为 DeepSeek 专属, 不下发
+			reqBody.Thinking = &ThinkingConfig{Type: "adaptive"}
+		} else {
+			reqBody.Thinking = &ThinkingConfig{Type: "enabled"}
+			// V4-Pro 思考强度 (2026-08 新增 low/high/max): 平凡任务用 low 省输出token(输出计价),
+			// 复杂任务用 high/max。仅在思考开启时下发, 避免 API 400。
+			if c.cfg.ReasoningEffort != "" {
+				reqBody.ReasoningEffort = c.cfg.ReasoningEffort
+			}
 		}
 	} else {
 		reqBody.Thinking = &ThinkingConfig{Type: "disabled"}
@@ -498,7 +510,7 @@ func (c *LLMClient) doStream(
 		return fmt.Errorf("marshal request: %w", err)
 	}
 
-	apiURL := strings.TrimRight(c.cfg.BaseURL, "/") + "/chat/completions"
+	apiURL := strings.TrimRight(ep.BaseURL, "/") + "/chat/completions"
 
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(bodyBytes))
 	if err != nil {
@@ -506,7 +518,7 @@ func (c *LLMClient) doStream(
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+	req.Header.Set("Authorization", "Bearer "+ep.APIKey)
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Connection", "keep-alive")
@@ -1052,4 +1064,33 @@ func mergeToolCalls(deltas []ToolCall) []ToolCall {
 		})
 	}
 	return result
+}
+
+// resolveEndpoint 决定本次请求应到达的提供商端点 (MiniMax 高峰省钱路由)。
+// 规则:
+//
+//	识图(含图片) → 强制 DeepSeek, 保护识图能力不因路由降级到 MiniMax;
+//	MiniMax 三字段齐备 且 处于 MiniMax 窗口 → MiniMax, 模型锚定 MiniMaxModel;
+//	其余 → DeepSeek, 模型取 preferModel (调用方 pickModel/识图模型), 空则回 cfg.Model。
+func (c *LLMClient) resolveEndpoint(preferModel string, msgs []ChatMessage) Endpoint {
+	// 规则1: 识图强制 DeepSeek
+	for _, m := range msgs {
+		if len(m.Images) > 0 {
+			m := preferModel
+			if m == "" {
+				m = c.cfg.Model
+			}
+			return Endpoint{Provider: EndpointDeepSeek, APIKey: c.cfg.APIKey, BaseURL: c.cfg.BaseURL, Model: m}
+		}
+	}
+	// 规则2: MiniMax 窗口 + 三字段齐备
+	if c.cfg.MiniMaxAPIKey != "" && c.cfg.MiniMaxBaseURL != "" && c.cfg.MiniMaxModel != "" && minimaxWindowNow() {
+		return Endpoint{Provider: EndpointMiniMax, APIKey: c.cfg.MiniMaxAPIKey, BaseURL: c.cfg.MiniMaxBaseURL, Model: c.cfg.MiniMaxModel}
+	}
+	// 规则3: DeepSeek, model 取 preferModel, 空则 cfg.Model
+	m := preferModel
+	if m == "" {
+		m = c.cfg.Model
+	}
+	return Endpoint{Provider: EndpointDeepSeek, APIKey: c.cfg.APIKey, BaseURL: c.cfg.BaseURL, Model: m}
 }

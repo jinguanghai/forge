@@ -64,8 +64,11 @@ const (
 )
 
 const (
-	enableLineInput = 0x0002
-	enableEchoInput = 0x0004
+	enableLineInput            = 0x0002
+	enableEchoInput            = 0x0004
+	enableExtendedFlags        = 0x0080
+	enableQuickEditMode        = 0x0040
+	enableVirtualTerminalInput = 0x0200
 )
 
 // 粘贴突发检测参数
@@ -118,14 +121,15 @@ func setConsoleMode(h syscall.Handle, mode uint32) error {
 
 // lineEditor 维护编辑缓冲与终端块位置，支持超长输入折行后的正确重绘。
 type lineEditor struct {
-	buf       []rune
-	cursor    int
-	prompt    string
-	promptW   int
-	termW     int
-	lastLines int // 上次重绘占用的终端行数
-	lastTop   int // 上次块顶的缓冲区行号
-	cursorRow int // 光标在块内的行号（0-based）
+	buf          []rune
+	cursor       int
+	prompt       string
+	promptW      int
+	termW        int
+	lastLines    int // 上次重绘占用的终端行数
+	lastTop      int // 上次块顶的缓冲区行号
+	cursorRow    int // 光标在块内的行号（0-based）
+	bottomBarRow int // 状态栏所在行(bottom); redraw 禁止触碰该行, -1=未约束(非TTY/自定义)
 }
 
 func newLineEditor(prompt string) *lineEditor {
@@ -134,10 +138,11 @@ func newLineEditor(prompt string) *lineEditor {
 		tw = 80
 	}
 	return &lineEditor{
-		prompt:    prompt,
-		promptW:   displayWidth(prompt),
-		termW:     tw,
-		lastLines: 1,
+		bottomBarRow: -1,
+		prompt:       prompt,
+		promptW:      displayWidth(prompt),
+		termW:        tw,
+		lastLines:    1,
 	}
 }
 
@@ -272,26 +277,54 @@ func (ed *lineEditor) redraw() {
 		actualN = n + 1
 	}
 
-	// 推算块顶：当前光标屏幕行 - 光标在块内的行号
-	if pos, ok := getCursorPos(); ok {
+	oldTop, oldLines := ed.lastTop, ed.lastLines
+	maxRow := ed.bottomBarRow - 1 // 状态栏上一行 = 编辑区最大行
+
+	// 推算块顶：
+	//  - 有底部状态栏约束：编辑块底部对齐到状态栏上一行(maxRow)，块整体上移，
+	//    保证折行/多行粘贴产生的每一行都在可见区(状态栏上方)，避免原逻辑
+	//    超出 maxRow 就 break 丢弃导致"两行后看不到输入的字"。
+	//    块过高(超出整个窗口)时钳制到屏幕顶(0)，底部超宽部分截断(极端场景)。
+	//  - 无状态栏(非TTY/自定义)：块顶跟随当前光标(原逻辑)。
+	if ed.bottomBarRow >= 0 {
+		ed.lastTop = maxRow - actualN + 1
+	} else if pos, ok := getCursorPos(); ok {
 		ed.lastTop = int(pos.Y) - ed.cursorRow
-		if ed.lastTop < 0 {
-			ed.lastTop = 0
-		}
+	}
+	if ed.lastTop < 0 {
+		ed.lastTop = 0
 	}
 
-	// 逐行清 + 重绘
+	// 清掉旧块占用的行(块顶/块高变化后, 新旧行位集并集全清, 避免残留花屏)
+	clearRow := func(r int) {
+		if ed.bottomBarRow >= 0 && r > maxRow {
+			return
+		}
+		setCursorPos(0, r)
+		fmt.Print("\033[K")
+	}
+	for i := 0; i < oldLines; i++ {
+		clearRow(oldTop + i)
+	}
+	for i := ed.lastTop; i < oldTop; i++ {
+		clearRow(i)
+	}
+	// 清块底下方空出的行(新块比旧块短时)
+	for i := ed.lastTop + actualN; i < oldTop+oldLines; i++ {
+		clearRow(i)
+	}
+
+	// 重绘新块
 	for i := 0; i < actualN; i++ {
-		setCursorPos(0, ed.lastTop+i)
+		r := ed.lastTop + i
+		if ed.bottomBarRow >= 0 && r > maxRow {
+			break
+		}
+		setCursorPos(0, r)
 		fmt.Print("\033[K")
 		if i < n {
 			fmt.Print(lines[i])
 		}
-	}
-	// 清掉旧块多余的行
-	for i := actualN; i < ed.lastLines; i++ {
-		setCursorPos(0, ed.lastTop+i)
-		fmt.Print("\033[K")
 	}
 
 	// 光标目标位置：与 wrapText 同模型（宽字符行末不取模, 见 cursorBlockPos）
@@ -299,7 +332,12 @@ func (ed *lineEditor) redraw() {
 
 	ed.lastLines = actualN
 	ed.cursorRow = curRow
-	setCursorPos(curCol, ed.lastTop+curRow)
+	// 光标不落入状态栏行: 超界时钳制到 status 上一行
+	endRow := ed.lastTop + curRow
+	if ed.bottomBarRow >= 0 && endRow > ed.bottomBarRow-1 {
+		endRow = ed.bottomBarRow - 1
+	}
+	setCursorPos(curCol, endRow)
 }
 
 // ---- 无泄漏的输入探测 ----
@@ -671,7 +709,8 @@ func readLine(prompt string, history []string) (string, error) {
 
 	// Raw mode: disable line input and echo (keep processed input so Ctrl+C
 	// still arrives as a signal rather than a raw byte).
-	raw := orig &^ (enableLineInput | enableEchoInput)
+	raw := orig | enableVirtualTerminalInput | enableExtendedFlags
+	raw &^= enableLineInput | enableEchoInput | enableQuickEditMode
 	if err := setConsoleMode(h, raw); err != nil {
 		return readLineFallback(prompt)
 	}
@@ -685,6 +724,10 @@ func readLine(prompt string, history []string) (string, error) {
 		s.ed.lastTop = int(pos.Y)
 		s.ed.cursorRow = 0
 	}
+	// 记录状态栏所在行(bottom), 供 redraw 在清行/重绘时保留该行不被覆盖
+	if _, bottom, ok := consoleWindowRect(); ok {
+		s.ed.bottomBarRow = bottom
+	}
 	readByte := func() (byte, error) {
 		var one [1]byte
 		for {
@@ -695,6 +738,8 @@ func readLine(prompt string, history []string) (string, error) {
 			if err != nil {
 				return 0, err
 			}
+			// n==0 && err==nil: 底层伪空读(宽度未对齐/非阻塞), 让步防忙转
+			time.Sleep(1 * time.Millisecond)
 		}
 	}
 	s.probe = waitInput
@@ -710,6 +755,8 @@ func readLine(prompt string, history []string) (string, error) {
 			if err != nil {
 				return "", err
 			}
+			// n==0 && err==nil: 让步防忙转
+			time.Sleep(1 * time.Millisecond)
 			continue
 		}
 		committed, herr := s.processBatch(rbuf[:n])
@@ -851,17 +898,52 @@ func tabComplete(line string) string {
 	if !strings.HasPrefix(trimmed, "/") {
 		return ""
 	}
-	cmds := []string{"/help", "/stats", "/history", "/clear", "/reasoning", "/model", "/router", "/health", "/tools", "/last"}
-	for _, c := range cmds {
-		if strings.HasPrefix(c, trimmed) && c != trimmed {
-			return c + " "
+	low := strings.ToLower(trimmed)
+	// 参数模式前：若当前含空格且命令能带参数, 补参数候选
+	if sp := strings.Index(low, " "); sp > 0 {
+		cmdPart := low[:sp]
+		argPrefix := strings.TrimSpace(low[sp+1:])
+		for _, t := range cmdTips {
+			if t.name != cmdPart {
+				continue
+			}
+			for _, a := range t.args {
+				if strings.HasPrefix(strings.ToLower(a), argPrefix) && a != argPrefix {
+					return t.name + " " + a + " "
+				}
+			}
+		}
+		return ""
+	}
+	// 命令前缀补全: 遍历 cmdTips 全量, 返回首个前缀匹配
+	for _, t := range cmdTips {
+		ln := strings.ToLower(t.name)
+		if strings.HasPrefix(ln, low) && t.name != trimmed {
+			return t.name + " "
 		}
 	}
 	return ""
 }
 
-// gbkDecode decodes b as the system ANSI code page (CP_ACP; GBK on zh-CN
-// systems). Returns (nil, false) if b is not valid in that code page.
+// cmdTip 是命令补全规范: name=显示名(含 / 及别名), args=可选参数候选。
+// 与本文件 tabComplete 配对; 新命令须同步登记至此, 表由 handleCommand 与 REPL 命令汇总。
+type cmdTip struct {
+	name string
+	args []string
+}
+
+var cmdTips = []cmdTip{
+	{"/?", nil}, {"/anchor", nil}, {"/cache", nil}, {"/clear", nil},
+	{"/diagnose", nil}, {"/folded", nil}, {"/folds", nil}, {"/gates", nil},
+	{"/gatesync", nil}, {"/goal", []string{"list", "pause", "resume", "complete", "blocked", "clear"}},
+	{"/h", nil}, {"/health", nil}, {"/help", nil}, {"/history", nil},
+	{"/last", nil}, {"/listen", nil}, {"/memdiag", nil}, {"/memhealth", nil},
+	{"/model", nil}, {"/new", nil}, {"/reasoning", nil}, {"/router", []string{"auto", "flash", "pro", "fixed"}},
+	{"/see", nil}, {"/sessions", nil}, {"/stats", nil}, {"/theme", []string{"neon", "cold", "warm"}},
+	{"/tools", nil}, {"/unfold", nil}, {"/upgrade", nil}, {"/use", nil},
+	{"/vision", nil}, {"/voice", nil}, {"/看图", nil},
+}
+
 func gbkDecode(b []byte) ([]rune, bool) {
 	if len(b) == 0 {
 		return nil, false

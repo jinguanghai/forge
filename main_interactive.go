@@ -48,6 +48,7 @@ func runNonInteractive(cfg *Config, agent *AgentRunner, query string) {
 		}
 	}
 	agentBusy.Store(false)
+	speakLastReply(agent)
 	fmt.Printf("\n%s  %s\n", statusBarCacheText(agent, 20), dim(agent.stats.StringZh()))
 	cs := cacheStatsSummary()
 	if strings.Contains(cs, "请求数") {
@@ -233,7 +234,29 @@ func runInteractive(cfg *Config, agent *AgentRunner, showReasoning bool, history
 		}
 
 		// Commands
-		if strings.HasPrefix(input, "/") || lowCmd == "升级" || lowCmd == "upgrade" {
+		// 语音输入: /听 或 /听 <音频文件> → 本地离线ASR → 识别文字作为本轮输入。
+		// 打字输入与语音输入分离: 键盘=打字通道, /听=语音通道, 两种输入方式互不干扰。
+		var isVoice bool
+		if hit, apath := isListenCmd(input); hit {
+			var voiceText string
+			if apath != "" {
+				voiceText, _ = asrFile(apath)
+			} else {
+				voiceText, _ = asrListen()
+			}
+			voiceText = strings.TrimSpace(voiceText)
+			if voiceText == "" {
+				fmt.Printf("\n%s 未识别到语音，请重试\n", color(ansi.yellow, "⚠"))
+				fmt.Println()
+				continue
+			}
+			isVoice = true
+			fmt.Printf("\n%s 语音输入: %s\n", color(ansi.cyan, "🎤"), voiceText)
+			fmt.Println()
+			input = voiceText
+		}
+
+		if !isVoice && (strings.HasPrefix(input, "/") || lowCmd == "升级" || lowCmd == "upgrade") {
 			handleCommand(input, agent, cfg, historyFile, &showReasoning)
 			if exitRequested {
 				break
@@ -294,6 +317,7 @@ func runInteractive(cfg *Config, agent *AgentRunner, showReasoning bool, history
 		agentBusy.Store(true)
 		runErr := agent.RunStream(input)
 		agentBusy.Store(false)
+		speakLastReply(agent)
 		sigCount.Store(0) // 任务结束重置: 下次任务首个 Ctrl+C 仍是取消而非退出
 		if runErr != nil {
 			if errors.Is(runErr, context.Canceled) {

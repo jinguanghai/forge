@@ -48,8 +48,8 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.ModelFlash == "" || cfg.ModelPro == "" {
 		t.Error("ModelFlash/ModelPro must not be empty")
 	}
-	if cfg.MaxTokens != 65536 {
-		t.Errorf("MaxTokens = %d, want 65536", cfg.MaxTokens)
+	if cfg.MaxTokens != 131072 {
+		t.Errorf("MaxTokens = %d, want 131072", cfg.MaxTokens)
 	}
 	if cfg.Temperature != 0.7 {
 		t.Errorf("Temperature = %v, want 0.7", cfg.Temperature)
@@ -115,9 +115,6 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 	if cfg.RequestTimeout != 30*time.Second {
 		t.Errorf("RequestTimeout = %v", cfg.RequestTimeout)
 	}
-	if cfg.ToolTimeout != 15*time.Second {
-		t.Errorf("ToolTimeout = %v", cfg.ToolTimeout)
-	}
 	if cfg.MaxConsecutiveFails != 7 {
 		t.Errorf("MaxConsecutiveFails = %d", cfg.MaxConsecutiveFails)
 	}
@@ -182,8 +179,7 @@ func TestLoadConfig_Clamp(t *testing.T) {
 	t.Setenv("LLM_TEMPERATURE", "9.9")
 	t.Setenv("FORGE_MAX_CONCURRENT", "0")
 	t.Setenv("FORGE_RETRY_MAX", "99")
-	t.Setenv("FORGE_MAX_OUTPUT", "1") // clamp 下限 256
-	t.Setenv("LLM_MAX_TOKENS", "1")   // clamp 下限 256
+	t.Setenv("LLM_MAX_TOKENS", "1") // clamp 下限 256
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -203,9 +199,6 @@ func TestLoadConfig_Clamp(t *testing.T) {
 	}
 	if cfg.RetryMax != 10 {
 		t.Errorf("RetryMax = %d, want 10 (clamped)", cfg.RetryMax)
-	}
-	if cfg.MaxOutputLength != 256 {
-		t.Errorf("MaxOutputLength = %d, want 256 (clamped)", cfg.MaxOutputLength)
 	}
 	if cfg.MaxTokens != 256 {
 		t.Errorf("MaxTokens = %d, want 256 (clamped)", cfg.MaxTokens)

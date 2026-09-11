@@ -42,7 +42,7 @@ func main() {
 	ensureConsoleProbe()
 	defer agent.Shutdown()
 	installCtrlCloseHandler(agent)
-	checkPeakHour()
+	checkPeakHour(cfg)
 	historyFile := setupHistoryFile(cfg)
 	printHealthReport(cfg.WorkDir)
 	printWelcome(cfg)

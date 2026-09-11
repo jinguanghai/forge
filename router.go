@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -15,6 +16,10 @@ const (
 	RouterPro   = "pro"
 	RouterFixed = "fixed"
 )
+
+// peakHourNow 返回当前是否高峰时段 (价格×2)。
+// 包级变量便于测试注入固定状态; 生产默认取 isPeakHour (本机时钟, 等价北京时间)。
+var peakHourNow = isPeakHour
 
 // classifyTask 返回任务复杂度 0.0~1.0。
 // 强信号每个 +0.45，弱信号每个 +0.12，长度 +0.08~0.15，结构信号每个 +0.08。
@@ -99,7 +104,13 @@ func pickModel(cfg *Config, task string) string {
 	case RouterFixed:
 		return cfg.Model
 	default: // auto
-		if classifyTask(task) >= 0.6 {
+		// 高峰时段价格×2: 把"升级到 pro"的门槛由 0.6 提高到 0.8,
+		// 让中复杂度任务先走便宜的 flash; flash 能力不足时由失败/循环拦截兜底升级到 pro。
+		thr := 0.6
+		if peakHourNow() {
+			thr = 0.8
+		}
+		if classifyTask(task) >= thr {
 			return cfg.ModelPro
 		}
 		return cfg.ModelFlash
@@ -140,4 +151,63 @@ func effortLabel(cfg *Config) string {
 		return cfg.ReasoningEffort
 	}
 	return "默认"
+}
+
+// ─── 提供商路由 (Provider Router) ───────────────────────────
+// 高峰时段(工作日9-12/14-18)自动切 MiniMax M3 省钱, 其余/周末回 DeepSeek。
+// 与 DeepSeek 峰谷定价互补: 高峰 MiniMax 更省(实测便宜~19%), 非高峰 DeepSeek 更省。
+
+// 提供商名
+const (
+	EndpointDeepSeek = "deepseek"
+	EndpointMiniMax  = "minimax"
+)
+
+// Endpoint 描述一次请求应到达的提供商及其连接参数。
+type Endpoint struct {
+	Provider string
+	APIKey   string
+	BaseURL  string
+	Model    string
+}
+
+// minimaxWindowNow 返回当前是否处于"切到 MiniMax 的时段"。
+// 包级变量便于测试注入; 生产默认取 minimaxWindow (本机时钟)。
+var minimaxWindowNow = minimaxWindow
+
+// minimaxWindow 判断当前是否为 MiniMax 适用窗口:
+// 周一~周五 且 高峰时段(9-12 / 14-18)。周六周日一律回 DeepSeek。
+func minimaxWindow() bool {
+	return isMiniMaxWindow(time.Now())
+}
+
+// isMiniMaxWindow 纯函数: t 是否为 MiniMax 适用窗口 (周一~周五 且 高峰 9-12/14-18)。
+func isMiniMaxWindow(t time.Time) bool {
+	wd := t.Weekday() // Sunday=0 ... Saturday=6
+	if wd == time.Saturday || wd == time.Sunday {
+		return false
+	}
+	h := t.Hour()
+	return (h >= 9 && h < 12) || (h >= 14 && h < 18)
+}
+
+// routeEndpoint 根据当前时段返回请求应使用的提供商端点。
+// 规则: MiniMax 三字段齐备(APIKey/BaseURL/Model) 且 处于 MiniMax 窗口
+//
+//	→ 走 MiniMax; 否则始终回 DeepSeek。
+func routeEndpoint(cfg *Config) Endpoint {
+	if cfg.MiniMaxAPIKey != "" && cfg.MiniMaxBaseURL != "" && cfg.MiniMaxModel != "" && minimaxWindowNow() {
+		return Endpoint{
+			Provider: EndpointMiniMax,
+			APIKey:   cfg.MiniMaxAPIKey,
+			BaseURL:  cfg.MiniMaxBaseURL,
+			Model:    cfg.MiniMaxModel,
+		}
+	}
+	return Endpoint{
+		Provider: EndpointDeepSeek,
+		APIKey:   cfg.APIKey,
+		BaseURL:  cfg.BaseURL,
+		Model:    cfg.Model,
+	}
 }

@@ -1,3 +1,5 @@
+// agent_pure.go: 代理无副作用纯函数: 消息清洗 / 工具调用配对 / 完整性修复
+
 package main
 
 import (

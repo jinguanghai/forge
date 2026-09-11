@@ -1,3 +1,5 @@
+// guard_review.go: 守卫结果审查: 反制分级与证据留痕
+
 package main
 
 import (

@@ -1,3 +1,5 @@
+// main_utils.go: 主程序杂项工具函数
+
 package main
 
 import (
@@ -98,14 +100,28 @@ func clampF(v, lo, hi float64) float64 {
 }
 
 // ─── Peak-hour reminder ─────────────────────────────────────
+// isPeakHour 返回当前是否为 DeepSeek 高峰时段 (价格×2)。
+// 北京时间 9-12 / 14-18。checkPeakHour 与动态模型降档共用, 避免两处判断漂移。
+func isPeakHour() bool {
+	h := time.Now().Hour()
+	return (h >= 9 && h < 12) || (h >= 14 && h < 18)
+}
+
 // checkPeakHour 打印 DeepSeek 高峰时段提醒 (北京时间 9-12 / 14-18, 价格×2)。
 // 省钱第一杠杆: 高峰价格翻倍, 影响比缓存命中率更大。
-func checkPeakHour() {
+func checkPeakHour(cfg *Config) {
+	// 高峰时段 + MiniMax 已配置 → 自动路由到 MiniMax, 无需用户躲高峰。
+	if cfg != nil && cfg.MiniMaxAPIKey != "" && cfg.MiniMaxBaseURL != "" && cfg.MiniMaxModel != "" && minimaxWindowNow() {
+		fmt.Fprintf(os.Stderr, "%s 高峰时段: 已自动路由到 MiniMax M3 省钱 (无需躲高峰)。\n", color(ansi.green, "✓"))
+		fmt.Fprintf(os.Stderr, "   高峰(工作日9-12/14-18)=MiniMax-M3, 其余/周末=DeepSeek deepseek-flash。\n")
+		return
+	}
 	h := time.Now().Hour()
-	if (h >= 9 && h < 12) || (h >= 14 && h < 18) {
-		fmt.Fprintf(os.Stderr, "%s DeepSeek 高峰时段 (价格×2): 当前 %02d:00 北京时间\n",
-			color(ansi.yellow, "⚠️"), h)
-		fmt.Fprintf(os.Stderr, "   省钱建议: 非紧急任务请避开 9:00-12:00 / 14:00-18:00。\n")
+	if isPeakHour() {
+		fmt.Fprintf(os.Stderr, "%s DeepSeek 高峰时段 (价格×2): 当前 %02d:00 北京时间\n", color(ansi.yellow, "⚠️"), h)
+		if cfg == nil || cfg.MiniMaxAPIKey == "" {
+			fmt.Fprintf(os.Stderr, "   省钱建议: 非紧急任务请避开 9:00-12:00 / 14:00-18:00。\n")
+		}
 	} else {
 		fmt.Fprintf(os.Stderr, "%s 当前非高峰时段 (价格正常)。\n", color(ansi.green, "✓"))
 	}
@@ -238,7 +254,7 @@ func unbalancedDelimiters(s string) bool {
 // ─── Help ───────────────────────────────────────────────────
 
 func printHelp() {
-	fmt.Println("铸剑炉 v" + AppVersion + " — 通用数字智能体 · 编译器沙箱")
+	fmt.Println("铸剑炉 v" + AppVersion + " — LLM 驱动的多语言编译器沙箱")
 	fmt.Println()
 	fmt.Println("用法:")
 	fmt.Println("  forge.exe              交互模式（默认）")
@@ -255,9 +271,9 @@ func printHelp() {
 	fmt.Println("环境变量:")
 	fmt.Println("  DEEPSEEK_API_KEY     DeepSeek API密钥")
 	fmt.Println("  DEEPSEEK_MODEL       固定模型 (设置后路由为 fixed 模式)")
-	fmt.Println("  DEEPSEEK_MODEL_FLASH  轻量模型 (默认 deepseek-v4-flash)")
-	fmt.Println("  DEEPSEEK_MODEL_PRO    重量模型 (默认 deepseek-v4-pro)")
-	fmt.Println("  DEEPSEEK_MODEL_VISION 视觉模型 (识图, 默认 deepseek-v4-flash-vision-exp)")
+	fmt.Println("  DEEPSEEK_MODEL_FLASH  轻量模型 (默认 deepseek-flash)")
+	fmt.Println("  DEEPSEEK_MODEL_PRO    重量模型 (默认 deepseek-flash, V4-Pro 2026-09-14 下线)")
+	fmt.Println("  DEEPSEEK_MODEL_VISION 视觉模型 (识图, 默认 deepseek-flash)")
 	fmt.Println("  DEEPSEEK_ROUTER       路由模式 auto|flash|pro|fixed (默认 auto)")
 	fmt.Println("  FORGE_MAX_CODE_SIZE  最大代码长度 (默认 512KB)")
 	fmt.Println("  FORGE_TOOL_TIMEOUT   工具超时 (默认 60s)")

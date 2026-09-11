@@ -21,7 +21,10 @@ type Config struct {
 	Model                 string
 	ModelFlash            string // 轻量模型 (简单任务)
 	ModelPro              string // 重量模型 (复杂任务)
-	ModelVision           string // 视觉模型 (识图, 官方 deepseek-v4-flash-vision-exp)
+	ModelVision           string // 视觉模型 (识图, 官方 deepseek-flash —— V4-Pro 不支持图像理解)
+	MiniMaxAPIKey         string // MiniMax 备用密钥 (高峰路由, 可空=纯DeepSeek)
+	MiniMaxBaseURL        string // MiniMax 端点 (可空)
+	MiniMaxModel          string // MiniMax 模型名 (可空)
 	RouterMode            string // auto | flash | pro | fixed
 	MaxTokens             int
 	Temperature           float64
@@ -46,7 +49,7 @@ type Config struct {
 	WorkDir               string
 	CachePersistFile      string
 	GatesEnabled          []string // 三期 I3: 启用的自托管 gate 列表; 空 = 全部启用
-	PluginReleaseDir      string   // forge-gates 插件发布根目录 (默认 forge_release 相对路径, 可 FORGE_PLUGIN_RELEASE_DIR 覆盖)
+	PluginReleaseDir      string   // forge-gates 插件发布根目录 (默认 D:\forge_release, 可 FORGE_PLUGIN_RELEASE_DIR 覆盖)
 }
 
 // ─── Sentinel errors ────────────────────────────────────────
@@ -75,13 +78,22 @@ func DefaultConfig() *Config {
 		}
 	}
 	return &Config{
-		BaseURL:               "https://api.deepseek.com/v1",
-		Model:                 "deepseek-v4-flash-vision-exp", // 2026-08-24 金光海: 默认模型切 Vision-Exp (与 DSH 默认一致, 支持识图)
-		ModelFlash:            "deepseek-v4-flash",
-		ModelPro:              "deepseek-v4-pro",
-		ModelVision:           "deepseek-v4-flash-vision-exp",
+		BaseURL: "https://api.deepseek.com/v1",
+		// 2026-09-11 金光海: DeepSeek V4.1 更新 —— 官方规范名收敛为 deepseek-flash /
+		// deepseek-v4-pro 两个; 旧名 v4-flash / v4-flash-vision-exp 已下线(服务端静默别名到
+		// V4.1-Flash); 图像理解仅 deepseek-flash 支持。
+		// 2026-09-11 复核(官方 quick_start/pricing 脚注2): 官方已改口 —— 2026-09-14 之后
+		// 继续提供 V4 Pro 服务, 计费不变(原"09-14 起 pro 全量路由到 Flash"作废)。
+		// 仍统一 deepseek-flash 的理由: 官方基准 V4.1-Flash 在 Agent/工程项全面超 V4-Pro
+		// (Terminal-Bench 2.1 90.6>87.9, DeepSWE v1.1 74.2>62.7, NL2Repo 65.4>61.5,
+		// CyberGym 88.1>83.3, Agents' Last Exam 31.8>25.7), 仅 HLE 知识推理落后(36.8<42.7);
+		// 价格未命中 1<4.5 元 / 输出 4<13.5 元(便宜 4.5 倍)。V4-Pro 留作知识推理手动回退。
+		Model:                 "deepseek-flash",
+		ModelFlash:            "deepseek-flash",
+		ModelPro:              "deepseek-flash", // 回退 pro: 改 .env DEEPSEEK_MODEL_PRO=deepseek-v4-pro
+		ModelVision:           "deepseek-flash",
 		RouterMode:            RouterAuto,
-		MaxTokens:             65536, // V4-Pro 推理+正文共享总预算; 按实际输出计费, 设大仅防截断
+		MaxTokens:             131072, // V4.1-Flash 推理+正文共享总预算; 按实际输出计费, 设大仅防截断
 		Temperature:           0.7,
 		TopP:                  0.95,
 		RequestTimeout:        120 * time.Second,
@@ -100,7 +112,7 @@ func DefaultConfig() *Config {
 		RetryMax:              3,
 		RetryBackoff:          1 * time.Second,
 		WorkDir:               wd,
-		PluginReleaseDir:      "forge_release",
+		PluginReleaseDir:      "D:\\forge_release",
 	}
 }
 
@@ -152,6 +164,17 @@ func LoadConfig() (*Config, error) {
 	if v := os.Getenv("DEEPSEEK_MODEL_VISION"); v != "" {
 		cfg.ModelVision = strings.TrimSpace(v)
 	}
+	// MiniMax 高峰路由 (可选): 三字段齐备才激活, 否则纯 DeepSeek。
+	if v := os.Getenv("MINIMAX_API_KEY"); v != "" {
+		cfg.MiniMaxAPIKey = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("MINIMAX_BASE_URL"); v != "" {
+		cfg.MiniMaxBaseURL = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("MINIMAX_MODEL"); v != "" {
+		cfg.MiniMaxModel = strings.TrimSpace(v)
+	}
+
 	if v := os.Getenv("DEEPSEEK_ROUTER"); v != "" {
 		cfg.RouterMode = strings.ToLower(strings.TrimSpace(v))
 	}
@@ -159,13 +182,13 @@ func LoadConfig() (*Config, error) {
 		cfg.Model = cfg.ModelPro
 	}
 	if cfg.ModelFlash == "" {
-		cfg.ModelFlash = "deepseek-v4-flash"
+		cfg.ModelFlash = "deepseek-flash"
 	}
 	if cfg.ModelPro == "" {
-		cfg.ModelPro = "deepseek-v4-pro"
+		cfg.ModelPro = "deepseek-flash"
 	}
 	if cfg.ModelVision == "" {
-		cfg.ModelVision = "deepseek-v4-flash-vision-exp"
+		cfg.ModelVision = "deepseek-flash"
 	}
 	switch cfg.RouterMode {
 	case RouterFlash, RouterPro, RouterFixed:

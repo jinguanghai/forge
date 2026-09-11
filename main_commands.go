@@ -1,3 +1,5 @@
+// main_commands.go: 交互命令分发: "/xx" 子命令的注册与路由
+
 package main
 
 import (
@@ -44,6 +46,8 @@ func handleCommand(input string, agent *AgentRunner, cfg *Config, historyFile st
 		cmdMemhealth(agent, cfg, parts, historyFile, showReasoning, cmd)
 	case "/gatesync":
 		cmdGatesync(agent, cfg, parts, historyFile, showReasoning, cmd)
+	case "/scorecard":
+		cmdScorecard(agent, cfg, parts, historyFile, showReasoning, cmd)
 	case "/anchor":
 		cmdAnchor(agent, cfg, parts, historyFile, showReasoning, cmd)
 	case "/memdiag":
@@ -58,6 +62,8 @@ func handleCommand(input string, agent *AgentRunner, cfg *Config, historyFile st
 		cmdDiagnose(agent, cfg, parts, historyFile, showReasoning, cmd)
 	case "/health":
 		cmdHealth(agent, cfg, parts, historyFile, showReasoning, cmd)
+	case "/voice":
+		cmdVoice(agent, cfg, parts, historyFile, showReasoning, cmd)
 	case "/看图", "/see", "/vision":
 		cmdVision(agent, cfg, parts, historyFile, showReasoning, cmd)
 	default:
@@ -81,6 +87,9 @@ func cmdHelp(agent *AgentRunner, cfg *Config, parts []string, historyFile string
 	fmt.Println("  " + color(ansi.cyan, "/theme") + "     — 切换主题: /theme <neon|cold|warm>")
 	fmt.Println("  " + color(ansi.cyan, "/health") + "    — 健康检查")
 	fmt.Println("  " + color(ansi.cyan, "/tools") + "     — 列出可用语言编译器 (gates)")
+	fmt.Println("  " + color(ansi.cyan, "/scorecard") + "  — gate Scorecard 排行榜: /scorecard [最近N条] (按 lang/gate 聚合 gate_audit)")
+	fmt.Println("  " + color(ansi.cyan, "/voice") + "     — 语音播报开关/声线: /voice on|off|test|voices|声线 <名称>")
+	fmt.Println("  " + color(ansi.cyan, "/听") + "        — 语音输入(听): 输入 /听 回车后开始说话, 本地离线转文字; 打字输入与语音输入分离, 互不干扰")
 	fmt.Println("  " + color(ansi.cyan, "/看图") + "      — 识别目录下图片: /看图 <目录> [-d](诊断模式)")
 	fmt.Println("  " + color(ansi.cyan, "/last") + "      — 显示最近一次工具完整输出")
 	fmt.Println("  " + color(ansi.cyan, "/cache") + "     — DeepSeek 前缀缓存命中统计")

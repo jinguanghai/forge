@@ -1,3 +1,5 @@
+// guard.go: 三层防护守卫: 记录 / 阻断 / 守门人报警 的判定逻辑
+
 package main
 
 import (
@@ -51,13 +53,16 @@ func isStudyQuery(input string) bool {
 
 // checkInputGuard 返回 (是否阻断, 原因类别, 命中词, 级别)
 func checkInputGuard(input string) (bool, string, string, string) {
-	if isStudyQuery(input) {
-		return false, "", "", ""
-	}
+	// 学习类问句仅标记, 不再整句放行 (旧: HasPrefix 整句放行 → 包裹攻击绕过黑名单)
+	// 修正: medium(注入/规则覆盖)词在学习前缀下豁免; critical(破坏/攻击)词一律拦截(红线)
+	study := isStudyQuery(input)
 	low := strings.ToLower(input)
 	for _, r := range guardRules {
 		for _, w := range r.words {
 			if strings.Contains(low, strings.ToLower(w)) {
+				if study && r.level != "critical" {
+					continue
+				}
 				return true, r.kind, w, r.level
 			}
 		}
@@ -181,4 +186,76 @@ func summarizeCode(code string) string {
 		return string(runes[:120]) + "…"
 	}
 	return s
+}
+
+// ─── 第二道防线: 受保护目标 × 破坏谓词 共现检测 (语义兜底) ───
+// 黑名单(checkDangerousCode)只认"字面危险词", 拦不住
+// os.remove("memory.json") 这类单文件删除, 也拦不住 subprocess.run(['rm','-rf',...])
+// 这类数组拆分绕过。此处补一道语义层: 目的路径是受保护目标 + 同一窗口内出现破坏谓词
+// → 判定危险, 仍走终端 y/N 审批 (多提示一次而非自动阻断, 宁缺毋滥)。
+//
+// 设计边界: protectedTargets 只列"不可覆盖/删除的关键资产"(源码/记忆/密钥/基线),
+// 不含工作根目录 D:\forge —— 避免把临时文件删除/编译产物清理频繁误报。
+// destructiveVerbs 刻意排除只读/复制/存在性检查, 只留删除/覆盖/改名/写坏/强推。
+
+var protectedTargets = []string{
+	"main.go", "agent.go", "forge.go", "llm.go", "config.go", "ux.go",
+	"width.go", "guard.go", "gate_registry.go", "memory_store.go",
+	"agent_pure.go", "router.go", "goal.go", "upgrade.go", "anchor_guard.go",
+	"asr.go", "asr_other.go", "tts.go", "tts_other.go",
+	"memory.json", "forge_cache.gob", "anchor_audit.jsonl", "gate_audit.jsonl",
+	".env", "gh_token.txt", "id_ed25519_vultr", "forge_baseline.json",
+	".forge", "defense_system", ".forge-temp",
+}
+
+var destructiveVerbs = []string{
+	"os.remove(", "os.removeall(", "os.removedirs(", "os.unlink(",
+	"shutil.rmtree(", "shutil.move(", "shutil.removedirs(",
+	"path.unlink(", "path.rmdir(", "path.rename(",
+	"remove-item", "rd /s ", "rd /q ", "del /s", "del /q",
+	"rm -r", "rm -f", "rm -rf", "rm -fr",
+	"'rm'", "\"rm\"",
+	"os.writefile(", "os.rename(",
+	"git push", "git reset --hard",
+}
+
+func checkDangerousTarget(code string) (string, string, bool) {
+	low := strings.ToLower(code)
+	hasVerb := false
+	for _, v := range destructiveVerbs {
+		if strings.Contains(low, strings.ToLower(v)) {
+			hasVerb = true
+			break
+		}
+	}
+	if !hasVerb {
+		return "", "", false
+	}
+	for _, t := range protectedTargets {
+		lt := strings.ToLower(t)
+		idx := 0
+		for {
+			p := strings.Index(low[idx:], lt)
+			if p < 0 {
+				break
+			}
+			s := idx + p
+			lo := s - 80
+			hi := s + len(lt) + 80
+			if lo < 0 {
+				lo = 0
+			}
+			if hi > len(low) {
+				hi = len(low)
+			}
+			window := low[lo:hi]
+			for _, v := range destructiveVerbs {
+				if strings.Contains(window, strings.ToLower(v)) {
+					return "保护目标", t, true
+				}
+			}
+			idx = s + len(lt)
+		}
+	}
+	return "", "", false
 }

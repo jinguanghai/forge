@@ -1,3 +1,5 @@
+// vision.go: 图片识别: 检测消息中的图片并触发识图
+
 package main
 
 import (
@@ -14,7 +16,8 @@ import (
 )
 
 // ─── 识图 (Vision) ─────────────────────────────────────────────
-// 官方能力: deepseek-v4-flash-vision-exp 接受文本+图片 (2026-02 发布, API Docs
+// 官方能力: deepseek-flash (V4.1-Flash) 接受文本+图片 (旧名 v4-flash-vision-exp 已下线,
+// 服务端别名到同一模型); V4-Pro 不支持图像理解 (2026-09-11 实测确认)。API Docs
 // /guides/vision)。支持 JPEG/PNG/GIF/WebP, 格式按文件内容检测 (非扩展名/MIME)。
 // 传图三式: ①base64 data URL 内联 (≤48MiB 请求体, 每图 ≤32MiB) —— 本地文件用这个;
 // ②公开 http(s) URL (≤8192 字符 / 32MiB / 60s 下载); ③Files API file_id (≤64MiB)。

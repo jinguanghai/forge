@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -9,7 +10,10 @@ import (
 
 // 端到端诊断: 真实截图 → discoverImagesInDir → ChatCompletionStream(vision) → 诊断三栏
 func TestVisionDirDiag(t *testing.T) {
-	dir := `C:\Users\jin\Pictures\Screenshots`
+	if os.Getenv("FORGE_E2E") != "1" {
+		t.Skip("FORGE_E2E!=1: 跳过真实 vision 目录 API")
+	}
+	dir := os.ExpandEnv(`${USERPROFILE}\Pictures\Screenshots`)
 	parts, err := discoverImagesInDir(dir)
 	if err != nil {
 		t.Fatal(err)

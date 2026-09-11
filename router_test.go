@@ -1,6 +1,15 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+// 测试固定为非高峰时段, 使 pickModel 行为与旧逻辑一致 (阈值 0.6)。
+// 若实际运行恰逢高峰, 不注入则 auto/复杂任务可能被降档到 flash 而破坏用例。
+func init() {
+	peakHourNow = func() bool { return false }
+}
 
 func TestClassifyTask(t *testing.T) {
 	cases := []struct {
@@ -36,7 +45,7 @@ func TestClassifyTask(t *testing.T) {
 
 func TestPickModel(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.ModelFlash = "deepseek-v4-flash"
+	cfg.ModelFlash = "deepseek-flash"
 	cfg.ModelPro = "deepseek-v4-pro"
 	cfg.Model = "deepseek-v4-pro"
 
@@ -69,5 +78,64 @@ func TestPickModel(t *testing.T) {
 	cfg.RouterMode = ""
 	if m := pickModel(cfg, "列出当前目录的文件"); m != cfg.ModelFlash {
 		t.Errorf("空模式应视为 auto, got %s", m)
+	}
+}
+
+func TestMiniMaxWindow(t *testing.T) {
+	cases := []struct {
+		name string
+		t    time.Time
+		want bool
+	}{
+		{"周一10点高峰", time.Date(2026, 8, 31, 10, 0, 0, 0, time.Local), true},
+		{"周六10点周末", time.Date(2026, 8, 29, 10, 0, 0, 0, time.Local), false},
+		{"周日15点周末", time.Date(2026, 8, 30, 15, 0, 0, 0, time.Local), false},
+		{"周三13点非高峰", time.Date(2026, 8, 26, 13, 0, 0, 0, time.Local), false},
+		{"周三15点高峰", time.Date(2026, 8, 26, 15, 0, 0, 0, time.Local), true},
+		{"周五18点整(开区间不含)", time.Date(2026, 8, 28, 18, 0, 0, 0, time.Local), false},
+		{"周五17点高峰", time.Date(2026, 8, 28, 17, 0, 0, 0, time.Local), true},
+	}
+	for _, c := range cases {
+		if got := isMiniMaxWindow(c.t); got != c.want {
+			t.Errorf("[%s] %v -> want %v got %v", c.name, c.t, c.want, got)
+		}
+	}
+}
+
+func TestRouteEndpoint(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.APIKey = "ds-key"
+	cfg.BaseURL = "https://api.deepseek.com/v1"
+	cfg.Model = "deepseek-flash"
+
+	old := minimaxWindowNow
+	defer func() { minimaxWindowNow = old }()
+
+	// MiniMax 未配 → 始终 DeepSeek
+	minimaxWindowNow = func() bool { return true }
+	if ep := routeEndpoint(cfg); ep.Provider != EndpointDeepSeek {
+		t.Errorf("MiniMax 未配, 应 DeepSeek, got %s", ep.Provider)
+	}
+
+	// MiniMax 配好 + 窗口 → MiniMax
+	cfg.MiniMaxAPIKey = "mm-key"
+	cfg.MiniMaxBaseURL = "https://api.minimaxi.com/v1"
+	cfg.MiniMaxModel = "MiniMax-M3"
+	ep := routeEndpoint(cfg)
+	if ep.Provider != EndpointMiniMax {
+		t.Errorf("窗口且已配, 应 MiniMax, got %s", ep.Provider)
+	}
+	if ep.Model != "MiniMax-M3" || ep.APIKey != "mm-key" {
+		t.Errorf("MiniMax 端点字段错: %+v", ep)
+	}
+
+	// 非窗口 → 回 DeepSeek
+	minimaxWindowNow = func() bool { return false }
+	ep = routeEndpoint(cfg)
+	if ep.Provider != EndpointDeepSeek {
+		t.Errorf("非窗口, 应 DeepSeek, got %s", ep.Provider)
+	}
+	if ep.Model != "deepseek-flash" {
+		t.Errorf("DeepSeek model 错: %s", ep.Model)
 	}
 }

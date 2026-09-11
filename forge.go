@@ -51,6 +51,9 @@ var (
 	ErrTooBusy = errors.New("forge满载")
 
 	ErrShuttingDown = errors.New("forge正在关闭")
+
+	// ErrCancelled: 用户按 Ctrl+C 取消了本次执行 (与程序关停 ErrShuttingDown 区分)。
+	ErrCancelled = errors.New("本次执行已被用户取消")
 )
 
 // CompilerDef describes how to check and execute code in a language.
@@ -250,6 +253,11 @@ type ForgeGateResult struct {
 	CodeSize int `json:"code_size"`
 	Retries  int `json:"retries,omitempty"`
 
+	// Timeout 标记「执行超时」类失败。retryGate 不重试、shouldFallback 不换
+	// 语言：已经烧完整个超时预算的任务，重跑只会再烧一遍(实测 3 次重试把
+	// 30s 放大成 93.6s)，对用户零收益。
+	Timeout bool `json:"timeout,omitempty"`
+
 	CodeLines int `json:"code_lines"`
 
 	Summary string `json:"summary,omitempty"`
@@ -365,6 +373,11 @@ type Forge struct {
 
 	ctx context.Context
 
+	// runCtx: 当前工具执行的 ctx (agent 每次 run 前 SetRunCtx, 用完置 nil)。
+	// 用途: 让第一次 Ctrl+C 能中断正在执行的工具 —— 此前 Build 内部一律用 f.ctx 独立派生
+	// 超时 ctx, 取消 runCtx 对工具执行与重试循环完全无效, 用户只能按第二次(=直接退出程序)。
+	runCtx context.Context
+
 	cancel context.CancelFunc
 
 	sem chan struct{}
@@ -439,6 +452,17 @@ func (f *Forge) Shutdown() {
 
 }
 
+// SetRunCtx 由 agent 在每次工具执行前调用, 传入本次 run 的 ctx; 用完传 nil 恢复默认。
+func (f *Forge) SetRunCtx(ctx context.Context) { f.runCtx = ctx }
+
+// effCtx 返回本次工具执行应使用的 ctx: 优先 runCtx, 否则 f.ctx。
+func (f *Forge) effCtx() context.Context {
+	if f.runCtx != nil {
+		return f.runCtx
+	}
+	return f.ctx
+}
+
 // Build is the main entry point: write code, validate, execute, destroy.
 
 // Returns formatted output, the full result struct, and any error.
@@ -454,8 +478,12 @@ func (f *Forge) Build(code, lang, input string) (string, *ForgeGateResult, error
 
 		defer func() { <-f.sem }()
 
-	case <-f.ctx.Done():
+	case <-f.effCtx().Done():
 
+		// runCtx 被取消 = 用户按了 Ctrl+C; f.ctx 被取消 = 程序关停
+		if f.runCtx != nil && f.runCtx.Err() != nil {
+			return "", nil, ErrCancelled
+		}
 		return "", nil, ErrShuttingDown
 
 	case <-time.After(60 * time.Second):
@@ -489,7 +517,14 @@ func (f *Forge) Build(code, lang, input string) (string, *ForgeGateResult, error
 	// ─── 危险代码审批 (代码层强制, 非提示铁律) ───
 	// 模型要执行的代码命中危险模式, 或调用 self 自改 gate → 终端 y/N 批准后才执行。
 	// 拒绝时返回回执给模型 (代码不执行), 不产生错误状态 (避免触发失败重试链)。
-	if kind, hit, danger := checkDangerousCode(code); danger || lang == "self" {
+	kind, hit, danger := checkDangerousCode(code)
+	if !danger {
+		// 第二道防线: 受保护目标 × 破坏谓词共现 (拦 os.remove("memory.json") 等)
+		if k2, h2, d2 := checkDangerousTarget(code); d2 {
+			kind, hit, danger = k2, h2, true
+		}
+	}
+	if danger || lang == "self" {
 		if kind == "" {
 			kind = "自改"
 			hit = "self gate"
@@ -867,6 +902,13 @@ func (f *Forge) forgeGateSkipCache(code, lang, input string, skipCache bool) For
 
 // isTransientError returns true for errors that are likely temporary
 // (timeouts, network issues, tool not installed) and should not be cached.
+// isTimeoutErr 确定性判定超时：runWithTimeout 在 ctx 到期时返回 ctx.Err()，
+// 即 context.DeadlineExceeded。用 errors.Is 判定而非文本匹配 —— 子进程可能
+// 在超时前已输出 stderr，文本化后的 Error 字段并不可靠。
+func isTimeoutErr(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded)
+}
+
 func isTransientError(r ForgeGateResult) bool {
 	errLower := strings.ToLower(r.Error)
 	return strings.Contains(errLower, "timeout") ||
@@ -928,6 +970,10 @@ func (f *Forge) cacheResult(key string, r ForgeGateResult) {
 // (missing tool, timeout) and a fallback language might succeed.
 func shouldFallback(r ForgeGateResult) bool {
 	if r.OK {
+		return false
+	}
+	// 超时不换语言：同一份工作量换语言重跑会再烧一个超时周期。
+	if r.Timeout {
 		return false
 	}
 	errLower := strings.ToLower(r.Error)
@@ -1145,7 +1191,7 @@ func (f *Forge) selfHostedGate(gateName, code string, start time.Time) ForgeGate
 		timeout = comp.ExecTimeout
 	}
 
-	ctx, cancel := context.WithTimeout(f.ctx, timeout)
+	ctx, cancel := context.WithTimeout(f.effCtx(), timeout)
 
 	defer cancel()
 
@@ -1187,6 +1233,8 @@ func (f *Forge) selfHostedGate(gateName, code string, start time.Time) ForgeGate
 			Error: fmt.Sprintf("%s execution failed: %s", gateName, errMsg),
 
 			Stderr: errMsg,
+
+			Timeout: isTimeoutErr(err),
 
 			ExitCode: safeExitCode(cmd),
 			Duration: time.Since(start).Milliseconds(),
@@ -1274,7 +1322,7 @@ func main() {
 
 	exePath := filepath.Join(tmpDir, "main"+exeSuffix())
 
-	compileCtx, compileCancel := context.WithTimeout(f.ctx, compiler.CompileTimeout)
+	compileCtx, compileCancel := context.WithTimeout(f.effCtx(), compiler.CompileTimeout)
 
 	defer compileCancel()
 
@@ -1302,12 +1350,14 @@ func main() {
 
 			Stderr: compileStderr.String(),
 
+			Timeout: isTimeoutErr(err),
+
 			Duration: time.Since(start).Milliseconds(),
 		}
 
 	}
 
-	execCtx, execCancel := context.WithTimeout(f.ctx, compilerTimeout("go"))
+	execCtx, execCancel := context.WithTimeout(f.effCtx(), compilerTimeout("go"))
 
 	defer execCancel()
 
@@ -1330,6 +1380,8 @@ func main() {
 			Error: fmt.Sprintf("go run failed: %v — %s", err, execStderr.String()),
 
 			Stderr: execStderr.String(),
+
+			Timeout: isTimeoutErr(err),
 
 			Duration: time.Since(start).Milliseconds(),
 		}
@@ -1360,7 +1412,7 @@ func (f *Forge) selfHostedSh(code, input string, start time.Time) ForgeGateResul
 			}
 		}
 	}
-	ctx, cancel := context.WithTimeout(f.ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(f.effCtx(), 15*time.Second)
 	defer cancel()
 
 	var cmd *exec.Cmd
@@ -1447,6 +1499,7 @@ func (f *Forge) selfHostedSh(code, input string, start time.Time) ForgeGateResul
 			OK: false, Lang: "sh", Stage: "execute",
 			Error:    fmt.Sprintf("shell execution failed: %s", errMsg),
 			Stderr:   errMsg,
+			Timeout:  isTimeoutErr(err),
 			Duration: time.Since(start).Milliseconds(),
 		}
 	}
@@ -1522,7 +1575,7 @@ func (f *Forge) forgeGateInline(code, lang string, compiler CompilerDef, input s
 
 	}
 
-	ctx, cancel := context.WithTimeout(f.ctx, timeout)
+	ctx, cancel := context.WithTimeout(f.effCtx(), timeout)
 
 	defer cancel()
 
@@ -1638,6 +1691,8 @@ func (f *Forge) forgeGateInline(code, lang string, compiler CompilerDef, input s
 
 			Stderr: errMsg,
 
+			Timeout: isTimeoutErr(err),
+
 			ExitCode: safeExitCode(cmd),
 
 			Duration: time.Since(start).Milliseconds(),
@@ -1691,7 +1746,7 @@ func (f *Forge) forgeGateFile(code, lang string, compiler CompilerDef, input str
 		if !hasFilePlaceholder {
 			checkArgs = append(checkArgs, srcPath)
 		}
-		checkCtx, checkCancel := context.WithTimeout(f.ctx, compiler.CompileTimeout)
+		checkCtx, checkCancel := context.WithTimeout(f.effCtx(), compiler.CompileTimeout)
 		defer checkCancel()
 		checkCmd := f.newCmd(checkCtx, checkArgs[0], checkArgs[1:]...)
 		checkCmd.Dir = f.workDir
@@ -1700,7 +1755,7 @@ func (f *Forge) forgeGateFile(code, lang string, compiler CompilerDef, input str
 		if checkErr := runWithTimeout(checkCtx, checkCmd); checkErr != nil {
 			return ForgeGateResult{OK: false, Lang: lang, Stage: "compile",
 				Error:  fmt.Sprintf("%s syntax check failed (%v): %s", lang, checkErr, checkStderr.String()),
-				Stderr: checkStderr.String(), Duration: time.Since(start).Milliseconds()}
+				Stderr: checkStderr.String(), Timeout: isTimeoutErr(checkErr), Duration: time.Since(start).Milliseconds()}
 		}
 		slog.Debug("forge check", "lang", lang, "duration_ms", time.Since(checkStart).Milliseconds())
 	}
@@ -1710,7 +1765,7 @@ func (f *Forge) forgeGateFile(code, lang string, compiler CompilerDef, input str
 	if len(compiler.Lint) > 0 {
 		lintStart := time.Now()
 		lintArgs, _ := expandArgs(compiler.Lint, srcPath, f.workDir, tmpDir)
-		lintCtx, lintCancel := context.WithTimeout(f.ctx, compiler.CompileTimeout)
+		lintCtx, lintCancel := context.WithTimeout(f.effCtx(), compiler.CompileTimeout)
 		defer lintCancel()
 		lintCmd := f.newCmd(lintCtx, lintArgs[0], lintArgs[1:]...)
 		lintCmd.Dir = f.workDir
@@ -1740,7 +1795,7 @@ func (f *Forge) forgeGateFile(code, lang string, compiler CompilerDef, input str
 		execArgs = append(execArgs, srcPath)
 	}
 
-	execCtx, execCancel := context.WithTimeout(f.ctx, compiler.ExecTimeout)
+	execCtx, execCancel := context.WithTimeout(f.effCtx(), compiler.ExecTimeout)
 	defer execCancel()
 	cmd := f.newCmd(execCtx, execArgs[0], execArgs[1:]...)
 	cmd.Dir = f.workDir
@@ -1762,8 +1817,9 @@ func (f *Forge) forgeGateFile(code, lang string, compiler CompilerDef, input str
 		// Runtime errors with output are results, not gate failures.
 		ok := len(stdOut) > 0 || len(stdErr) > 0
 		return ForgeGateResult{OK: ok, Lang: lang, Stage: "execute",
-			Error:  fmt.Sprintf("%s execution failed: %s", lang, errMsg),
-			Stdout: stdOut, Stderr: stdErr, Lint: lintOutput,
+			Error:   fmt.Sprintf("%s execution failed: %s", lang, errMsg),
+			Timeout: isTimeoutErr(execErr),
+			Stdout:  stdOut, Stderr: stdErr, Lint: lintOutput,
 			ExitCode: safeExitCode(cmd), Duration: time.Since(start).Milliseconds()}
 	}
 	return ForgeGateResult{OK: true, Lang: lang, Stage: "done",
@@ -2083,16 +2139,28 @@ func (f *Forge) saveCacheToDisk() {
 	copy(data.Keys, f.cacheKeys)
 	f.cacheMu.RUnlock()
 
-	file, err := os.Create(f.cachePersistFile)
+	// 原子写: 先写 .tmp 再 rename, 避免崩溃/升级强杀时截断主缓存文件
+	tmp := f.cachePersistFile + ".tmp"
+	file, err := os.Create(tmp)
 	if err != nil {
 		slog.Warn("forge cache save failed", "error", err)
 		return
 	}
-	defer file.Close()
-
 	enc := gob.NewEncoder(file)
 	if err := enc.Encode(data); err != nil {
+		file.Close()
+		os.Remove(tmp)
 		slog.Warn("forge cache encode failed", "error", err)
+		return
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(tmp)
+		slog.Warn("forge cache close failed", "error", err)
+		return
+	}
+	if err := os.Rename(tmp, f.cachePersistFile); err != nil {
+		os.Remove(tmp)
+		slog.Warn("forge cache rename failed", "error", err)
 		return
 	}
 	slog.Debug("forge cache saved to disk", "entries", len(data.Entries))
@@ -2204,7 +2272,8 @@ func (f *Forge) formatResult(r ForgeGateResult) string {
 
 func (f *Forge) retryGate(code, lang, input string) ForgeGateResult {
 	result := f.forgeGateSkipCache(code, lang, input, false)
-	if result.OK || f.retryMax <= 1 {
+	// 超时不重试：重试一个已经跑满超时的任务，大概率再跑满一次。
+	if result.OK || f.retryMax <= 1 || result.Timeout {
 		return result
 	}
 	// Clear cache for this key so retries actually re-execute
@@ -2482,7 +2551,7 @@ func (f *Forge) selfHostedSelf(code, input string, start time.Time) ForgeGateRes
 		logEvent(EvSelfModified, "append", map[string]string{"file": "forge.go"})
 	}
 
-	ctx, cancel := context.WithTimeout(f.ctx, 60*time.Second)
+	ctx, cancel := context.WithTimeout(f.effCtx(), 60*time.Second)
 	defer cancel()
 
 	goCmd, goErr := f.findGoCommand()
@@ -2506,6 +2575,7 @@ func (f *Forge) selfHostedSelf(code, input string, start time.Time) ForgeGateRes
 			OK: false, Lang: "self", Stage: "compile",
 			Error:    fmt.Sprintf("go build failed: %s", stderr.String()),
 			Stderr:   stderr.String(),
+			Timeout:  isTimeoutErr(err),
 			Duration: time.Since(start).Milliseconds(),
 		}
 	}

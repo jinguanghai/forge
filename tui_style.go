@@ -11,13 +11,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 )
-
-// ansiSeqRe 匹配完整 ANSI 序列, 用于 tuiGradient 跳过已上色段。
-var ansiSeqRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 // tuiGradient 为字符串 s 逐字符应用 palette(前景色代码序列) 形成渐变。
 func tuiGradient(s string, palette []string) string {
@@ -132,7 +128,7 @@ func buildBanner(cfg *Config) []string {
 	}
 	inW := w - 6
 	logo := "■ 铸剑炉 FORGE ■"
-	sub := "通用数字智能体 · 编译器沙箱 · 多 Gate"
+	sub := "LLM 驱动的多语言编译器沙箱 · 多 Gate"
 	model := cfg.Model
 	if model == "" {
 		model = "(未配置)"
@@ -150,7 +146,14 @@ func buildBanner(cfg *Config) []string {
 		" " + dim("网 关") + "  " + bold(base),
 		" " + dim("版 本") + "  " + bold(ver) + "   " + dim("时刻") + "  " + now,
 	}
-	card := tuiCard("", []string{"", logoLine, subLine, "", info[0], info[1], info[2]}, w, tuiAccent())
+	// 无剑状态位：仅在 FORGE_NOSWORD=1 时显示。此前该功能完全静默（开关三种
+	// 取值下横幅输出逐字节相同），用户无法判断是否生效 —— 此处补可感知信号。
+	// 注：横幅只经 fmt.Println 走 stdout，不进 ChatMessage，不影响请求前缀缓存。
+	if nswEnabled() {
+		info = append(info, " "+dim("无 剑")+"  "+bold("已启用")+"   "+dim("算式求值兜底"))
+	}
+	body := append([]string{"", logoLine, subLine, ""}, info...)
+	card := tuiCard("", body, w, tuiAccent())
 	return strings.Split(strings.TrimSuffix(card, "\n"), "\n")
 }
 
