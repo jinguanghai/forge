@@ -46,17 +46,47 @@ func sysHashPrefix(data []byte) string {
 	return fmt.Sprintf("%x", sum[:8])
 }
 
-// anchorFields 锚点字段清单——只有这些字段的变化会重置 system 前缀缓存。
-// 纯会话片段 (key_findings 等) 的写入不触发频率拦截。
-var anchorFields = []string{"identity", "role", "language", "working_dir", "gates", "axioms", "self_governance", "environment", "hardcoded_paths", "defense", "user_principle", "active_task"}
+// dynamicMemoryFields 动态字段清单 —— 不进 system 固定头的字段 (唯一真相源)。
+//
+// 三处消费方共用这一份清单, 防止各自维护导致漂移:
+//   - buildSystemPrompt / stripDynamicMemory : 剔除后进 system 固定头
+//   - buildMemoryTailText                    : 剔除后进 memory tail
+//   - isAnchorChange                         : 判定是否锚点改动
+//
+// 与此互补的"锚点集合"不另设白名单 —— 由 isAnchorChange 反推 (非动态即锚点)。
+var dynamicMemoryFields = []string{
+	// 由 RecallMemory 动态召回
+	"key_findings",
+	// 由 compactFoldedIndex 精简注入
+	"folded_memory",
+	// 变化走 syncDynamicTails 尾部 diff
+	"active_task",
+	// 时间戳, 每次记忆写入必变
+	"last_updated",
+}
 
-// isAnchorChange 判断字段差异是否涉及锚点字段。
+// isDynamicMemoryField 判断单个字段是否为动态字段 (不进固定头)。
+func isDynamicMemoryField(name string) bool {
+	for _, d := range dynamicMemoryFields {
+		if name == d {
+			return true
+		}
+	}
+	return false
+}
+
+// isAnchorChange 判断字段差异是否涉及锚点字段 —— fail-safe: 非动态即锚点。
+//
+// 判据方向于 20260913 反转。原实现用 anchorFields 白名单 (12 个字段), 需人工维护,
+// 与实际进固定头的字段集合脱节, 实测漏检 6 个 (architecture/lessons/user_profile/
+// swordless_roadmap/evolution_consensus/rescue), 且新增字段默认免检 (fail-open);
+// 漏检字段连审计都不留痕 (anchorGuardAudit 首行即 return), 故长期无人发现。
+// 现改为反向: 只要存在任一非动态字段 → 判为锚点改动。
+// 新增顶层字段自动纳入保护 (fail-safe), 无需同步改此处。
 func isAnchorChange(fields []string) bool {
 	for _, f := range fields {
-		for _, a := range anchorFields {
-			if f == a {
-				return true
-			}
+		if !isDynamicMemoryField(f) {
+			return true
 		}
 	}
 	return false

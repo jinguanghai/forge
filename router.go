@@ -181,14 +181,11 @@ func minimaxWindow() bool {
 	return isMiniMaxWindow(time.Now())
 }
 
-// isMiniMaxWindow 纯函数: t 是否为 MiniMax 适用窗口 (周一~周五 且 高峰 9-12/14-18)。
+// isMiniMaxWindow 纯函数: t 是否为 MiniMax 适用窗口 (工作日 且 高峰 9-12/14-18)。
+// 复用 isPeakHourAt —— 两处时段定义必须同源, 否则 "何时涨价" 与 "何时切厂商"
+// 会各自漂移 (20260913 实测: 本函数已判周末, isPeakHour 未判, 同一文件内自相矛盾)。
 func isMiniMaxWindow(t time.Time) bool {
-	wd := t.Weekday() // Sunday=0 ... Saturday=6
-	if wd == time.Saturday || wd == time.Sunday {
-		return false
-	}
-	h := t.Hour()
-	return (h >= 9 && h < 12) || (h >= 14 && h < 18)
+	return isPeakHourAt(t)
 }
 
 // routeEndpoint 根据当前时段返回请求应使用的提供商端点。

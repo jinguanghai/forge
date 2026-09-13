@@ -305,15 +305,19 @@ func cmdUpgrade(agent *AgentRunner, cfg *Config, parts []string, historyFile str
 	exitRequested = true
 }
 
+// gateDisplayNames 是 /tools 的展示名 (与 铸剑炉_GATES 同集合, 仅显示层带别名,
+// 如 sh/bash、node/js)。提到包级是为了让一致性哨兵可比对 —— 展示层与清单脱节
+// 会误导使用者 ("有这个 gate 吗")。
+var gateDisplayNames = []string{
+	"python", "go", "sh/bash", "node/js",
+	"math", "logic", "regex", "knowledge",
+	"chain", "self", "tcm", "browser",
+}
+
 func cmdTools(agent *AgentRunner, cfg *Config, parts []string, historyFile string, showReasoning *bool, cmd string) {
 	fmt.Println()
 	fmt.Println(bold("可用语言编译器 (12 gates):"))
-	gates := []string{
-		"python", "go", "sh/bash", "node/js",
-		"math", "logic", "regex", "knowledge",
-		"chain", "self", "tcm", "browser",
-	}
-	for i, g := range gates {
+	for i, g := range gateDisplayNames {
 		fmt.Printf("  %s %s", dim(fmt.Sprintf("%2d.", i+1)), color(ansi.cyan, g))
 		if (i+1)%4 == 0 {
 			fmt.Println()

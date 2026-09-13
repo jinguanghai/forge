@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"syscall"
@@ -130,6 +131,20 @@ type lineEditor struct {
 	lastTop      int // 上次块顶的缓冲区行号
 	cursorRow    int // 光标在块内的行号（0-based）
 	bottomBarRow int // 状态栏所在行(bottom); redraw 禁止触碰该行, -1=未约束(非TTY/自定义)
+
+	// out 是编辑器的输出目标 (默认 os.Stdout)。抽成字段是为了让测试可注入
+	// io.Discard —— 否则回显会直接写进程 stdout, 把 go test -v 的
+	// "--- PASS/FAIL: TestX" 行首污染成 "abcd--- PASS: ...", 任何按行首
+	// 统计测试结果的工具都会漏计 (含漏报 FAIL), 属静默失败。
+	out io.Writer
+}
+
+// w 返回输出目标; out 未注入时回退 os.Stdout (防御: 任何构造点都安全)。
+func (ed *lineEditor) w() io.Writer {
+	if ed.out == nil {
+		return os.Stdout
+	}
+	return ed.out
 }
 
 func newLineEditor(prompt string) *lineEditor {
@@ -138,6 +153,7 @@ func newLineEditor(prompt string) *lineEditor {
 		tw = 80
 	}
 	return &lineEditor{
+		out:          os.Stdout,
 		bottomBarRow: -1,
 		prompt:       prompt,
 		promptW:      displayWidth(prompt),
@@ -301,7 +317,7 @@ func (ed *lineEditor) redraw() {
 			return
 		}
 		setCursorPos(0, r)
-		fmt.Print("\033[K")
+		fmt.Fprint(ed.w(), "\033[K")
 	}
 	for i := 0; i < oldLines; i++ {
 		clearRow(oldTop + i)
@@ -321,9 +337,9 @@ func (ed *lineEditor) redraw() {
 			break
 		}
 		setCursorPos(0, r)
-		fmt.Print("\033[K")
+		fmt.Fprint(ed.w(), "\033[K")
 		if i < n {
-			fmt.Print(lines[i])
+			fmt.Fprint(ed.w(), lines[i])
 		}
 	}
 
@@ -839,7 +855,7 @@ func insertRune(ed *lineEditor, r rune) {
 	ed.buf = append(ed.buf[:ed.cursor], append([]rune{r}, ed.buf[ed.cursor:]...)...)
 	ed.cursor++
 	if atEnd {
-		fmt.Print(string(r))
+		fmt.Fprint(ed.w(), string(r))
 		// 快路径也必须同步块内光标行号：超宽时终端会自动回绕换行，
 		// 若 cursorRow 不更新，后续 redraw 的块顶推算 (光标Y-cursorRow) 会错位花屏。
 		if pos, ok := getCursorPos(); ok && int(pos.Y) >= ed.lastTop {

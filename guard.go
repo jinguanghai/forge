@@ -3,10 +3,11 @@
 package main
 
 import (
-	"fmt"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -100,14 +101,28 @@ func logGuardEvent(workDir, level, kind, hit, verdict, note, input string) {
 	if r := []rune(in); len(r) > 80 {
 		in = string(r[:80]) + "..."
 	}
-	entry := fmt.Sprintf(`{"ts":%q,"level":%q,"kind":%q,"hit":%q,"verdict":%q,"note":%q,"input":%q}`+"\n",
-		time.Now().Format("2006-01-02T15:04:05"), level, kind, hit, verdict, note, in)
+	// 用 json.Marshal 而非手拼 %q: %q 产出 Go 字面量, 遇无效 UTF-8 会写出 \xXX
+	// (非法 JSON 转义) → 取证日志出现无法解析的行。Marshal 会把非法字节替为 U+FFFD。
+	entry, merr := json.Marshal(map[string]string{
+		"ts":      time.Now().Format("2006-01-02T15:04:05"),
+		"level":   level,
+		"kind":    kind,
+		"hit":     hit,
+		"verdict": verdict,
+		"note":    note,
+		"input":   in,
+	})
+	if merr != nil {
+		return
+	}
 	f, err := os.OpenFile(filepath.Join(dir, "guard_log.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return
 	}
 	defer f.Close()
-	f.WriteString(entry)
+	if _, werr := f.Write(append(entry, '\n')); werr != nil {
+		return
+	}
 }
 
 // ─── 危险代码模式检测 (执行管线审批) ───────────────
@@ -194,18 +209,53 @@ func summarizeCode(code string) string {
 // 这类数组拆分绕过。此处补一道语义层: 目的路径是受保护目标 + 同一窗口内出现破坏谓词
 // → 判定危险, 仍走终端 y/N 审批 (多提示一次而非自动阻断, 宁缺毋滥)。
 //
-// 设计边界: protectedTargets 只列"不可覆盖/删除的关键资产"(源码/记忆/密钥/基线),
-// 不含工作根目录 D:\forge —— 避免把临时文件删除/编译产物清理频繁误报。
+// 设计边界: 保护集只含"不可覆盖/删除的关键资产"(工作目录全部 *.go + 记忆/缓存/审计/密钥),
+// 不含工作根目录本身 —— 避免把临时文件删除/编译产物清理频繁误报。
 // destructiveVerbs 刻意排除只读/复制/存在性检查, 只留删除/覆盖/改名/写坏/强推。
 
-var protectedTargets = []string{
-	"main.go", "agent.go", "forge.go", "llm.go", "config.go", "ux.go",
-	"width.go", "guard.go", "gate_registry.go", "memory_store.go",
-	"agent_pure.go", "router.go", "goal.go", "upgrade.go", "anchor_guard.go",
-	"asr.go", "asr_other.go", "tts.go", "tts_other.go",
+// protectedNonGo: 非源码类关键资产(记忆/缓存/审计/密钥/目录)。
+// 源码清单不在此列 —— 见 protectedTargets 的扫描式实现。
+var protectedNonGo = []string{
 	"memory.json", "forge_cache.gob", "anchor_audit.jsonl", "gate_audit.jsonl",
-	".env", "gh_token.txt", "id_ed25519_vultr", "forge_baseline.json",
-	".forge", "defense_system", ".forge-temp",
+	".env", ".forge", "defense_system",
+}
+
+var (
+	protectedMu    sync.Mutex
+	protectedCache = map[string][]string{}
+)
+
+// protectedTargets 返回「不可覆盖/删除的关键资产」清单(按 dir 缓存)。
+//
+// 为什么扫描而不手写: 手写清单会腐化且无人发现。2026-09 审计实测手写版只覆盖
+// 19/53 个 .go —— nosword.go / cache_stats.go / memory_fold.go / memory_recall.go /
+// main_commands.go / session.go 等核心文件全部裸奔, 且含 3 条磁盘上已不存在的
+// 幽灵路径(gh_token.txt / id_ed25519_vultr / forge_baseline.json)。
+// 改为「扫描 dir 下全部 *.go + 显式非源码资产」→ 腐化在结构上不可能。
+func protectedTargets(dir string) []string {
+	protectedMu.Lock()
+	defer protectedMu.Unlock()
+	if cached, ok := protectedCache[dir]; ok {
+		return cached
+	}
+	set := map[string]bool{}
+	for _, t := range protectedNonGo {
+		set[strings.ToLower(t)] = true
+	}
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") {
+				set[strings.ToLower(e.Name())] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	protectedCache[dir] = out
+	return out
 }
 
 var destructiveVerbs = []string{
@@ -219,7 +269,7 @@ var destructiveVerbs = []string{
 	"git push", "git reset --hard",
 }
 
-func checkDangerousTarget(code string) (string, string, bool) {
+func checkDangerousTarget(code, dir string) (string, string, bool) {
 	low := strings.ToLower(code)
 	hasVerb := false
 	for _, v := range destructiveVerbs {
@@ -231,7 +281,7 @@ func checkDangerousTarget(code string) (string, string, bool) {
 	if !hasVerb {
 		return "", "", false
 	}
-	for _, t := range protectedTargets {
+	for _, t := range protectedTargets(dir) {
 		lt := strings.ToLower(t)
 		idx := 0
 		for {

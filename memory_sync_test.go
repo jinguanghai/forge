@@ -74,8 +74,8 @@ func TestSyncMemoryGates(t *testing.T) {
 		sg["cache_discipline"] = "DeepSeek 前缀缓存纪律(六期I4): 改 system prompt / memory 锚点 = 重置缓存, 新前缀首次请求全量 miss, 命中率需3天左右爬回95%+; 因此: ①集中改动(一天内做完大改) ②避免频繁改 memory 锚点字段 ③改完不要立刻评估命中率(等3天) ④实测: 稳定日98%+ vs 改动日57-69%, 平均87.5%"
 	}
 
-	// 5. 双 agent 互救 (互救手册): DSH 挂了由铸剑炉修
-	m["rescue"] = "双agent互救: 完整手册 D:\\forge\\_RESCUE_双agent互救手册.md。DSH 救援: 启动 D:\\启动 dsh 网页版.bat 或 cd /d D:\\deepseek-harness && node apps\\cli\\lib\\bin.js web --port 3080; 未就绪看 dsh_server.log/startup_test*.log; 修复=pnpm run build → pnpm install → 杀3080占用; 验证=netstat :3080 LISTENING。铸剑炉自崩自救: rollback.cmd 回滚最新快照 → git revert auto 提交 → go build。铁律: 任一方升级前先确认另一方活着"
+	// 5. 铸剑炉自救 (自救手册): 崩溃/升级失败时按手册恢复
+	m["rescue"] = "铸剑炉自崩自救: 双击 D:\\forge\\rollback.cmd 回滚最新快照 → git revert auto 提交 → go build; 完整手册 D:\\forge\\_RESCUE_双agent互救手册.md; 事件日志 D:\\forge\\.forge\\events.jsonl"
 
 	nb, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {

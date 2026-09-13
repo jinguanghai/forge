@@ -100,6 +100,14 @@ func TestNSWEndToEnd_On(t *testing.T) {
 	if !strings.Contains(second, "3*7 = 21") {
 		t.Fatalf("反馈未给出正确求值 3*7 = 21; 尾部=%q", tail(second, 400))
 	}
+	// 缺陷P 端到端: 注入必须自带来源信封, 否则模型把死程序反馈误当用户发言
+	// (实测连错三轮, 用户真实指令被劫持)。此处验证信封真的进了请求体, 非仅单测函数。
+	if !strings.Contains(second, "非用户消息") {
+		t.Fatalf("注入缺少来源信封 (缺陷P 复发); 尾部=%q", tail(second, 400))
+	}
+	if strings.Index(second, "非用户消息") > strings.Index(second, "【求值】") {
+		t.Fatalf("信封必须排在反馈本体之前 (否则模型先读到的仍是裸反馈)")
+	}
 	// 反馈必须是 user 角色注入 (LLM 能看到并修正)
 	if !strings.Contains(second, "\"role\":\"user\"") {
 		t.Fatalf("反馈未以 user 消息注入")
@@ -142,6 +150,9 @@ func TestNSWEndToEnd_Off(t *testing.T) {
 	}
 	if strings.Contains(reqs[0], "【求值】") {
 		t.Fatalf("开关关闭仍注入反馈")
+	}
+	if strings.Contains(reqs[0], "非用户消息") {
+		t.Fatalf("开关关闭仍注入信封 (零注入契约被破坏)")
 	}
 	last := a.history[len(a.history)-1]
 	if last.Content != nswReplyBad {

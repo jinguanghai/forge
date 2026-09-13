@@ -30,6 +30,9 @@ func newTestSession(input []byte) (*inputSession, *fakeStream) {
 	s.readNext = f.readNext
 	s.echoNewline = func() {}
 	s.redrawFn = func() {}
+	// 回显与重绘一律丢弃: 生产路径直接写 os.Stdout, 会让测试输出粘在
+	// go test -v 的 "--- PASS/FAIL:" 行首 (污染按行首统计的工具, 可致 FAIL 漏报)。
+	s.ed.out = io.Discard
 	return s, f
 }
 

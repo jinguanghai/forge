@@ -82,3 +82,56 @@ func TestNSWWire_NoOrphanFunctions(t *testing.T) {
 	}
 	t.Logf("nosword.go 顶层函数全部有调用点, 无孤儿")
 }
+
+// TestNSWWire_BothExitSitesSymmetric 双收尾出口对称性 (20260912 缺陷O)
+//
+// 教训: agent.go 的最终收尾有两个出口 —— ①无工具调用的纯文本回复 ②工具调用
+// 碎片全无效降级为纯文本。功能只接一处 = 另一条路径上的算式错值静默漏过,
+// 且单测(直接调 nosword.go 函数)永远发现不了。把"两处必须对称"固化为死程序判定。
+func TestNSWWire_BothExitSitesSymmetric(t *testing.T) {
+	agent, err := os.ReadFile("agent.go")
+	if err != nil {
+		t.Fatalf("读 agent.go 失败: %v", err)
+	}
+	src := string(agent)
+	checks := []struct {
+		pat  string
+		want int
+		why  string
+	}{
+		{"nswIntervene(asst)", 2, "无剑干预调用点必须两处收尾出口各一 (缺失=该路径无剑静默失效)"},
+		{`ChatMessage{Role: "user", Content: fb}`, 2, "无剑反馈注入点必须两处 (缺失=拦住了却不反馈=白拦)"},
+		{"nswProbeAudit(a, asst, nswRounds", 2, "无剑分母埋点必须两处 (缺失=触发率分母有洞)"},
+		{"nswIntervene := func(asst string) string", 1, "无剑干预必须走统一闭包, 禁止两处各写一份(行为会漂移)"},
+	}
+	for _, c := range checks {
+		if got := strings.Count(src, c.pat); got != c.want {
+			t.Errorf("出口对称性破坏: agent.go 中 %q 出现 %d 次, 期望 %d (%s)", c.pat, got, c.want, c.why)
+		}
+	}
+	// 闭包内必须真的调用了嗅探+埋点+计数, 否则闭包本身是空壳
+	body := src[strings.Index(src, "nswIntervene := func"):]
+	if end := strings.Index(body, "\n\t}"); end > 0 {
+		body = body[:end]
+	}
+	for _, must := range []string{"nswEnabled()", "nswFeedbackTextFresh(asst)", "nswRounds++", "nswAudit(a, asst, fresh, total)"} {
+		if !strings.Contains(body, must) {
+			t.Errorf("nswIntervene 闭包体缺 %q", must)
+		}
+	}
+}
+
+// TestNSWWire_ProbeHasDenominator 分母埋点字段完整性 (无分母=触发率不可算)
+func TestNSWWire_ProbeHasDenominator(t *testing.T) {
+	agent, err := os.ReadFile("agent.go")
+	if err != nil {
+		t.Fatalf("读 agent.go 失败: %v", err)
+	}
+	src := string(agent)
+	need := []string{`"event":   "nosword_probe"`, `"enabled": enabled`, `"anchors": anchors`, `"fresh":   fresh`, `"source":  source`, `"rounds":  rounds`}
+	for _, n := range need {
+		if !strings.Contains(src, n) {
+			t.Errorf("nswProbeAudit 缺字段 %s -> 分母口径不完整", n)
+		}
+	}
+}

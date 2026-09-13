@@ -42,6 +42,10 @@ func TestSaveMemoryRoundTrip(t *testing.T) {
 }
 
 func TestLoadMemoryFallsBackToBackup(t *testing.T) {
+	// 本测试聚焦存储原子性与 .bak 回退, 与锚点频率护栏无关。
+	// 其数据是 version/note 这类未知字段 —— fail-safe 语义下算锚点改动,
+	// 连写两次会被护栏拦截 → 显式关闭护栏, 保持测试职责单一。
+	t.Setenv("FORGE_ANCHOR_GUARD", "0")
 	dir := t.TempDir()
 	v1 := []byte(`{"version":1,"note":"第一版"}`)
 	v2 := []byte(`{"version":2,"note":"第二版"}`)
@@ -105,6 +109,8 @@ func TestHealMemoryRecovers(t *testing.T) {
 }
 
 func TestSaveMemoryKeepsValidBackup(t *testing.T) {
+	// 同上: 测备份保留语义, 需多次写入, 与锚点频率护栏无关 → 关闭护栏。
+	t.Setenv("FORGE_ANCHOR_GUARD", "0")
 	dir := t.TempDir()
 	v1 := []byte(`{"version":1,"note":"第一版"}`)
 	v2 := []byte(`{"version":2,"note":"第二版"}`)

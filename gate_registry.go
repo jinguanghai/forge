@@ -48,7 +48,7 @@ var gateRegistry = []GateDef{
 	},
 	{
 		Name:        "self",
-		Description: "源码自修改/热替换 → self gate (replace:旧:新 / append; 需主人审批, 自动快照)",
+		Description: "源码自修改/热替换 → self gate (replace:旧:新 / append; 需主人审批, 自动快照; 编译通过后自动冒烟→就位 forge.exe, 冒烟失败自动回滚)",
 	},
 	{
 		Name:        "chain",

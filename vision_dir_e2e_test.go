@@ -13,7 +13,7 @@ func TestVisionDirE2E(t *testing.T) {
 	if os.Getenv("FORGE_E2E") != "1" {
 		t.Skip("FORGE_E2E!=1: 跳过真实 vision 目录 API")
 	}
-	dir := os.ExpandEnv(`${USERPROFILE}\Pictures\Screenshots`)
+	dir := `C:\Users\jin\Pictures\Screenshots`
 	parts, err := discoverImagesInDir(dir)
 	if err != nil {
 		t.Fatal(err)

@@ -10,16 +10,26 @@ import (
 )
 
 func TestBuildRestartScript(t *testing.T) {
-	s := buildRestartScript(`C:orge`, 12345, "20260805_213000")
+	// 用 raw string 传路径: 旧版写 "C:\forge" 会让 \f 变成换页符, 源码里塞进裸控制字符。
+	s := buildRestartScript(`C:\forge`, 12345, "20260805_213000")
 	for _, want := range []string{
-		"Set-Location 'C:\forge'",
+		`$wd = 'C:\forge'`,
+		"Set-Location $wd",
 		"AddSeconds(30)",                // 排空等待上限
 		"Get-Process -Id 12345",         // 轮询主进程存活
 		"Stop-Process -Id 12345 -Force", // 超时才强杀(兜底)
 		"forge.exe.bak_20260805_213000",
 		"Move-Item forge_new.exe forge.exe -Force",
 		"forge_guard.py init",
-		"Start-Process -FilePath 'forge.exe' -WorkingDirectory 'C:\forge'",
+		"Start-Process -FilePath 'forge.exe' -WorkingDirectory $wd",
+		"upgrade_restart.log", // 失败留痕: 升级失败必须可见
+		// 冒烟: 编译过 != 能跑, 冒烟失败必须回滚而不是把坏 exe 留在生产位
+		`& .\forge.exe --version`,
+		"$LASTEXITCODE",
+		"rolling back",
+		"Move-Item forge.exe.bak_20260805_213000 forge.exe -Force",
+		// 备份失败 = 无回滚能力 → 拒绝替换(旧版是「备份失败(继续)」)
+		"refuse to replace",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("脚本缺少: %s", want)
@@ -29,8 +39,18 @@ func TestBuildRestartScript(t *testing.T) {
 	if strings.Index(s, "AddSeconds(30)") > strings.Index(s, "Stop-Process -Id 12345 -Force") {
 		t.Errorf("脚本顺序错误: 强杀应在等待之后")
 	}
+	// 静默失败禁令: 全局 SilentlyContinue 会让「升级失败且程序没回来」无迹可查
+	if strings.Contains(s, "$ErrorActionPreference = 'SilentlyContinue'") {
+		t.Errorf("全局静默失败未移除: 升级失败将不可见")
+	}
+	if !strings.Contains(s, "$ErrorActionPreference = 'Continue'") {
+		t.Errorf("缺少 $ErrorActionPreference = 'Continue'")
+	}
+	// 致命步骤必须 exit 1(而非静默继续)
+	if !strings.Contains(s, "exit 1") {
+		t.Errorf("致命失败路径缺少 exit 1")
+	}
 }
-
 func TestUpgradeTailLines(t *testing.T) {
 	got := upgradeTailLines("a\nb\n\n\nc\nd\ne\nf\ng", 3)
 	if len(got) != 3 || got[0] != "e" || got[2] != "g" {

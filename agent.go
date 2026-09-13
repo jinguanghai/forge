@@ -220,12 +220,10 @@ func buildMemoryTailText(workDir string) string {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return ""
 	}
-	delete(m, "key_findings")
-	delete(m, "folded_memory")
-	delete(m, "active_task")
-	// v3.2 (DSH RuntimeContextProjection): last_updated 是时间戳, 每次记忆写入必变。
-	// 留在固定头会随每次锚点更新断 DeepSeek 前缀缓存 → 移出, 变化由 syncDynamicTails 尾部 diff。
-	delete(m, "last_updated")
+	// 剔除动态字段 (清单唯一真相源: anchor_guard.go dynamicMemoryFields)
+	for _, f := range dynamicMemoryFields {
+		delete(m, f)
+	}
 	out, err := json.Marshal(m)
 	if err != nil {
 		return ""
@@ -274,15 +272,19 @@ func memoryTailDiff(oldText, newText string) string {
 	return sb.String()
 }
 
-// stripDynamicMemory 从 memory.json 字节中剔除 key_findings 与 folded_memory
-// (二者分别由 RecallMemory 动态召回 / compactFoldedIndex 精简注入)。
+// stripDynamicMemory 从 memory.json 字节中剔除全部动态字段
+// (dynamicMemoryFields: 分别由 RecallMemory 召回 / compactFoldedIndex 精简注入 /
+//
+//	syncDynamicTails 尾部 diff 追踪), 只留稳定锚点 → system 前缀跨会话恒定。
 func stripDynamicMemory(data []byte) []byte {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(data, &m); err != nil {
 		return data
 	}
-	delete(m, "key_findings")
-	delete(m, "folded_memory")
+	// 剔除动态字段 (清单唯一真相源: anchor_guard.go dynamicMemoryFields)
+	for _, f := range dynamicMemoryFields {
+		delete(m, f)
+	}
 	out, err := json.Marshal(m)
 	if err != nil {
 		return data
@@ -699,6 +701,25 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 	// 上限控制: 防 LLM 反复生成锚点导致的死循环 (默认关, 行为与现状完全一致)
 	maxNSWRounds := 2
 	nswRounds := 0
+	// nswIntervene 无剑干预统一入口 (20260912 缺陷O): 收尾出口有两处(纯文本回复 /
+	// 工具碎片全无效降级为纯文本), 此前只有第一处接了无剑 —— 两处不对称会让
+	// "碎片无效"路径上的算式错值静默漏过。抽成闭包保证两处行为逐字节一致。
+	// 返回非空 = 应把 asst+fb 追加进 messages 并 continue。
+	nswIntervene := func(asst string) string {
+		if !nswEnabled() || nswRounds >= maxNSWRounds {
+			return ""
+		}
+		// 复述过滤 (20260911 缺陷M): 原文已含同形正确结论的锚点不再反馈, 切断
+		// "引用算式 -> 反馈 -> 再引用"的自激循环; 写错/未给结论的照常反馈。
+		fb, fresh, total := nswFeedbackTextFresh(asst)
+		if fb == "" {
+			return ""
+		}
+		nswRounds++
+		nswAudit(a, asst, fresh, total)
+		// 缺陷P (20260912): 注入必须自带来源信封, 否则模型把死程序反馈误当用户发言。
+		return autoInjectEnvelope("算式求值校验", fb)
+	}
 	verifyStrikes := 0 // 虚报强干预计数(与maxVerifyStrikes配合防死循环)
 	// 回合数限制已取消：无限循环，直到任务完成、无进展拦截收尾、连续失败中止或上下文取消。
 	for turn := 0; ; turn++ {
@@ -757,18 +778,12 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 			// ── 无剑求值感知 (FORGE_NOSWORD=1): 死程序嗅探 asst 中的求值锚点,
 			// 命中则把稳定反馈作为 user 消息注入, continue 让 LLM 看到反馈后
 			// 修正继续生成 (公理五: 判据由死程序把守, LLM据此自然调整). ──
-			if nswEnabled() && nswRounds < maxNSWRounds {
-				// 复述过滤 (20260911 缺陷M): 原文已含同形正确结论的锚点不再反馈, 切断
-				// "引用算式 -> 反馈 -> 再引用"的自激循环; 写错/未给结论的照常反馈。
-				if fb, fresh, total := nswFeedbackTextFresh(asst); fb != "" {
-					nswRounds++
-					nswAudit(a, asst, fresh, total)
-					messages = append(messages,
-						ChatMessage{Role: "assistant", Content: asst, ReasoningContent: reasoningBuf.String()},
-						ChatMessage{Role: "user", Content: fb},
-					)
-					continue
-				}
+			if fb := nswIntervene(asst); fb != "" {
+				messages = append(messages,
+					ChatMessage{Role: "assistant", Content: asst, ReasoningContent: reasoningBuf.String()},
+					ChatMessage{Role: "user", Content: fb},
+				)
+				continue
 			}
 			// 虚报检测 gate (增强版, 无剑闭环): 完成态声称+无工具证据 -> 注入真实状态证据, 强制模型修正
 			if verifyClaimEnabled() && verifyStrikes < maxVerifyStrikes && detectUnverifiedClaim(asst, messages) {
@@ -779,6 +794,7 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 				)
 				continue
 			}
+			nswProbeAudit(a, asst, nswRounds, "plain")
 			a.history = append(a.history,
 				ChatMessage{Role: "user", Content: userContent},
 				ChatMessage{Role: "assistant", Content: asst, ReasoningContent: reasoningBuf.String()},
@@ -797,6 +813,15 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 		if len(toolCallAccum) == 0 {
 			// All fragments were invalid — treat as a plain (non-tool) response
 			asst := extractAssistantText(&assistantContent, &reasoningBuf)
+			// 无剑求值感知 (与第一收尾出口对称, 20260912 缺陷O): 碎片全无效的降级路径
+			// 同样是"最终回复", 算式错值必须在此处也拦一次。
+			if fb := nswIntervene(asst); fb != "" {
+				messages = append(messages,
+					ChatMessage{Role: "assistant", Content: asst, ReasoningContent: reasoningBuf.String()},
+					ChatMessage{Role: "user", Content: fb},
+				)
+				continue
+			}
 			// 虚报检测 gate (增强版, 无剑闭环): 完成态声称+无工具证据 -> 注入真实状态证据, 强制模型修正
 			if verifyClaimEnabled() && verifyStrikes < maxVerifyStrikes && detectUnverifiedClaim(asst, messages) {
 				verifyStrikes++
@@ -806,6 +831,7 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 				)
 				continue
 			}
+			nswProbeAudit(a, asst, nswRounds, "frag")
 			a.history = append(a.history,
 				ChatMessage{Role: "user", Content: userContent},
 				ChatMessage{Role: "assistant", Content: asst, ReasoningContent: reasoningBuf.String()},
@@ -1089,6 +1115,13 @@ func (a *AgentRunner) processStream(
 		}
 		switch ev.Type {
 		case "error":
+			// 与其他出口一致地收尾: 已渲染内容必须 flush, 否则终端状态残留半行。
+			fmt.Print(renderer.flush())
+			if close := reasonRenderer.close(); close != "" {
+				fmt.Fprint(os.Stderr, close)
+			}
+			fmt.Println()
+			a.stats.addToken(tokenCount)
 			return ev.Error
 
 		case "reasoning":
@@ -1238,20 +1271,11 @@ func appendAuditLine(a *AgentRunner, entry map[string]interface{}) {
 	if os.Getenv("FORGE_GATE_AUDIT") == "0" {
 		return
 	}
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return
+	dir := ""
+	if a != nil && a.cfg != nil {
+		dir = a.cfg.WorkDir
 	}
-	dir := a.cfg.WorkDir
-	if dir == "" {
-		dir = "."
-	}
-	fh, err := os.OpenFile(filepath.Join(dir, "gate_audit.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer fh.Close()
-	fh.Write(append(data, '\n'))
+	appendAuditJSONL(auditFilePath(dir), entry)
 }
 
 // nswAudit 无剑埋点 (20260911): 让"触发几次 / 其中多少是空转"可度量。
@@ -1284,6 +1308,28 @@ func nswAudit(a *AgentRunner, asst string, fresh []nswAnchor, total int) {
 		"corrected": corrected,
 		"completed": completed,
 		"exprs":     exprs,
+	})
+}
+
+// nswProbeAudit 无剑分母埋点 (20260912): 每轮"最终收尾"写一行, 让触发率可算
+// = 有 fresh 的轮数 / 总收尾轮数。此前只有分子(nosword 事件)没有分母, 无法区分
+// "用得少"与"该触发没触发"。enabled=false 的轮次同样记录(关闸期的分母)。
+// source: plain=纯文本收尾, frag=工具碎片全无效降级收尾。
+func nswProbeAudit(a *AgentRunner, asst string, rounds int, source string) {
+	enabled := nswEnabled()
+	anchors, fresh := 0, 0
+	if enabled {
+		_, f, t := nswFeedbackTextFresh(asst)
+		anchors, fresh = t, len(f)
+	}
+	appendAuditLine(a, map[string]interface{}{
+		"event":   "nosword_probe",
+		"ts":      time.Now().Format(time.RFC3339Nano),
+		"enabled": enabled,
+		"rounds":  rounds,
+		"anchors": anchors,
+		"fresh":   fresh,
+		"source":  source,
 	})
 }
 
@@ -1446,7 +1492,12 @@ func (a *AgentRunner) buildStreamMessages(input string) ([]ChatMessage, string, 
 	userMsg := ChatMessage{Role: "user", Content: userContent}
 	// ── 识图 (vision): 输入含图片路径 → 读文件 base64 挂当轮请求 ──
 	// 图片只在当轮内存 (json:"-" 不落盘 history → 重放/压缩路径安全)。
-	images, _ := detectImages(input, a.cfg.WorkDir)
+	images, imgErr := detectImages(input, a.cfg.WorkDir)
+	// vision.go 契约: "路径存在而读取失败"必须报错, 不得静默丢图。
+	// 此前此处丢弃 error → 用户以为已发图, 实际按纯文本处理且无任何提示。
+	if imgErr != nil {
+		fmt.Fprintf(os.Stderr, "  %s %s\n", color(ansi.yellow, "🖼"), dim(fmt.Sprintf("图片读取失败, 本轮按纯文本处理: %v", imgErr)))
+	}
 	if len(images) > 0 {
 		// 负能力门控 (DSH): 无视觉模型 (ModelVision 空) → 禁止挂图, 降级 text-only,
 		// 避免把图发给非视觉模型被服务端 400。有视觉模型才挂图。

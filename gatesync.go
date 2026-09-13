@@ -14,8 +14,8 @@ import (
 	"strings"
 )
 
-// currentGates 当前 12 面 gate (与 memory_health.go 的 cur 列表一致)
-var currentGates = []string{"python", "go", "sh", "node", "math", "logic", "regex", "knowledge", "tcm", "browser", "chain", "self"}
+// currentGates 当前 gate 清单 —— 引用唯一源 铸剑炉_GATES, 不再保留副本。
+var currentGates = 铸剑炉_GATES
 
 // gateSyncCheck 检查五处一致性, 返回差异清单 (只读)。
 //

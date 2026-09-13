@@ -14,6 +14,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -127,7 +128,10 @@ func touchSession(workDir, title string) {
 	if title != "" {
 		s.Title = title
 	}
-	_ = saveSessionMeta(workDir, &s)
+	// 仍不阻塞主流程, 但失败必须留痕 (此前全静默 → 标题/时间丢失无从发现)
+	if err := saveSessionMeta(workDir, &s); err != nil {
+		slog.Warn("session meta save failed", "session", s.ID, "err", err)
+	}
 }
 
 // loadSession 读取会话元数据

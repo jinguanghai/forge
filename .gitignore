@@ -127,3 +127,109 @@ cache_stats.jsonl
 .forge/events.jsonl.*
 .forge/health_watermark
 .forge/updates/
+
+# --- 观感/工程化补强: 个人工作区草稿与运行时产物一律不入库 ---
+# 开发过程计划/笔记/草稿
+_PLAN_*.md
+_PLAN_*.md.*
+_archive/
+_bak_*/
+_bench/
+_bg_watch*.py
+_bgwatch*
+_probe*
+_shot.png
+*.html
+page.html
+dump_*.html
+# 备份与临时
+agent.go.bak_*
+*.go.bak*
+memory.json.bak_*
+memory.json.bak*
+.bak_*
+# 编译产物与运行时
+forge.exe_oldsession
+code_health.report.json
+cache_report.json
+cache_alert.json
+gate_audit*.jsonl
+anchor_audit*.jsonl
+search_result.json
+verify_results.json
+# 研究/临时目录
+research/
+bench/
+.workbuddy/
+.cordis_study/
+
+
+# --- git专业化(20260828): 本机私有/运行时杂项一律不入库 ---
+# 备用API端点(敏感配置)
+.forge/backup_apis.md
+# Go编译与应用缓存(运行时, 非源码)
+.forge/forge-tools/go-appdata/
+.forge/forge-tools/go-cache/
+# 本机操作脚本/辅助脚本(含本机路径/私有逻辑)
+cache_guard.py
+vision_batch.py
+一键恢复.bat
+替换上线.bat
+# 私有救援手册(双agent互救, 敏感)
+_RESCUE_*.md
+
+# --- 5S整理(20260828): 含隐私/演示敏感数据的目录一律不入库(保留物理文件) ---
+demo_舌象/
+办公自动化演示/
+media_manager/
+reasonix_*.zip
+research/
+
+# --- 自愈系统运行时数据(20260828): 健康快照含源码副本, 运行时报告不入库 ---
+defense_system/snapshots/
+defense_system/sleep_report.json
+
+# ── 杂项/临时/敏感 —— 不入仓 (20260831 清理审计) ──
+.forge/feishu_conn.py
+.forge/tools/
+_archive_*.txt
+_main_index.js
+_ocr_tmp.ps1
+_cfg_view.txt
+feishu_scripts/
+
+
+# ── 运行时数据与本机一次性脚本 (20260910 清理审计) ──
+# checkpoint 存档含历史代码副本, 属运行时数据
+.forge/checkpoints/
+.forge/events_archive_*.jsonl
+# /upgrade 生成的一次性自替换脚本 (含硬编码 PID/路径)
+restart_self.ps1
+# 开发过程待办/笔记
+no_sword_pressure_todo.md
+
+# 本机一键重启脚本 (含硬编码路径, 不入库)
+重启铸剑炉.bat
+
+# 本机一次性脚本 (含硬编码路径, 不入库)
+应用修复并重启.bat
+
+# --- 20260912 痕迹清理：运行时临时物不入库 ---
+# toolcache 是程序【活动缓存】(tool_ref.go:43 引用, agent_pure_test.go:307 断言)
+# 只忽略入库, 绝不删除内容
+.forge/toolcache/
+.forge/commit_msg*.txt
+.forge/fulltest_*.txt
+.forge/nsw_test_out.txt
+.forge/switch_*.txt
+.forge/run_*.bat
+.forge/*.fixed_tmp
+.forge/*.fixed_*
+
+# --- 20260912 B3: 记忆写入路径哨兵运行时留痕 (不入库) ---
+memory_writes.jsonl
+.forge/regress_*.txt
+.forge/regress_*.json
+
+# ASR 模型权重（78MB 二进制，本地保留不入库）
+.forge/asr_tool/asr_model/*.onnx

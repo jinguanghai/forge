@@ -100,12 +100,23 @@ func clampF(v, lo, hi float64) float64 {
 }
 
 // ─── Peak-hour reminder ─────────────────────────────────────
-// isPeakHour 返回当前是否为 DeepSeek 高峰时段 (价格×2)。
-// 北京时间 9-12 / 14-18。checkPeakHour 与动态模型降档共用, 避免两处判断漂移。
-func isPeakHour() bool {
-	h := time.Now().Hour()
+// isPeakHourAt 纯函数: t 是否处于 DeepSeek 高峰时段 (价格×2)。
+//
+// 判据 = 工作日(周一~周五) 且 9:00-12:00 / 14:00-18:00 (右端开区间)。
+// 周末不涨价 (官方峰谷定价按工作日计), 故周末一律 false。
+// isMiniMaxWindow 复用本判据 —— 单一源, 避免两处时段定义各自漂移。
+func isPeakHourAt(t time.Time) bool {
+	wd := t.Weekday() // Sunday=0 ... Saturday=6
+	if wd == time.Saturday || wd == time.Sunday {
+		return false
+	}
+	h := t.Hour()
 	return (h >= 9 && h < 12) || (h >= 14 && h < 18)
 }
+
+// isPeakHour 返回当前是否为 DeepSeek 高峰时段 (价格×2)。
+// 北京时间 9-12 / 14-18 (工作日)。checkPeakHour 与动态模型降档共用。
+func isPeakHour() bool { return isPeakHourAt(time.Now()) }
 
 // checkPeakHour 打印 DeepSeek 高峰时段提醒 (北京时间 9-12 / 14-18, 价格×2)。
 // 省钱第一杠杆: 高峰价格翻倍, 影响比缓存命中率更大。

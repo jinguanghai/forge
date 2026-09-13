@@ -114,23 +114,3 @@ func (t *toolCodeStreamer) flush() {
 		fmt.Fprintf(os.Stderr, "  %s %s\n", dim("|"), t.decoded.String())
 	}
 }
-
-// outMaxLines returns FORGE_OUT_MAX_LINES (0=unlimited). Default 0 (show all output lines).
-func outMaxLines() int {
-	if v := os.Getenv("FORGE_OUT_MAX_LINES"); v != "" {
-		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
-			return n
-		}
-	}
-	return 0
-}
-
-// outLineMax returns FORGE_OUT_LINE_MAX (0=no truncate per line). Default 0.
-func outLineMax() int {
-	if v := os.Getenv("FORGE_OUT_LINE_MAX"); v != "" {
-		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
-			return n
-		}
-	}
-	return 0
-}

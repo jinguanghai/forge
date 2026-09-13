@@ -64,15 +64,6 @@ func consoleWindowRect() (top, bottom int, ok bool) {
 	return top, bottom, bottom >= top
 }
 
-// getTermHeight returns visible window height in rows (0 if unavailable).
-func getTermHeight() int {
-	top, bottom, ok := consoleWindowRect()
-	if !ok {
-		return 0
-	}
-	return bottom - top + 1
-}
-
 // resolveConsoleProcs 无副作用地解析所有控制台 API 符号(仅 Find, 不调用/不改模式/不移动光标)。
 // 供启动期提前初始化 consoleProcsOK, 使 drawStatusBar 首轮即可获取窗口矩形与宽度,
 // 同时避免 probeConsoleProcs 在启动期移动光标/改动控制台模式的副作用。

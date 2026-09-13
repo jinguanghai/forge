@@ -110,12 +110,19 @@ func memHealthReport(workDir string) string {
 
 	// ⑤ gates 字段一致性: 应含当前 12 面
 	if g, ok := m["gates"].(string); ok {
-		cur := []string{"python", "go", "sh", "node", "math", "logic", "regex", "knowledge", "tcm", "browser", "chain", "self"}
+		cur := 铸剑炉_GATES
 		for _, c := range cur {
 			if !strings.Contains(g, c) {
 				issues = append(issues, fmt.Sprintf("🟡 gates 字段缺当前面: %s", c))
 			}
 		}
+	}
+
+	// ⑥ 写入路径哨兵: 当前 memory.json 内容是否由 SaveMemory 写入 (旁路写入可见化)
+	if ok, msg := memoryWriteSentinel(workDir); ok {
+		infos = append(infos, msg)
+	} else {
+		issues = append(issues, msg)
 	}
 
 	// 汇总

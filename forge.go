@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -30,26 +31,18 @@ import (
 )
 
 const (
-	ForgeToolName = "forge"
-
+	ForgeToolName        = "forge"
 	ForgeToolDescription = "铸剑炉: 写代码，自动编译执行，用完销毁。唯一的工具。"
-
-	ForgeToolsDir = ".forge/forge-tools"
-
-	ForgeMemoryDir = ".forge/memory"
-
+	ForgeToolsDir        = ".forge/forge-tools"
+	ForgeMemoryDir       = ".forge/memory"
 	MaxForgeOutputLength = 8000
-
-	ForgeHeadKeep = 6000
-
-	ForgeTailKeep = 2000
+	ForgeHeadKeep        = 6000
+	ForgeTailKeep        = 2000
 )
-
 const ForgeInputEnv = "铸剑炉_INPUT"
 
 var (
-	ErrTooBusy = errors.New("forge满载")
-
+	ErrTooBusy      = errors.New("forge满载")
 	ErrShuttingDown = errors.New("forge正在关闭")
 
 	// ErrCancelled: 用户按 Ctrl+C 取消了本次执行 (与程序关停 ErrShuttingDown 区分)。
@@ -57,131 +50,94 @@ var (
 )
 
 // CompilerDef describes how to check and execute code in a language.
-
 type CompilerDef struct {
-	Check []string
-
-	Exec []string
-
-	Lint []string
-
-	Ext string
-
+	Check          []string
+	Exec           []string
+	Lint           []string
+	Ext            string
 	CompileTimeout time.Duration
+	ExecTimeout    time.Duration
+	InlineCode     bool
+	SelfHosted     bool
+}
 
-	ExecTimeout time.Duration
+// 铸剑炉_GATES 是 gate 清单的唯一源 (single source of truth)。
+//
+// 此前清单有 3 份独立副本: gatesync.go 的 currentGates、memory_health.go 体检
+// 里的局部 cur、以及本文件 铸剑炉_COMPILERS 的 key 集合。新增/删除 gate 需手工
+// 同步三处, 漏一处即静默脱节 (清单式防护腐化的经典形态)。现统一引用本变量;
+// 表 (map) 与清单的一致性由 gates_consistency_test.go 的哨兵把守。
+// ⚠️ 只读: 任何调用方都不得修改本 slice。
+// 超时兜底单一源 —— 未配置时的默认值集中于此, 禁止散落字面量。
+// (散落字面量的危害: 改一处漏一处 → 同类行为静默不一致)
+const (
+	defaultGateTimeout  = 30 * time.Second // 通用 gate 兜底 (编译器表未配 ExecTimeout)
+	deadBoundaryTimeout = 20 * time.Second // 编译产物(死边界)调用兜底
+	shGateTimeout       = 15 * time.Second // selfHostedSh 内联 sh 执行
+)
 
-	InlineCode bool
-
-	SelfHosted bool
+var 铸剑炉_GATES = []string{
+	"python", "go", "sh", "node", "math", "logic",
+	"regex", "knowledge", "tcm", "browser", "chain", "self",
 }
 
 var 铸剑炉_COMPILERS = map[string]CompilerDef{
-
 	"go": {
-
-		Ext: ".go",
-
+		Ext:            ".go",
 		CompileTimeout: 5 * time.Second,
-
-		ExecTimeout: 30 * time.Second,
-
-		InlineCode: false,
-
-		SelfHosted: true,
+		ExecTimeout:    30 * time.Second,
+		InlineCode:     false,
+		SelfHosted:     true,
 	},
-
 	"sh": {
-
-		Ext: "",
-
+		Ext:            "",
 		CompileTimeout: 0,
-
-		ExecTimeout: 15 * time.Second,
-
-		InlineCode: true,
-
-		SelfHosted: true,
+		ExecTimeout:    15 * time.Second,
+		InlineCode:     true,
+		SelfHosted:     true,
 	},
-
 	"math": {
-
-		Ext: "",
-
+		Ext:            "",
 		CompileTimeout: 15 * time.Second,
-
-		ExecTimeout: 15 * time.Second,
-
-		InlineCode: true,
-
-		SelfHosted: true,
+		ExecTimeout:    15 * time.Second,
+		InlineCode:     true,
+		SelfHosted:     true,
 	},
-
 	"logic": {
-
-		Ext: "",
-
+		Ext:            "",
 		CompileTimeout: 15 * time.Second,
-
-		ExecTimeout: 15 * time.Second,
-
-		InlineCode: true,
-
-		SelfHosted: true,
+		ExecTimeout:    15 * time.Second,
+		InlineCode:     true,
+		SelfHosted:     true,
 	},
-
 	"knowledge": {
-
-		Ext: "",
-
+		Ext:            "",
 		CompileTimeout: 30 * time.Second,
-
-		ExecTimeout: 30 * time.Second,
-
-		InlineCode: true,
-
-		SelfHosted: true,
+		ExecTimeout:    30 * time.Second,
+		InlineCode:     true,
+		SelfHosted:     true,
 	},
-
 	"regex": {
-
-		Ext: "",
-
+		Ext:            "",
 		CompileTimeout: 10 * time.Second,
-
-		ExecTimeout: 10 * time.Second,
-
-		InlineCode: true,
-
-		SelfHosted: true,
+		ExecTimeout:    10 * time.Second,
+		InlineCode:     true,
+		SelfHosted:     true,
 	},
-
 	"chain": {
-
-		Ext: "",
-
+		Ext:            "",
 		CompileTimeout: 30 * time.Second,
-
-		ExecTimeout: 30 * time.Second,
-
-		InlineCode: true,
-
-		SelfHosted: true,
+		ExecTimeout:    30 * time.Second,
+		InlineCode:     true,
+		SelfHosted:     true,
 	},
-
 	"python": {
-
-		Check: []string{"python", "-m", "py_compile"},
-
-		Exec: []string{"python", "{file}"},
-
-		Ext: ".py",
-
+		Check:          []string{"python", "-m", "py_compile"},
+		Exec:           []string{"python", "{file}"},
+		Ext:            ".py",
 		CompileTimeout: 10 * time.Second,
-
-		ExecTimeout: 30 * time.Second,
-
-		InlineCode: false,
+		ExecTimeout:    30 * time.Second,
+		InlineCode:     false,
 	},
 	"node": {
 		Exec:           []string{"node", "-"},
@@ -223,45 +179,30 @@ type CompilerError struct {
 
 type ForgeParams struct {
 	Action string `json:"action"`
-
-	Code string `json:"code"`
-
-	Lang string `json:"lang"`
-
-	Input string `json:"input"`
+	Code   string `json:"code"`
+	Lang   string `json:"lang"`
+	Input  string `json:"input"`
 }
 
 type ForgeGateResult struct {
-	OK bool `json:"ok"`
-
-	Lang string `json:"lang"`
-
-	Stage string `json:"stage,omitempty"`
-
-	Stdout string `json:"stdout,omitempty"`
-
-	Stderr string `json:"stderr,omitempty"`
-
-	Lint string `json:"lint,omitempty"`
-
-	ExitCode int `json:"exit_code"`
-
-	Duration int64 `json:"duration_ms"`
-
-	Error string `json:"error,omitempty"`
-
-	CodeSize int `json:"code_size"`
-	Retries  int `json:"retries,omitempty"`
+	OK       bool   `json:"ok"`
+	Lang     string `json:"lang"`
+	Stage    string `json:"stage,omitempty"`
+	Stdout   string `json:"stdout,omitempty"`
+	Stderr   string `json:"stderr,omitempty"`
+	Lint     string `json:"lint,omitempty"`
+	ExitCode int    `json:"exit_code"`
+	Duration int64  `json:"duration_ms"`
+	Error    string `json:"error,omitempty"`
+	CodeSize int    `json:"code_size"`
+	Retries  int    `json:"retries,omitempty"`
 
 	// Timeout 标记「执行超时」类失败。retryGate 不重试、shouldFallback 不换
 	// 语言：已经烧完整个超时预算的任务，重跑只会再烧一遍(实测 3 次重试把
 	// 30s 放大成 93.6s)，对用户零收益。
-	Timeout bool `json:"timeout,omitempty"`
-
-	CodeLines int `json:"code_lines"`
-
-	Summary string `json:"summary,omitempty"`
-
+	Timeout     bool   `json:"timeout,omitempty"`
+	CodeLines   int    `json:"code_lines"`
+	Summary     string `json:"summary,omitempty"`
 	Diagnostics string `json:"diagnostics,omitempty"`
 
 	// CachedAt is the unix timestamp (seconds) when this result was cached.
@@ -365,26 +306,19 @@ func compilerErrorsToJSON(errs []CompilerError) string {
 }
 
 type Forge struct {
-	workDir string
-
-	toolsDir string
-
+	workDir   string
+	toolsDir  string
 	memoryDir string
-
-	ctx context.Context
+	ctx       context.Context
 
 	// runCtx: 当前工具执行的 ctx (agent 每次 run 前 SetRunCtx, 用完置 nil)。
 	// 用途: 让第一次 Ctrl+C 能中断正在执行的工具 —— 此前 Build 内部一律用 f.ctx 独立派生
 	// 超时 ctx, 取消 runCtx 对工具执行与重试循环完全无效, 用户只能按第二次(=直接退出程序)。
-	runCtx context.Context
-
-	cancel context.CancelFunc
-
-	sem chan struct{}
-
-	cache     map[string]ForgeGateResult
-	cacheKeys []string // FIFO insertion order for LRU eviction
-
+	runCtx           context.Context
+	cancel           context.CancelFunc
+	sem              chan struct{}
+	cache            map[string]ForgeGateResult
+	cacheKeys        []string // FIFO insertion order for LRU eviction
 	cacheMaxSize     int
 	maxConcurrent    int
 	cacheMu          sync.RWMutex
@@ -399,57 +333,38 @@ type Forge struct {
 	statBuilds    atomic.Int64
 	statCacheHits atomic.Int64
 	statErrors    atomic.Int64
-	auditMu       sync.Mutex
 }
 
 func NewForge(workDir string, cfg *Config) *Forge {
 
 	// Clean up stale temp directories from previous runs
 	forgeCleanupStaleTempDirs()
-
 	ctx, cancel := context.WithCancel(context.Background())
-
 	f := &Forge{
-
-		workDir: workDir,
-
-		toolsDir: filepath.Join(workDir, ForgeToolsDir),
-
-		memoryDir: filepath.Join(workDir, ForgeMemoryDir),
-
-		ctx: ctx,
-
-		cancel: cancel,
-
-		sem: make(chan struct{}, clamp(cfg.MaxConcurrent, 1, 64)),
-
-		cache:         make(map[string]ForgeGateResult),
-		cacheKeys:     make([]string, 0, clamp(cfg.CacheMaxSize, 0, 10000)),
-		cacheMaxSize:  clamp(cfg.CacheMaxSize, 0, 10000),
-		maxConcurrent: clamp(cfg.MaxConcurrent, 1, 64),
-		retryMax:      clamp(cfg.RetryMax, 0, 10),
-		retryBackoff:  cfg.RetryBackoff,
-		cfg:           cfg,
-
+		workDir:          workDir,
+		toolsDir:         filepath.Join(workDir, ForgeToolsDir),
+		memoryDir:        filepath.Join(workDir, ForgeMemoryDir),
+		ctx:              ctx,
+		cancel:           cancel,
+		sem:              make(chan struct{}, clamp(cfg.MaxConcurrent, 1, 64)),
+		cache:            make(map[string]ForgeGateResult),
+		cacheKeys:        make([]string, 0, clamp(cfg.CacheMaxSize, 0, 10000)),
+		cacheMaxSize:     clamp(cfg.CacheMaxSize, 0, 10000),
+		maxConcurrent:    clamp(cfg.MaxConcurrent, 1, 64),
+		retryMax:         clamp(cfg.RetryMax, 0, 10),
+		retryBackoff:     cfg.RetryBackoff,
+		cfg:              cfg,
 		cachePersistFile: filepath.Join(workDir, "forge_cache.gob"),
 	}
-
 	os.MkdirAll(f.toolsDir, 0755)
-
 	os.MkdirAll(f.memoryDir, 0755)
-
 	f.loadCacheFromDisk()
-
 	return f
-
 }
 
 func (f *Forge) Shutdown() {
-
 	f.saveCacheToDisk()
-
 	f.cancel()
-
 }
 
 // SetRunCtx 由 agent 在每次工具执行前调用, 传入本次 run 的 ctx; 用完传 nil 恢复默认。
@@ -466,18 +381,13 @@ func (f *Forge) effCtx() context.Context {
 // Build is the main entry point: write code, validate, execute, destroy.
 
 // Returns formatted output, the full result struct, and any error.
-
 func (f *Forge) Build(code, lang, input string) (string, *ForgeGateResult, error) {
 	langOmitted := lang == ""
 	fallbackUsed := false
 	buildStart := time.Now()
-
 	select {
-
 	case f.sem <- struct{}{}:
-
 		defer func() { <-f.sem }()
-
 	case <-f.effCtx().Done():
 
 		// runCtx 被取消 = 用户按了 Ctrl+C; f.ctx 被取消 = 程序关停
@@ -485,33 +395,21 @@ func (f *Forge) Build(code, lang, input string) (string, *ForgeGateResult, error
 			return "", nil, ErrCancelled
 		}
 		return "", nil, ErrShuttingDown
-
 	case <-time.After(60 * time.Second):
-
 		return "", nil, ErrTooBusy
-
 	}
-
 	if lang == "" {
-
 		lang = forgeDetectLang(code, "")
-
 	}
 
 	// Normalize common aliases
-
 	switch lang {
-
 	case "bash":
-
 		lang = "sh"
-
 	case "javascript", "js":
-
 		lang = "node"
 
 		// "c" 已无对应编译器 (tcc 裁剪), 不再映射, 交给自动检测/报错
-
 	}
 
 	// ─── 危险代码审批 (代码层强制, 非提示铁律) ───
@@ -520,7 +418,7 @@ func (f *Forge) Build(code, lang, input string) (string, *ForgeGateResult, error
 	kind, hit, danger := checkDangerousCode(code)
 	if !danger {
 		// 第二道防线: 受保护目标 × 破坏谓词共现 (拦 os.remove("memory.json") 等)
-		if k2, h2, d2 := checkDangerousTarget(code); d2 {
+		if k2, h2, d2 := checkDangerousTarget(code, f.workDir); d2 {
 			kind, hit, danger = k2, h2, true
 		}
 	}
@@ -543,7 +441,6 @@ func (f *Forge) Build(code, lang, input string) (string, *ForgeGateResult, error
 	} else {
 		result = f.forgeGate(code, lang, input)
 	}
-
 	if !result.OK {
 		// Attempt fallback: tool-not-found/timeout → try next language
 		if shouldFallback(result) {
@@ -558,26 +455,18 @@ func (f *Forge) Build(code, lang, input string) (string, *ForgeGateResult, error
 				}
 			}
 		}
-
 		errMsg := result.Error
-
 		if result.Stderr != "" {
-
 			errMsg = result.Stderr
-
 		}
-
 		errOutput := fmt.Sprintf("--- %s 失败 [%s] ---\n错误: %s\n标准错误:\n%s\n--- 结束 ---",
 			lang, result.Stage, result.Error, result.Stderr)
 		if result.Diagnostics != "" {
 			errOutput += "\n--- diagnostics ---\n" + result.Diagnostics
 		}
 		return errOutput, &result, fmt.Errorf("%s 门失败: %s", lang, errMsg)
-
 	}
-
 	return f.formatResult(result), &result, nil
-
 }
 
 // confirmDangerous 危险操作终端交互确认。
@@ -598,6 +487,27 @@ func (f *Forge) confirmDangerous(code, kind, hit string) bool {
 		logEvent(EvGuardBlocked, kind, map[string]string{"hit": hit, "verdict": "deny"})
 	}
 	return allowed
+}
+
+// auditFilePath 返回审计文件 (gate_audit.jsonl) 的写入路径。
+//
+// 优先级: 有效工作目录 (非空且非 ".") → 用它; 否则回退 FORGE_AUDIT_PATH。
+// 回退分支是给测试用的隔离出口: 测试进程的 WorkDir 常为 "" 或 "." (= 仓库根),
+// 直接写入会把假数据混进生产审计日志 —— 实测一次全量测试注入 33 行
+// (28 条 gate + 4 条 compact + 1 条 compact_failed), 直接污染
+// "gate 失败率/耗时" 与 "压缩成功率" 的统计基础 (治理决策的度量输入)。
+// 测试侧由 audit_isolation_test.go 的 TestMain 把该 env 指向临时目录。
+func auditFilePath(dir string) string {
+	if dir != "" && dir != "." {
+		return filepath.Join(dir, "gate_audit.jsonl")
+	}
+	if p := os.Getenv("FORGE_AUDIT_PATH"); p != "" {
+		return p
+	}
+	if dir == "" {
+		dir = "."
+	}
+	return filepath.Join(dir, "gate_audit.jsonl")
 }
 
 // auditGate appends one JSON line per Build call to gate_audit.jsonl.
@@ -628,19 +538,29 @@ func (f *Forge) auditGate(lang string, omitted bool, fallbackUsed bool, start ti
 			entry["err_snip"] = snip
 		}
 	}
+	appendAuditJSONL(auditFilePath(f.workDir), entry)
+}
+
+// auditWriteMu 串行化 gate_audit.jsonl 的追加写入。
+// 审计文件只保留这一条写入路径 —— 此前 forge 侧用实例 auditMu、agent 侧完全无锁,
+// 同一文件的同类写入两套规则 (结构上不一致: 改一处漏一处)。
+var auditWriteMu sync.Mutex
+
+// appendAuditJSONL 把一条 JSON 追加到审计文件 (唯一写入路径, 全进程串行)。
+// best-effort: 失败静默, 审计永不阻断主流程。
+func appendAuditJSONL(path string, entry map[string]interface{}) {
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return
 	}
-	f.auditMu.Lock()
-	defer f.auditMu.Unlock()
-	path := filepath.Join(f.workDir, "gate_audit.jsonl")
+	auditWriteMu.Lock()
+	defer auditWriteMu.Unlock()
 	fh, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return
 	}
 	defer fh.Close()
-	fh.Write(append(data, '\n'))
+	_, _ = fh.Write(append(data, '\n'))
 }
 
 // langEmoji returns an emoji for the language.
@@ -684,63 +604,34 @@ func langEmoji(lang string) string {
 	if noEmoji {
 		return asciiLangEmoji(lang)
 	}
-
 	switch lang {
-
 	case "python":
-
 		return "🐍"
-
 	case "go":
-
 		return "🔵"
-
 	case "sh", "bash":
-
 		return "💻"
-
 	case "node", "javascript":
-
 		return "🟢"
-
 	case "math":
-
 		return "🔢"
-
 	case "logic":
-
 		return "🧠"
-
 	case "knowledge":
-
 		return "📚"
-
 	case "regex":
-
 		return "🔍"
-
 	case "chain":
-
 		return "⛓️"
-
 	case "self":
-
 		return "🧬"
-
 	case "tcm":
-
 		return "☯️"
-
 	case "browser":
-
 		return "🌐"
-
 	default:
-
 		return "🔧"
-
 	}
-
 }
 
 // cacheTTLForLang 返回缓存 TTL 秒数: 慢外部 gate 用长 TTL 提升复用率。
@@ -754,12 +645,9 @@ func cacheTTLForLang(lang string) int {
 }
 
 func (f *Forge) forgeGateSkipCache(code, lang, input string, skipCache bool) ForgeGateResult {
-
 	cacheKey := f.cacheKey(code, lang, input)
-
 	if !skipCache {
 		f.cacheMu.RLock()
-
 		if cached, ok := f.cache[cacheKey]; ok {
 			// TTL invalidation: stale entries (and old-format entries with
 			// CachedAt==0) are treated as misses and re-executed, so the agent
@@ -788,95 +676,54 @@ func (f *Forge) forgeGateSkipCache(code, lang, input string, skipCache bool) For
 			f.cacheMu.RUnlock()
 		}
 	}
-
 	start := time.Now()
-
 	codeSize := len(code)
-
 	codeLines := len(strings.Split(strings.TrimSpace(code), "\n"))
-
 	compiler, ok := 铸剑炉_COMPILERS[lang]
-
 	if !ok {
-
 		detected := forgeDetectLang(code, "python")
-
 		if detected != lang {
-
 			slog.Info("forge lang fallback", "requested", lang, "detected", detected)
-
 			lang = detected
-
 			compiler, ok = 铸剑炉_COMPILERS[lang]
-
 		}
-
 		if !ok {
-
 			result := ForgeGateResult{
-
 				OK: false, Lang: lang, Stage: "compile",
-
-				Error: fmt.Sprintf("不支持的语言: %s。支持的语言: %s", lang, f.supportedLangs()),
-
+				Error:    fmt.Sprintf("不支持的语言: %s。支持的语言: %s", lang, f.supportedLangs()),
 				Duration: time.Since(start).Milliseconds(),
-
 				CodeSize: codeSize, CodeLines: codeLines,
 			}
-
 			if !skipCache {
 				f.cacheResult(cacheKey, result)
 			}
-
 			return result
-
 		}
-
 	}
-
 	if strings.TrimSpace(code) == "" {
-
 		result := ForgeGateResult{
-
 			OK: false, Lang: lang, Stage: "compile",
-
 			Error: "代码为空", Duration: time.Since(start).Milliseconds(),
-
 			CodeSize: codeSize, CodeLines: codeLines,
 		}
-
 		if !skipCache {
 			f.cacheResult(cacheKey, result)
 		}
-
 		return result
-
 	}
 
 	var result ForgeGateResult
-
 	f.statBuilds.Add(1)
-
 	if compiler.SelfHosted {
-
 		result = f.forgeGateSelfHosted(code, lang, compiler, input, start)
-
 	} else if compiler.InlineCode {
-
 		result = f.forgeGateInline(code, lang, compiler, input, start)
-
 	} else {
-
 		result = f.forgeGateFile(code, lang, compiler, input, start)
-
 	}
-
 	result.CodeSize = codeSize
-
 	result.CodeLines = codeLines
-
 	result.Summary = summarizeOutput(result.Stdout, result.Stderr)
-
 	if !result.OK {
 		f.statErrors.Add(1)
 	}
@@ -895,9 +742,7 @@ func (f *Forge) forgeGateSkipCache(code, lang, input string, skipCache bool) For
 	if !skipCache && (result.OK || !isTransientError(result)) {
 		f.cacheResult(cacheKey, result)
 	}
-
 	return result
-
 }
 
 // isTransientError returns true for errors that are likely temporary
@@ -909,16 +754,42 @@ func isTimeoutErr(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded)
 }
 
+// isTransientError 判定「环境瞬时失败」(唯一用途: 决定失败结果是否写入缓存)。
+// 确定性优先: 超时看 Timeout 字段(errors.Is 判定, 见 isTimeoutErr), 不看文本。
+// 旧实现纯文本匹配 stderr —— 用户代码打印含 "connection"/"busy" 等词即被误判为瞬时,
+// 真实失败不写缓存, 下次同样代码白跑一遍。
 func isTransientError(r ForgeGateResult) bool {
-	errLower := strings.ToLower(r.Error)
-	return strings.Contains(errLower, "timeout") ||
-		strings.Contains(errLower, "not found") ||
-		strings.Contains(errLower, "找不到") ||
-		strings.Contains(errLower, "execution failed") ||
-		strings.Contains(errLower, "http error") ||
-		strings.Contains(errLower, "connection") ||
-		strings.Contains(errLower, "busy") ||
-		strings.Contains(errLower, "shutting down")
+	if r.Timeout {
+		return true
+	}
+	// 执行阶段的失败 = 用户代码自身失败, 与环境瞬时无关 → 一律可缓存。
+	if r.Stage == "execute" {
+		return false
+	}
+	// 编译/启动/路径解析阶段: 工具链缺失或网络不可达属环境瞬时。
+	e := strings.ToLower(r.Error)
+	return strings.Contains(e, "timeout") ||
+		strings.Contains(e, "not found") ||
+		strings.Contains(e, "找不到") ||
+		strings.Contains(e, "http error") ||
+		strings.Contains(e, "connection") ||
+		strings.Contains(e, "busy") ||
+		strings.Contains(e, "shutting down")
+}
+
+// isDeterministicFailure 判定「同一份代码必然复现的失败」—— 重试零收益。
+//
+// 判据复用 isTransientError (环境瞬时的单一判据) 的补集, 并限定在编译阶段:
+// 执行阶段的失败可能是外部依赖抖动 (网络/文件锁), 重试仍有价值; 而编译阶段的
+// 非环境失败完全由代码文本决定, 重跑只会得到同一个错误。
+//
+// 与 Timeout 的分工: Timeout 是「预算已烧完」(重试要再烧一遍); 本判据是
+// 「结果已确定」(重试连结果都不会变)。两者都不该重试, 但原因不同。
+func isDeterministicFailure(r ForgeGateResult) bool {
+	if r.OK || r.Timeout || r.Stage != "compile" {
+		return false
+	}
+	return !isTransientError(r)
 }
 
 func (f *Forge) forgeGate(code, lang, input string) ForgeGateResult {
@@ -926,36 +797,24 @@ func (f *Forge) forgeGate(code, lang, input string) ForgeGateResult {
 }
 
 func (f *Forge) cacheKey(code, lang, input string) string {
-
 	h := sha256.New()
-
 	h.Write([]byte(code))
-
 	h.Write([]byte{0})
-
 	h.Write([]byte(lang))
-
 	h.Write([]byte{0})
-
 	h.Write([]byte(input))
-
 	return hex.EncodeToString(h.Sum(nil))
-
 }
 
 func (f *Forge) cacheResult(key string, r ForgeGateResult) {
-
 	f.cacheMu.Lock()
-
 	defer f.cacheMu.Unlock()
-
 	if f.cacheMaxSize > 0 && len(f.cache) >= f.cacheMaxSize && len(f.cacheKeys) > 0 {
 		// FIFO eviction: remove oldest entry
 		oldest := f.cacheKeys[0]
 		f.cacheKeys = f.cacheKeys[1:]
 		delete(f.cache, oldest)
 	}
-
 	r.CachedAt = time.Now().Unix()
 	f.cache[key] = r
 	f.cacheKeys = append(f.cacheKeys, key)
@@ -963,7 +822,6 @@ func (f *Forge) cacheResult(key string, r ForgeGateResult) {
 	if f.cacheSaveCounter%50 == 0 {
 		go f.saveCacheToDisk()
 	}
-
 }
 
 // shouldFallback returns true when a forge error is likely environmental
@@ -1002,19 +860,12 @@ func pickFallback(lang string) string {
 }
 
 func (f *Forge) supportedLangs() string {
-
 	langs := make([]string, 0, len(铸剑炉_COMPILERS))
-
 	for k := range 铸剑炉_COMPILERS {
-
 		langs = append(langs, k)
-
 	}
-
 	slices.Sort(langs)
-
 	return strings.Join(langs, ", ")
-
 }
 
 func (f *Forge) forgeGateSelfHosted(code, lang string, compiler CompilerDef, input string, start time.Time) ForgeGateResult {
@@ -1032,17 +883,11 @@ func (f *Forge) forgeGateSelfHosted(code, lang string, compiler CompilerDef, inp
 			Duration: time.Since(start).Milliseconds(),
 		}
 	}
-
 	switch lang {
-
 	case "go":
-
 		return f.selfHostedGo(code, compiler, start)
-
 	case "sh":
-
 		return f.selfHostedSh(code, input, start)
-
 	case "math":
 		// Auto-wrap plain expressions as JSON for math_gate
 		// simplify handles arithmetic, sqrt, trig, symbolics in one pass
@@ -1051,7 +896,6 @@ func (f *Forge) forgeGateSelfHosted(code, lang string, compiler CompilerDef, inp
 			code = string(b)
 		}
 		return f.selfHostedGate("math_gate", code, start)
-
 	case "logic":
 		// Auto-wrap plain logic expressions as JSON for logic_gate (Z3 SAT)
 		if !validGateJSON(code) {
@@ -1059,7 +903,6 @@ func (f *Forge) forgeGateSelfHosted(code, lang string, compiler CompilerDef, inp
 			code = string(b)
 		}
 		return f.selfHostedGate("logic_gate", code, start)
-
 	case "knowledge":
 		// Auto-wrap plain query as JSON for knowledge_gate (SPARQL)
 		if !validGateJSON(code) {
@@ -1067,7 +910,6 @@ func (f *Forge) forgeGateSelfHosted(code, lang string, compiler CompilerDef, inp
 			code = string(b)
 		}
 		return f.selfHostedGate("knowledge_gate", code, start)
-
 	case "regex":
 		// Auto-wrap plain pattern as JSON for regex_gate
 		if !validGateJSON(code) {
@@ -1075,11 +917,8 @@ func (f *Forge) forgeGateSelfHosted(code, lang string, compiler CompilerDef, inp
 			code = string(b)
 		}
 		return f.selfHostedGate("regex_gate", code, start)
-
 	case "chain":
-
 		return f.selfHostedChain(code, input, start)
-
 	case "tcm":
 		// Auto-wrap plain text as JSON for tcm_gate (中医认知诊断)
 		if !validGateJSON(code) {
@@ -1093,7 +932,6 @@ func (f *Forge) forgeGateSelfHosted(code, lang string, compiler CompilerDef, inp
 			}
 		}
 		return f.selfHostedGate("tcm_gate", code, start)
-
 	case "browser":
 		// Auto-wrap plain text as JSON for browser_gate (浏览器自动化)
 		if !validGateJSON(code) {
@@ -1101,25 +939,16 @@ func (f *Forge) forgeGateSelfHosted(code, lang string, compiler CompilerDef, inp
 			code = string(b)
 		}
 		return f.selfHostedGate("browser_gate", code, start)
-
 	case "self":
-
 		return f.selfHostedSelf(code, input, start)
-
 	default:
-
 		return ForgeGateResult{
-
 			OK: false, Lang: lang, Stage: "compile",
-
-			Error: fmt.Sprintf("self-hosted compiler not implemented: %s", lang),
-
+			Error:    fmt.Sprintf("self-hosted compiler not implemented: %s", lang),
 			ExitCode: -1,
 			Duration: time.Since(start).Milliseconds(),
 		}
-
 	}
-
 }
 
 // herbPairInputRE 识别 "查药对 X Y" 式中文输入（药对/双药/配伍/同现）
@@ -1134,8 +963,11 @@ func validGateJSON(code string) bool {
 	return strings.HasPrefix(t, "{") && json.Valid([]byte(t))
 }
 
-func (f *Forge) selfHostedGate(gateName, code string, start time.Time) ForgeGateResult {
+// mustHaveOutputGates: 纯判定型 gate(按 baseLang 计), 必须有判定输出。
+// 空 stdout 对它们等于「判定缺席」, 不可当成功 —— 否则 gate 二进制异常会被静默吞掉。
+var mustHaveOutputGates = map[string]bool{"math": true, "logic": true, "regex": true}
 
+func (f *Forge) selfHostedGate(gateName, code string, start time.Time) ForgeGateResult {
 	baseLang := strings.TrimSuffix(gateName, "_gate")
 	gatePath := filepath.Join(f.toolsDir, gateName+".exe")
 	if runtime.GOOS != "windows" {
@@ -1149,29 +981,18 @@ func (f *Forge) selfHostedGate(gateName, code string, start time.Time) ForgeGate
 			isScript = true
 		}
 	}
-
 	absPath, err := filepath.Abs(gatePath)
-
 	if err != nil {
-
 		return ForgeGateResult{
-
 			OK: false, Lang: baseLang, Stage: "compile",
-
-			Error: fmt.Sprintf("%s path resolution failed: %v", gateName, err),
-
+			Error:    fmt.Sprintf("%s path resolution failed: %v", gateName, err),
 			ExitCode: -1,
 			Duration: time.Since(start).Milliseconds(),
 		}
-
 	}
-
 	if _, err := os.Stat(absPath); os.IsNotExist(err) {
-
 		return ForgeGateResult{
-
 			OK: false, Lang: baseLang, Stage: "compile",
-
 			Error: func() string {
 				suffix := ".exe"
 				if runtime.GOOS != "windows" {
@@ -1179,22 +1000,16 @@ func (f *Forge) selfHostedGate(gateName, code string, start time.Time) ForgeGate
 				}
 				return fmt.Sprintf("%s%s not found -- dead boundary unavailable", gateName, suffix)
 			}(),
-
 			ExitCode: -1,
 			Duration: time.Since(start).Milliseconds(),
 		}
-
 	}
-
-	timeout := 20 * time.Second
+	timeout := deadBoundaryTimeout
 	if comp, ok := 铸剑炉_COMPILERS[baseLang]; ok && comp.ExecTimeout > 0 {
 		timeout = comp.ExecTimeout
 	}
-
 	ctx, cancel := context.WithTimeout(f.effCtx(), timeout)
-
 	defer cancel()
-
 	var cmd *exec.Cmd
 	if isScript {
 		cmd = f.newCmd(ctx, "python", absPath, code)
@@ -1203,129 +1018,75 @@ func (f *Forge) selfHostedGate(gateName, code string, start time.Time) ForgeGate
 	}
 
 	var stdout, stderr strings.Builder
-
 	cmd.Stdout = &stdout
-
 	cmd.Stderr = &stderr
-
 	err = runWithTimeout(ctx, cmd)
-
 	if err != nil {
-
 		errMsg := stderr.String()
-
 		if errMsg == "" {
-
 			errMsg = stdout.String()
-
 		}
-
 		if errMsg == "" {
-
 			errMsg = err.Error()
-
 		}
-
 		return ForgeGateResult{
-
 			OK: false, Lang: baseLang, Stage: "execute",
-
-			Error: fmt.Sprintf("%s execution failed: %s", gateName, errMsg),
-
-			Stderr: errMsg,
-
-			Timeout: isTimeoutErr(err),
-
+			Error:    fmt.Sprintf("%s execution failed: %s", gateName, errMsg),
+			Stderr:   errMsg,
+			Timeout:  isTimeoutErr(err),
 			ExitCode: safeExitCode(cmd),
 			Duration: time.Since(start).Milliseconds(),
 		}
-
 	}
-
 	output := stdout.String()
 
-	// Empty output is valid for gates that produce no stdout (e.g., system_gate)
-
-	if output == "" {
-
+	// 判定型 gate 必须有判定输出: 空 stdout = 判定缺席, 不可当成功。
+	// (旧实现 if/return 两分支逐字相同, 空输出与有输出同样 OK:true —— 判定被静默吞掉)
+	if output == "" && mustHaveOutputGates[baseLang] {
 		return ForgeGateResult{
-
-			OK: true, Lang: baseLang, Stage: "done",
-
-			Stdout: output,
-
+			OK: false, Lang: baseLang, Stage: "execute",
+			Error:    fmt.Sprintf("%s gate 无输出: 判定缺失(疑似 gate 二进制异常)", gateName),
+			Stderr:   stderr.String(),
+			ExitCode: safeExitCode(cmd),
 			Duration: time.Since(start).Milliseconds(),
 		}
-
 	}
-
 	return ForgeGateResult{
-
 		OK: true, Lang: baseLang, Stage: "done",
-
-		Stdout: output,
-
+		Stdout:   output,
 		Duration: time.Since(start).Milliseconds(),
 	}
-
 }
 
 func (f *Forge) selfHostedGo(code string, compiler CompilerDef, start time.Time) ForgeGateResult {
-
 	runCode := code
-
 	if !strings.Contains(code, "package main") {
-
 		runCode = fmt.Sprintf(`package main
-
 import "fmt"
-
 func main() {
-
 %s
-
 }`, code)
-
 	}
-
 	tmpDir, err := os.MkdirTemp("", "forge_go_")
-
 	if err != nil {
-
 		return ForgeGateResult{
-
 			OK: false, Lang: "go", Stage: "write",
-
-			Error: fmt.Sprintf("failed to create temp dir: %v", err),
-
+			Error:    fmt.Sprintf("failed to create temp dir: %v", err),
 			Duration: time.Since(start).Milliseconds(),
 		}
-
 	}
-
 	defer os.RemoveAll(tmpDir)
-
 	srcPath := filepath.Join(tmpDir, "main.go")
-
 	if err := os.WriteFile(srcPath, []byte(runCode), 0644); err != nil {
-
 		return ForgeGateResult{
-
 			OK: false, Lang: "go", Stage: "write",
-
-			Error: fmt.Sprintf("failed to write source: %v", err),
-
+			Error:    fmt.Sprintf("failed to write source: %v", err),
 			Duration: time.Since(start).Milliseconds(),
 		}
-
 	}
-
 	exePath := filepath.Join(tmpDir, "main"+exeSuffix())
-
 	compileCtx, compileCancel := context.WithTimeout(f.effCtx(), compiler.CompileTimeout)
-
 	defer compileCancel()
-
 	goCmd, goErr := f.findGoCommand()
 	if goErr != nil {
 		return ForgeGateResult{
@@ -1335,68 +1096,38 @@ func main() {
 		}
 	}
 	compileCmd := f.newCmd(compileCtx, goCmd, "build", "-o", exePath, srcPath)
-
 	var compileStderr strings.Builder
-
 	compileCmd.Stderr = &compileStderr
-
 	if err := runWithTimeout(compileCtx, compileCmd); err != nil {
-
 		return ForgeGateResult{
-
 			OK: false, Lang: "go", Stage: "compile",
-
-			Error: fmt.Sprintf("go build failed: %s", compileStderr.String()),
-
-			Stderr: compileStderr.String(),
-
-			Timeout: isTimeoutErr(err),
-
+			Error:    fmt.Sprintf("go build failed: %s", compileStderr.String()),
+			Stderr:   compileStderr.String(),
+			Timeout:  isTimeoutErr(err),
 			Duration: time.Since(start).Milliseconds(),
 		}
-
 	}
-
 	execCtx, execCancel := context.WithTimeout(f.effCtx(), compilerTimeout("go"))
-
 	defer execCancel()
-
 	execCmd := f.newCmd(execCtx, exePath)
-
 	var stdout, execStderr strings.Builder
-
 	execCmd.Stdout = &stdout
-
 	execCmd.Stderr = &execStderr
-
 	err = runWithTimeout(execCtx, execCmd)
-
 	if err != nil {
-
 		return ForgeGateResult{
-
 			OK: false, Lang: "go", Stage: "execute",
-
-			Error: fmt.Sprintf("go run failed: %v — %s", err, execStderr.String()),
-
-			Stderr: execStderr.String(),
-
-			Timeout: isTimeoutErr(err),
-
+			Error:    fmt.Sprintf("go run failed: %v — %s", err, execStderr.String()),
+			Stderr:   execStderr.String(),
+			Timeout:  isTimeoutErr(err),
 			Duration: time.Since(start).Milliseconds(),
 		}
-
 	}
-
 	return ForgeGateResult{
-
 		OK: true, Lang: "go", Stage: "done",
-
-		Stdout: stdout.String(),
-
+		Stdout:   stdout.String(),
 		Duration: time.Since(start).Milliseconds(),
 	}
-
 }
 
 func (f *Forge) selfHostedSh(code, input string, start time.Time) ForgeGateResult {
@@ -1412,16 +1143,13 @@ func (f *Forge) selfHostedSh(code, input string, start time.Time) ForgeGateResul
 			}
 		}
 	}
-	ctx, cancel := context.WithTimeout(f.effCtx(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(f.effCtx(), shGateTimeout)
 	defer cancel()
-
 	var cmd *exec.Cmd
-
 	if runtime.GOOS == "windows" {
 		// Hybrid approach: simple commands go through Go native exec
 		// (CreateProcess, no shell), complex commands use temp .bat file.
 		// This eliminates cmd /c outer-quoting which corrupts nested quotes.
-
 		needsShell := strings.ContainsAny(code, "|&<>") ||
 			strings.Contains(code, "&&") || strings.Contains(code, "||")
 
@@ -1439,7 +1167,6 @@ func (f *Forge) selfHostedSh(code, input string, start time.Time) ForgeGateResul
 				needsShell = true
 			}
 		}
-
 		if !needsShell && len(parts) > 0 {
 			// Simple command: Go native execution via CreateProcess.
 			cmd = f.newCmd(ctx, parts[0], parts[1:]...)
@@ -1461,7 +1188,6 @@ func (f *Forge) selfHostedSh(code, input string, start time.Time) ForgeGateResul
 				}
 			}
 			defer os.RemoveAll(tmpDir)
-
 			batPath := filepath.Join(tmpDir, "run.bat")
 			batContent := "@echo off\r\nchcp 65001 > nul 2>&1\r\n" + code + "\r\n"
 			if writeErr := os.WriteFile(batPath, []byte(batContent), 0644); writeErr != nil {
@@ -1471,7 +1197,6 @@ func (f *Forge) selfHostedSh(code, input string, start time.Time) ForgeGateResul
 					Duration: time.Since(start).Milliseconds(),
 				}
 			}
-
 			cmd = f.newCmd(ctx, "cmd", "/c", batPath)
 			cmd.Dir = f.workDir
 		}
@@ -1479,7 +1204,6 @@ func (f *Forge) selfHostedSh(code, input string, start time.Time) ForgeGateResul
 		cmd = f.newCmd(ctx, "sh", "-c", code)
 		cmd.Dir = f.workDir
 	}
-
 	if input != "" {
 		cmd.Env = append(cmd.Env, ForgeInputEnv+"="+input)
 		cmd.Stdin = strings.NewReader(input)
@@ -1488,7 +1212,6 @@ func (f *Forge) selfHostedSh(code, input string, start time.Time) ForgeGateResul
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-
 	err := runWithTimeout(ctx, cmd)
 	if err != nil {
 		errMsg := stderr.String()
@@ -1503,7 +1226,6 @@ func (f *Forge) selfHostedSh(code, input string, start time.Time) ForgeGateResul
 			Duration: time.Since(start).Milliseconds(),
 		}
 	}
-
 	return ForgeGateResult{
 		OK: true, Lang: "sh", Stage: "done",
 		Stdout:   stdout.String(),
@@ -1542,7 +1264,6 @@ func forgeSplitCommand(cmdLine string) []string {
 	var current strings.Builder
 	inSingle := false
 	inDouble := false
-
 	for i := 0; i < len(cmdLine); i++ {
 		ch := cmdLine[i]
 		switch {
@@ -1566,157 +1287,89 @@ func forgeSplitCommand(cmdLine string) []string {
 }
 
 func (f *Forge) forgeGateInline(code, lang string, compiler CompilerDef, input string, start time.Time) ForgeGateResult {
-
 	timeout := compiler.ExecTimeout
-
 	if timeout == 0 {
-
-		timeout = 30 * time.Second
-
+		timeout = defaultGateTimeout
 	}
-
 	ctx, cancel := context.WithTimeout(f.effCtx(), timeout)
-
 	defer cancel()
-
 	var cmd *exec.Cmd
-
 	execArgs := make([]string, len(compiler.Exec))
-
 	copy(execArgs, compiler.Exec)
-
 	hasCodePlaceholder := false
 	needsStdin := false
-
 	for i, a := range execArgs {
-
 		if a == "{code}" {
-
 			execArgs[i] = code
-
 			hasCodePlaceholder = true
-
 		}
-
 		if strings.Contains(a, "{forge}") {
-
 			execArgs[i] = strings.ReplaceAll(a, "{forge}", f.workDir)
 			if runtime.GOOS != "windows" {
 				execArgs[i] = strings.ReplaceAll(execArgs[i], ".exe", "")
 			}
-
 		}
-
 		if a == "-" {
 			needsStdin = true
 		}
-
 	}
-
 	if !hasCodePlaceholder && !needsStdin {
-
 		execArgs = append(execArgs, code)
-
 	}
-
 	if len(execArgs) > 0 {
-
 		exe := execArgs[0]
-
 		args := execArgs[1:]
-
 		cmd = f.newCmd(ctx, exe, args...)
-
 	} else {
-
 		return ForgeGateResult{
-
 			OK: false, Lang: lang, Stage: "compile",
-
-			Error: "no exec command configured",
-
+			Error:    "no exec command configured",
 			Duration: time.Since(start).Milliseconds(),
 		}
-
 	}
-
 	cmd.Dir = f.workDir
-
 	if input != "" {
-
 		cmd.Env = append(cmd.Env, ForgeInputEnv+"="+input)
 		cmd.Stdin = strings.NewReader(input)
-
 	}
 
 	var stdout, stderr strings.Builder
-
 	cmd.Stdout = &stdout
-
 	cmd.Stderr = &stderr
-
 	if needsStdin {
 		cmd.Stdin = strings.NewReader(code)
 	} else if input != "" {
 		cmd.Stdin = strings.NewReader(input)
 	}
-
 	err := runWithTimeout(ctx, cmd)
-
 	if err != nil {
-
 		errMsg := stderr.String()
-
 		if errMsg == "" {
-
 			errMsg = stdout.String()
-
 		}
-
 		if errMsg == "" {
-
 			errMsg = err.Error()
-
 		}
-
 		return ForgeGateResult{
-
-			OK: false,
-
-			Lang: lang,
-
-			Stage: "execute",
-
-			Error: fmt.Sprintf("%s execution failed: %s", lang, errMsg),
-
-			Stderr: errMsg,
-
-			Timeout: isTimeoutErr(err),
-
+			OK:       false,
+			Lang:     lang,
+			Stage:    "execute",
+			Error:    fmt.Sprintf("%s execution failed: %s", lang, errMsg),
+			Stderr:   errMsg,
+			Timeout:  isTimeoutErr(err),
 			ExitCode: safeExitCode(cmd),
-
 			Duration: time.Since(start).Milliseconds(),
 		}
-
 	}
-
 	return ForgeGateResult{
-
-		OK: true,
-
-		Lang: lang,
-
-		Stage: "done",
-
-		Stdout: stdout.String(),
-
-		Stderr: stderr.String(),
-
+		OK:       true,
+		Lang:     lang,
+		Stage:    "done",
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
 		ExitCode: 0,
-
 		Duration: time.Since(start).Milliseconds(),
 	}
-
 }
 
 func (f *Forge) forgeGateFile(code, lang string, compiler CompilerDef, input string, start time.Time) ForgeGateResult {
@@ -1730,7 +1383,6 @@ func (f *Forge) forgeGateFile(code, lang string, compiler CompilerDef, input str
 			Error: fmt.Sprintf("failed to create temp dir: %v", err), Duration: time.Since(start).Milliseconds()}
 	}
 	defer os.RemoveAll(tmpDir)
-
 	srcPath := filepath.Join(tmpDir, "code"+ext)
 
 	// Ensure UTF-8 BOM-free
@@ -1764,7 +1416,10 @@ func (f *Forge) forgeGateFile(code, lang string, compiler CompilerDef, input str
 	var lintOutput string
 	if len(compiler.Lint) > 0 {
 		lintStart := time.Now()
-		lintArgs, _ := expandArgs(compiler.Lint, srcPath, f.workDir, tmpDir)
+		lintArgs, hasFilePlaceholder := expandArgs(compiler.Lint, srcPath, f.workDir, tmpDir)
+		if !hasFilePlaceholder {
+			lintArgs = append(lintArgs, srcPath)
+		}
 		lintCtx, lintCancel := context.WithTimeout(f.effCtx(), compiler.CompileTimeout)
 		defer lintCancel()
 		lintCmd := f.newCmd(lintCtx, lintArgs[0], lintArgs[1:]...)
@@ -1794,7 +1449,6 @@ func (f *Forge) forgeGateFile(code, lang string, compiler CompilerDef, input str
 		}
 		execArgs = append(execArgs, srcPath)
 	}
-
 	execCtx, execCancel := context.WithTimeout(f.effCtx(), compiler.ExecTimeout)
 	defer execCancel()
 	cmd := f.newCmd(execCtx, execArgs[0], execArgs[1:]...)
@@ -1866,44 +1520,6 @@ func (f *Forge) newCmd(ctx context.Context, name string, args ...string) *exec.C
 	return cmd
 }
 
-func (f *Forge) execCmd(ctx context.Context, args []string) (string, error) {
-
-	if len(args) == 0 {
-
-		return "", errors.New("empty command")
-
-	}
-
-	cmd := f.newCmd(ctx, args[0], args[1:]...)
-
-	cmd.Dir = f.workDir
-
-	var stdout, stderr strings.Builder
-
-	cmd.Stdout = &stdout
-
-	cmd.Stderr = &stderr
-
-	err := runWithTimeout(ctx, cmd)
-
-	if err != nil {
-
-		errMsg := strings.TrimSpace(stderr.String())
-
-		if errMsg == "" {
-
-			errMsg = err.Error()
-
-		}
-
-		return "", fmt.Errorf("%s", errMsg)
-
-	}
-
-	return strings.TrimSpace(stdout.String()), nil
-
-}
-
 // safeExitCode returns the exit code of a command, or -1 if ProcessState is nil.
 func safeExitCode(cmd *exec.Cmd) int {
 	if cmd.ProcessState == nil {
@@ -1918,20 +1534,16 @@ func (f *Forge) findGoCommand() (string, error) {
 	if goPath, err := exec.LookPath("go"); err == nil {
 		return goPath, nil
 	}
-
 	localGo := filepath.Join(f.workDir, ".forge", "go", "bin", "go"+exeSuffix())
 	if _, err := os.Stat(localGo); err == nil {
 		return localGo, nil
 	}
-
 	if err := f.downloadGo(); err != nil {
 		return "", fmt.Errorf("go toolchain not found and auto-download failed: %w\nInstall Go manually: https://go.dev/dl/", err)
 	}
-
 	if _, err := os.Stat(localGo); err == nil {
 		return localGo, nil
 	}
-
 	return "", errors.New("go toolchain not found. Install Go: https://go.dev/dl/")
 }
 
@@ -1946,43 +1558,34 @@ func (f *Forge) downloadGo() error {
 	if mapped, ok := archMap[goArch]; ok {
 		goArch = mapped
 	}
-
 	ext := "tar.gz"
 	if goOS == "windows" {
 		ext = "zip"
 	}
-
 	filename := fmt.Sprintf("%s.%s-%s.%s", goVersion, goOS, goArch, ext)
 	url := "https://go.dev/dl/" + filename
-
 	tmpFile := filepath.Join(os.TempDir(), filename)
-
 	client := &http.Client{Timeout: 10 * time.Minute}
 	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("download %s: %w", url, err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
 	}
-
 	fh, err := os.Create(tmpFile)
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	defer fh.Close()
 	defer os.Remove(tmpFile)
-
 	if _, err := io.Copy(fh, resp.Body); err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
 	fh.Close()
-
 	goDir := filepath.Join(f.workDir, ".forge")
 	os.RemoveAll(filepath.Join(goDir, "go"))
-
 	if goOS == "windows" {
 		if err := forgeUnzip(tmpFile, goDir); err != nil {
 			return fmt.Errorf("unzip Go: %w", err)
@@ -1992,7 +1595,6 @@ func (f *Forge) downloadGo() error {
 			return fmt.Errorf("untar Go: %w", err)
 		}
 	}
-
 	return nil
 }
 
@@ -2003,31 +1605,25 @@ func forgeUnzip(zipPath, destDir string) error {
 		return err
 	}
 	defer r.Close()
-
 	for _, f := range r.File {
 		targetPath := filepath.Join(destDir, f.Name)
 		if !strings.HasPrefix(filepath.Clean(targetPath), filepath.Clean(destDir)+string(os.PathSeparator)) {
 			return fmt.Errorf("zip slip detected: %s", f.Name)
 		}
-
 		if f.FileInfo().IsDir() {
 			os.MkdirAll(targetPath, 0755)
 			continue
 		}
-
 		os.MkdirAll(filepath.Dir(targetPath), 0755)
-
 		rc, err := f.Open()
 		if err != nil {
 			return err
 		}
-
 		outFile, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
 		if err != nil {
 			rc.Close()
 			return err
 		}
-
 		_, err = io.Copy(outFile, rc)
 		rc.Close()
 		outFile.Close()
@@ -2035,7 +1631,6 @@ func forgeUnzip(zipPath, destDir string) error {
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -2046,13 +1641,11 @@ func forgeUntarGz(tarGzPath, destDir string) error {
 		return err
 	}
 	defer fh.Close()
-
 	gzReader, err := gzip.NewReader(fh)
 	if err != nil {
 		return err
 	}
 	defer gzReader.Close()
-
 	tarReader := tar.NewReader(gzReader)
 	for {
 		header, err := tarReader.Next()
@@ -2062,12 +1655,10 @@ func forgeUntarGz(tarGzPath, destDir string) error {
 		if err != nil {
 			return err
 		}
-
 		targetPath := filepath.Join(destDir, header.Name)
 		if !strings.HasPrefix(filepath.Clean(targetPath), filepath.Clean(destDir)+string(os.PathSeparator)) {
 			return fmt.Errorf("tar slip detected: %s", header.Name)
 		}
-
 		switch header.Typeflag {
 		case tar.TypeDir:
 			os.MkdirAll(targetPath, 0755)
@@ -2176,7 +1767,6 @@ func (f *Forge) loadCacheFromDisk() {
 		return // file doesn't exist yet, that's fine
 	}
 	defer file.Close()
-
 	dec := gob.NewDecoder(file)
 
 	// Try new format first (cachePersistFormat), fall back to old format (bare map)
@@ -2196,7 +1786,6 @@ func (f *Forge) loadCacheFromDisk() {
 			data.Keys = append(data.Keys, k)
 		}
 	}
-
 	f.cacheMu.Lock()
 	f.cache = data.Entries
 	f.cacheKeys = data.Keys
@@ -2252,7 +1841,6 @@ func (f *Forge) formatResult(r ForgeGateResult) string {
 		fullBody += "--- diagnostics ---\n" + r.Diagnostics
 	}
 	truncatedBody := truncateOutput(fullBody)
-
 	if r.OK {
 		sb.WriteString(fmt.Sprintf("%s --- %s 成功 (%dms, %d lines) ---\n",
 			emoji, langLabel, r.Duration, r.CodeLines))
@@ -2260,7 +1848,6 @@ func (f *Forge) formatResult(r ForgeGateResult) string {
 		sb.WriteString(fmt.Sprintf("%s --- %s 失败 (exit=%d, %dms, stage=%s) ---\n",
 			emoji, langLabel, r.ExitCode, r.Duration, r.Stage))
 	}
-
 	sb.WriteString(truncatedBody)
 	if r.Summary != "" {
 		summaryText := truncateOutput(r.Summary)
@@ -2270,10 +1857,40 @@ func (f *Forge) formatResult(r ForgeGateResult) string {
 	return sb.String()
 }
 
+// auditAttempt 记录单次 gate 尝试的失败明细 (仅失败时写, 正常路径零开销)。
+// 目的: 区分「首次失败原因」与「最终失败原因」—— 此前 gate_audit 只有 Retries 总数,
+// 无法解释「超时却重试了 2 次」这类反常 (20260913 实测 148 条 timeout 记录 retries=2,
+// 单次 duration 累计 93s ≈ 3×30s + backoff, 但 retryGate 明写超时不重试)。
+func (f *Forge) auditAttempt(lang string, n int, r ForgeGateResult) {
+	if r.OK {
+		return
+	}
+	if os.Getenv("FORGE_GATE_AUDIT") == "0" {
+		return
+	}
+	snip := r.Error
+	if len(snip) > 120 {
+		snip = snip[:120]
+	}
+	appendAuditJSONL(auditFilePath(f.workDir), map[string]interface{}{
+		"event":   "gate_attempt",
+		"ts":      time.Now().Format(time.RFC3339Nano),
+		"lang":    lang,
+		"attempt": n,
+		"timeout": r.Timeout,
+		"stage":   r.Stage,
+		"ms":      r.Duration,
+		"err":     snip,
+	})
+}
+
 func (f *Forge) retryGate(code, lang, input string) ForgeGateResult {
 	result := f.forgeGateSkipCache(code, lang, input, false)
+	f.auditAttempt(lang, 1, result)
 	// 超时不重试：重试一个已经跑满超时的任务，大概率再跑满一次。
-	if result.OK || f.retryMax <= 1 || result.Timeout {
+	// 确定性失败同样不重试：编译阶段的语法/类型错误由代码文本决定, 重跑同一份代码
+	// 必然复现 (实测 compile 失败 177 条中 167 条白跑 2 次重试)。
+	if result.OK || f.retryMax <= 1 || result.Timeout || isDeterministicFailure(result) {
 		return result
 	}
 	// Clear cache for this key so retries actually re-execute
@@ -2290,6 +1907,7 @@ func (f *Forge) retryGate(code, lang, input string) ForgeGateResult {
 	for attempt := 1; attempt < f.retryMax; attempt++ {
 		time.Sleep(f.retryBackoff * time.Duration(1<<uint(attempt-1)))
 		retryResult := f.forgeGateSkipCache(code, lang, input, true)
+		f.auditAttempt(lang, attempt+1, retryResult)
 		if retryResult.OK {
 			retryResult.Retries = attempt
 			// Persist the successful retry so future identical calls hit the cache.
@@ -2316,7 +1934,6 @@ func (f *Forge) selfHostedChain(code, input string, start time.Time) ForgeGateRe
 		} `json:"stages"`
 		StopOn string `json:"stop_on"`
 	}
-
 	if err := json.Unmarshal([]byte(code), &req); err != nil {
 		return ForgeGateResult{
 			OK: false, Lang: "chain", Stage: "parse",
@@ -2325,7 +1942,6 @@ func (f *Forge) selfHostedChain(code, input string, start time.Time) ForgeGateRe
 			Duration: time.Since(start).Milliseconds(),
 		}
 	}
-
 	if req.StopOn == "" {
 		req.StopOn = "error"
 	}
@@ -2341,7 +1957,6 @@ func (f *Forge) selfHostedChain(code, input string, start time.Time) ForgeGateRe
 
 	var stages []stageResult
 	var prevOutput string // for if_verdict substring matching
-
 	for i, stage := range req.Stages {
 		// if_verdict: skip stage if previous output doesn't contain verdict string
 		if stage.IfVerdict != "" && i > 0 && !strings.Contains(prevOutput, stage.IfVerdict) {
@@ -2375,10 +1990,8 @@ func (f *Forge) selfHostedChain(code, input string, start time.Time) ForgeGateRe
 				}
 			}
 		}
-
 		stageStart := time.Now()
 		result := f.forgeGateSkipCache(stageCode, stage.Gate, stageInput, false)
-
 		sr := stageResult{
 			Index:     i,
 			Gate:      stage.Gate,
@@ -2388,12 +2001,10 @@ func (f *Forge) selfHostedChain(code, input string, start time.Time) ForgeGateRe
 			LatencyMs: time.Since(stageStart).Milliseconds(),
 		}
 		stages = append(stages, sr)
-
 		prevOutput = result.Stdout
 		if !result.OK {
 			prevOutput += "\n" + result.Error
 		}
-
 		if req.StopOn == "error" && !result.OK {
 			break
 		}
@@ -2401,7 +2012,6 @@ func (f *Forge) selfHostedChain(code, input string, start time.Time) ForgeGateRe
 			break
 		}
 	}
-
 	allOK := true
 	for _, s := range stages {
 		if !s.OK {
@@ -2409,12 +2019,10 @@ func (f *Forge) selfHostedChain(code, input string, start time.Time) ForgeGateRe
 			break
 		}
 	}
-
 	output, _ := json.Marshal(map[string]interface{}{
 		"ok":     allOK,
 		"stages": stages,
 	})
-
 	return ForgeGateResult{
 		OK:       allOK,
 		Lang:     "chain",
@@ -2425,14 +2033,10 @@ func (f *Forge) selfHostedChain(code, input string, start time.Time) ForgeGateRe
 }
 
 func (f *Forge) selfHostedSelf(code, input string, start time.Time) ForgeGateResult {
-	myName := filepath.Base(os.Args[0])
-	myNameNoExt := strings.TrimSuffix(myName, ".exe")
-
+	// 产物名恒为 forge_new.exe: 就位统一由 deploySelfExe 负责。
+	// 旧版按自身进程名切换目标(build -o forge.exe 直接覆盖生产 exe) =
+	// 「没冒烟就先替换」, 正是本轮回补的缺口。
 	targetExe := "forge_new.exe"
-	if myNameNoExt == "forge_new" {
-		targetExe = "forge.exe"
-	}
-
 	action := input
 	if action == "" {
 		action = "append"
@@ -2448,13 +2052,28 @@ func (f *Forge) selfHostedSelf(code, input string, start time.Time) ForgeGateRes
 		}
 	}
 	srcPath := filepath.Join(f.workDir, "forge.go")
+	var backupPath string // self gate 改动前备份路径; go build 失败时自动回滚用
 
 	// Backup forge.go before modification (defense against bad self-modification).
 	// Keep at most 10 backups and prune older ones so the directory never grows unbounded.
 	if action != "build" {
-		backupPath := srcPath + ".bak_self_" + time.Now().Format("20060102_150405.000000000")
-		if src, err := os.ReadFile(srcPath); err == nil {
-			os.WriteFile(backupPath, src, 0644)
+		backupPath = srcPath + ".bak_self_" + time.Now().Format("20060102_150405.000000000")
+		src0, err0 := os.ReadFile(srcPath)
+		if err0 != nil {
+			return ForgeGateResult{
+				OK: false, Lang: "self", Stage: "compile",
+				Error:    fmt.Sprintf("self gate: 读取 forge.go 失败, 拒绝无备份改动: %v", err0),
+				ExitCode: -1,
+				Duration: time.Since(start).Milliseconds(),
+			}
+		}
+		if err := os.WriteFile(backupPath, src0, 0644); err != nil {
+			return ForgeGateResult{
+				OK: false, Lang: "self", Stage: "compile",
+				Error:    fmt.Sprintf("self gate: 备份失败, 拒绝改动: %v", err),
+				ExitCode: -1,
+				Duration: time.Since(start).Milliseconds(),
+			}
 		}
 		pruneSelfBackups(srcPath, 10)
 		// 统一快照(源码+记忆+gate+exe) + git 历史点。
@@ -2466,11 +2085,9 @@ func (f *Forge) selfHostedSelf(code, input string, start time.Time) ForgeGateRes
 			}
 		}
 	}
-
 	switch {
 	case action == "build":
 		// just rebuild, no source modification
-
 	case strings.HasPrefix(action, "replace:"):
 		rest := action[8:]
 		parts := strings.SplitN(rest, ":", 2)
@@ -2491,6 +2108,18 @@ func (f *Forge) selfHostedSelf(code, input string, start time.Time) ForgeGateRes
 				Duration: time.Since(start).Milliseconds(),
 			}
 		}
+		if !strings.Contains(string(src), parts[0]) {
+			prev := []rune(parts[0])
+			if len(prev) > 40 {
+				prev = prev[:40]
+			}
+			return ForgeGateResult{
+				OK: false, Lang: "self", Stage: "compile",
+				Error:    fmt.Sprintf("replace 未命中: old_text 不存在于 forge.go (前 40 字: %s)", string(prev)),
+				ExitCode: -1,
+				Duration: time.Since(start).Milliseconds(),
+			}
+		}
 		newSrc := strings.Replace(string(src), parts[0], parts[1], 1)
 		if err := os.WriteFile(srcPath, []byte(newSrc), 0644); err != nil {
 			return ForgeGateResult{
@@ -2501,7 +2130,6 @@ func (f *Forge) selfHostedSelf(code, input string, start time.Time) ForgeGateRes
 			}
 		}
 		logEvent(EvSelfModified, "replace", map[string]string{"file": "forge.go"})
-
 	default: // "append"
 		src, err := os.ReadFile(srcPath)
 		if err != nil {
@@ -2550,10 +2178,8 @@ func (f *Forge) selfHostedSelf(code, input string, start time.Time) ForgeGateRes
 		}
 		logEvent(EvSelfModified, "append", map[string]string{"file": "forge.go"})
 	}
-
 	ctx, cancel := context.WithTimeout(f.effCtx(), 60*time.Second)
 	defer cancel()
-
 	goCmd, goErr := f.findGoCommand()
 	if goErr != nil {
 		return ForgeGateResult{
@@ -2562,29 +2188,235 @@ func (f *Forge) selfHostedSelf(code, input string, start time.Time) ForgeGateRes
 			Duration: time.Since(start).Milliseconds(),
 		}
 	}
-
 	targetPath := filepath.Join(f.workDir, targetExe)
+	// 清理陈旧产物: 上一轮编译成功但未就位的 forge_new.exe 若留着,
+	// 之后被运行会把 exe 换成更旧的版本。清不掉(被占用)则交给 go build 覆盖。
+	if _, serr := os.Stat(targetPath); serr == nil {
+		stale := targetPath + ".stale_" + time.Now().Format("20060102_150405")
+		if rerr := os.Rename(targetPath, stale); rerr == nil {
+			os.Remove(stale)
+		}
+	}
 	cmd := f.newCmd(ctx, goCmd, "build", "-o", targetPath, ".")
 	cmd.Dir = f.workDir
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-
 	if err := runWithTimeout(ctx, cmd); err != nil {
+		// 编译失败 → 自动回滚 forge.go 到本次改动前的备份(不留半改状态)。
+		note := ""
+		if backupPath != "" {
+			if b, rerr := os.ReadFile(backupPath); rerr == nil {
+				if werr := os.WriteFile(srcPath, b, 0644); werr == nil {
+					note = "\n[self gate 已自动回滚 forge.go 到改动前版本]"
+				} else {
+					note = fmt.Sprintf("\n[回滚失败: %v, 备份: %s]", werr, backupPath)
+				}
+			} else {
+				note = fmt.Sprintf("\n[备份不可读: %v, 备份: %s]", rerr, backupPath)
+			}
+		}
 		return ForgeGateResult{
 			OK: false, Lang: "self", Stage: "compile",
-			Error:    fmt.Sprintf("go build failed: %s", stderr.String()),
+			Error:    fmt.Sprintf("go build failed: %s%s", stderr.String(), note),
 			Stderr:   stderr.String(),
 			Timeout:  isTimeoutErr(err),
 			Duration: time.Since(start).Milliseconds(),
 		}
 	}
-
+	// ── 部署阶段: 编译成功 != 能跑 ──
+	// action=build 保持原语义(只编译); FORGE_SELF_NODEPLOY=1 是应急刹车。
+	if action == "build" {
+		return ForgeGateResult{
+			OK: true, Lang: "self", Stage: "done",
+			Stdout:   fmt.Sprintf("built %s successfully (build 动作: 不部署)\n%s", targetExe, stdout.String()),
+			Duration: time.Since(start).Milliseconds(),
+		}
+	}
+	if os.Getenv("FORGE_SELF_NODEPLOY") == "1" {
+		return ForgeGateResult{
+			OK: true, Lang: "self", Stage: "done",
+			Stdout:   fmt.Sprintf("built %s successfully (FORGE_SELF_NODEPLOY=1: 跳过部署)\n%s", targetExe, stdout.String()),
+			Duration: time.Since(start).Milliseconds(),
+		}
+	}
+	outcome, derr := deploySelfExe(f.workDir, targetPath, 10, realSmokeRunner)
+	if derr != nil {
+		logEvent(EvSelfModified, "self-deploy-failed", map[string]string{
+			"err": derr.Error(), "sha256": outcome.SHA256,
+		})
+		return ForgeGateResult{
+			OK: false, Lang: "self", Stage: "deploy",
+			Error:    fmt.Sprintf("编译成功但部署失败: %v\n[旧 exe 未被破坏, 源码保留待修]", derr),
+			Stdout:   stdout.String(),
+			ExitCode: -1,
+			Duration: time.Since(start).Milliseconds(),
+		}
+	}
+	logEvent(EvSelfRestart, "self-deploy", map[string]string{
+		"sha256":   outcome.SHA256,
+		"backup":   outcome.BackupPath,
+		"smoke_ms": strconv.FormatInt(outcome.SmokeMS, 10),
+		"exe":      "forge.exe",
+	})
+	report := fmt.Sprintf("built %s successfully\n冒烟通过(%dms) → 已就位 forge.exe\nsha256=%s\n备份=%s",
+		targetExe, outcome.SmokeMS, outcome.SHA256, outcome.BackupPath)
+	if stdout.Len() > 0 {
+		report += "\n" + stdout.String()
+	}
 	return ForgeGateResult{
 		OK: true, Lang: "self", Stage: "done",
-		Stdout:   fmt.Sprintf("built %s successfully\n%s", targetExe, stdout.String()),
+		Stdout:   report,
 		Duration: time.Since(start).Milliseconds(),
 	}
+}
+
+// ────────────────────────────────────────────────────────────────
+// self gate 部署阶段: 编译成功之后的「最后一公里」
+//
+// 背景(20260913): 此前 self gate 只做到 go build -o forge_new.exe,
+// 编译成功即返回 OK —— 「编译过了」被当成「能用了」。实际替换/验证/
+// 留痕全靠人手写临时脚本, events.jsonl 里 5 天零条部署记录。
+// 现补上: 冒烟 → 原子就位 → 失败回滚 → 留痕。
+// ────────────────────────────────────────────────────────────────
+
+// selfSmokeTimeout 冒烟超时: 只跑 --version(正常 10-50ms), 15s 是宽松上限。
+const selfSmokeTimeout = 15 * time.Second
+
+// smokeRunner 冒烟执行器 (可注入, 便于测试不依赖真实 exe)。
+type smokeRunner func(exePath string) (exitCode int, stdout string, runErr error)
+
+// deployOutcome 部署结果, 供报告与测试断言。
+type deployOutcome struct {
+	Deployed   bool
+	BackupPath string
+	SHA256     string
+	SmokeMS    int64
+	FailedPath string // 冒烟失败时产物被改名到的路径
+}
+
+// smokeVerdict 冒烟判定 (纯函数):
+// 判据 = 正常退出(exitCode==0 且 runErr==nil) 且 输出含 "铸剑炉"。
+// 只看退出码不够: 一个「启动即报错但 exit 0」的坏二进制会被放过,
+// 所以额外要求版本标识串出现。
+func smokeVerdict(exitCode int, stdout string, runErr error) (bool, string) {
+	if runErr != nil {
+		return false, fmt.Sprintf("无法启动: %v", runErr)
+	}
+	if exitCode != 0 {
+		return false, fmt.Sprintf("退出码 %d != 0", exitCode)
+	}
+	if !strings.Contains(stdout, "铸剑炉") {
+		return false, fmt.Sprintf("输出无版本标识(前 60 字: %s)", headRunes(stdout, 60))
+	}
+	return true, "ok"
+}
+
+// headRunes 截取前 n 个 rune (避免按字节切断中文)。
+func headRunes(s string, n int) string {
+	r := []rune(strings.TrimSpace(s))
+	if len(r) <= n {
+		return string(r)
+	}
+	return string(r[:n]) + "..."
+}
+
+// realSmokeRunner 真实冒烟: 跑 <exe> --version, 合并捕获 stdout/stderr。
+func realSmokeRunner(exePath string) (int, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), selfSmokeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exePath, "--version")
+	cmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8", "PYTHONUTF8=1")
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := runWithTimeout(ctx, cmd)
+	if err == nil {
+		return 0, buf.String(), nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode(), buf.String(), nil
+	}
+	return -1, buf.String(), err
+}
+
+// deploySelfExe 编译成功后的就位: 冒烟 → 备份 → 原子就位 → 失败回滚。
+//
+// 三个设计要点:
+//  1. 冒烟跑「中性名副本」而非产物本身 —— 直接运行 forge_new.exe 会触发
+//     runSelfReplace 把产物 rename 走, 反而绕过验证(旧设计无法自证能跑)。
+//  2. 备份用 rename(原子, 不复制 11MB), 就位失败立刻 rename 回来 ——
+//     任何时刻 forge.exe 要么是旧的要么是新的, 不存在缺失窗口。
+//  3. 冒烟失败 → 产物改名 .failed_<ts>, 杜绝陈旧产物之后被误用;
+//     源码不回滚(编译已通过, 问题在运行期, 留给下一轮修)。
+func deploySelfExe(workDir, builtExe string, keepBackups int, smoke smokeRunner) (deployOutcome, error) {
+	var out deployOutcome
+	st, statErr := os.Stat(builtExe)
+	if statErr != nil {
+		return out, fmt.Errorf("产物不存在: %v", statErr)
+	}
+	if st.IsDir() {
+		return out, fmt.Errorf("产物是目录: %s", builtExe)
+	}
+	if h, herr := sha256File(builtExe); herr == nil {
+		out.SHA256 = h
+	}
+	ts := time.Now().Format("20060102_150405")
+
+	smokePath := filepath.Join(workDir, "forge_smoke_"+ts+".exe")
+	if cerr := copyFile(builtExe, smokePath); cerr != nil {
+		return out, fmt.Errorf("冒烟副本复制失败: %v", cerr)
+	}
+	defer os.Remove(smokePath)
+
+	t0 := time.Now()
+	code, stdout, runErr := smoke(smokePath)
+	out.SmokeMS = time.Since(t0).Milliseconds()
+	if ok, why := smokeVerdict(code, stdout, runErr); !ok {
+		failed := builtExe + ".failed_" + ts
+		if rerr := os.Rename(builtExe, failed); rerr == nil {
+			out.FailedPath = failed
+		}
+		return out, fmt.Errorf("冒烟未通过(%s), 未部署, 旧 exe 保持原样; 产物: %s", why, out.FailedPath)
+	}
+
+	cur := filepath.Join(workDir, "forge.exe")
+	if filepath.Clean(cur) == filepath.Clean(builtExe) {
+		out.Deployed = true
+		return out, nil
+	}
+	if _, serr := os.Stat(cur); serr == nil {
+		backup := cur + ".bak_" + ts
+		if rerr := os.Rename(cur, backup); rerr != nil {
+			return out, fmt.Errorf("备份 forge.exe 失败, 拒绝替换(旧 exe 保持原样): %v", rerr)
+		}
+		out.BackupPath = backup
+	}
+	if rerr := os.Rename(builtExe, cur); rerr != nil {
+		rb := "无备份可回滚"
+		if out.BackupPath != "" {
+			if rbErr := os.Rename(out.BackupPath, cur); rbErr == nil {
+				rb = "已回滚旧 exe"
+				out.BackupPath = ""
+			} else {
+				rb = fmt.Sprintf("回滚失败(%v), 备份在 %s", rbErr, out.BackupPath)
+			}
+		}
+		return out, fmt.Errorf("就位失败: %v; %s", rerr, rb)
+	}
+	if _, serr := os.Stat(cur); serr != nil {
+		if out.BackupPath != "" {
+			os.Rename(out.BackupPath, cur)
+			out.BackupPath = ""
+		}
+		return out, fmt.Errorf("就位后校验失败: %v", serr)
+	}
+	out.Deployed = true
+	if keepBackups > 0 {
+		pruneExeBackups(workDir, keepBackups)
+	}
+	return out, nil
 }
 
 func pruneSelfBackups(srcPath string, keep int) {
@@ -2607,29 +2439,18 @@ func pruneSelfBackups(srcPath string, keep int) {
 }
 
 func compilerTimeout(lang string) time.Duration {
-
 	if compiler, ok := 铸剑炉_COMPILERS[lang]; ok {
-
 		if compiler.ExecTimeout > 0 {
-
 			return compiler.ExecTimeout
-
 		}
-
 	}
-
-	return 30 * time.Second
-
+	return defaultGateTimeout
 }
 
 func truncateOutput(s string) string {
-
 	runes := []rune(s)
-
 	if len(runes) <= MaxForgeOutputLength {
-
 		return s
-
 	}
 	if len(runes) <= ForgeHeadKeep+ForgeTailKeep {
 		return string(runes[:ForgeHeadKeep]) + "\n...[truncated]...\n" + string(runes[len(runes)-ForgeTailKeep:])
@@ -2637,7 +2458,6 @@ func truncateOutput(s string) string {
 	head := string(runes[:ForgeHeadKeep])
 	tail := string(runes[len(runes)-ForgeTailKeep:])
 	return head + "\n...[truncated]...\n" + tail
-
 }
 
 // forgeCleanupStaleTempDirs removes leftover forge_gate_* and forge_go_* temp directories
@@ -2671,14 +2491,46 @@ func forgeCleanupStaleTempDirs() {
 	}
 }
 
-func forgeDetectLang(code, hint string) string {
+// pythonSignatureRE 是 Python 代码的结构性特征, 用于在「弱信号语言判定」前做排除。
+// 判据单一源: Go 误判与 Shell 误判两处修复共用同一正则, 避免两套规则各自腐化。
+// 为什么这些形态对 Go/Shell 安全 (逐条核对过):
+//   - Go 的 import 是 `import (` 或 `import "path"`, 不匹配行首 `import <标识符>`
+//   - Go 的输出是 fmt.Println(, 不含 print(
+//   - Shell 里 `import x` / `from x import y` 都不是合法命令
+var pythonSignatureRE = regexp.MustCompile(`(?m)^\s*(?:def|class)\s+\w+|(?m)^\s*(?:import|from)\s+\w+|print\s*\(|__name__`)
 
+// goTopLevelRE 匹配行首的 Go 顶层声明 (含方法接收者 `func (r T) Name()`)。
+// 用行首锚定取代旧版的全文本 `\s+func`: 闭包 `x := func()` 不在行首,
+// 本就不构成「这是 Go 代码」的证据。
+var goTopLevelRE = regexp.MustCompile(`(?m)^func\s`)
+
+// hasGoPackageDecl 判断首个有效行 (跳过空行与注释行) 是否为 package 声明。
+// 强信号: package 子句必须位于文件最前, 是 Go 语法的硬约束。
+func hasGoPackageDecl(code string) bool {
+	for _, ln := range strings.Split(code, "\n") {
+		t := strings.TrimSpace(ln)
+		if t == "" || strings.HasPrefix(t, "//") || strings.HasPrefix(t, "/*") || strings.HasPrefix(t, "*") {
+			continue
+		}
+		return strings.HasPrefix(t, "package ")
+	}
+	return false
+}
+
+func forgeDetectLang(code, hint string) string {
 	code = strings.TrimSpace(code)
 
-	// Go detection: must be package declaration or func keyword followed by identifier+(
-	// Using regex to avoid false match on strings/comments containing "func "
-	goFuncPattern := regexp.MustCompile("(?:^|\\s)func\\s+\\w+\\s*\\(")
-	if strings.HasPrefix(code, "package ") || goFuncPattern.MatchString(code) {
+	// Go 判定分两级信号:
+	//   强信号 = 首个有效行是 package 声明 (Go 语法硬约束, 别的语言无法满足)
+	//   弱信号 = 行首 func 声明, 但必须先排除 Python 特征
+	// 旧实现用裸 `(?:^|\s)func\s+\w+\s*\(` 全文本匹配 → Python 代码任何位置出现
+	// "func xxx(" (注释/字符串/文档) 即被判 go, 且该分支优先于下方全部 Python 判定。
+	// 实测 gate_audit 68 条 "main.go:1:1: expected 'package'" 全是此类误判, 且
+	// 100% 来自 lang 省略(自动检测): 模型没写 lang, 检测器把 Python 判成 Go。
+	if hasGoPackageDecl(code) {
+		return "go"
+	}
+	if !pythonSignatureRE.MatchString(code) && goTopLevelRE.MatchString(code) {
 		return "go"
 	}
 
@@ -2699,18 +2551,26 @@ func forgeDetectLang(code, hint string) string {
 	// variable name (e.g. `echo = 5`, `cat = "x"`, `cd = "/tmp"`).
 	// NOTE: Go regexp (RE2) does not support lookahead, so the `not followed
 	// by =` check is done with FindStringIndex + TrimLeft instead of (?!\s*=).
+	// 判定前先排除 Python 特征: 行首 `import os` / `from x import y` 在 sh 里不是
+	// 合法命令, 实测 "'import' is not recognized" 23 条即 Python 代码被判 sh。
 	shellCmdRE := regexp.MustCompile(`(?m)^\s*(?:echo|export|source|unset|alias|chmod|chown|mkdir|rm|cp|mv|ls|cat|grep|awk|sed|cd|pwd|exit)\b`)
-	if loc := shellCmdRE.FindStringIndex(code); loc != nil {
-		after := strings.TrimLeft(code[loc[1]:], " \t")
-		if !strings.HasPrefix(after, "=") {
-			return "sh"
+	if !pythonSignatureRE.MatchString(code) {
+		if loc := shellCmdRE.FindStringIndex(code); loc != nil {
+			after := strings.TrimLeft(code[loc[1]:], " \t")
+			// 排除两种「词形相同但语义不同」的形态:
+			//   `cat = "x"` → 变量赋值 (= 开头)
+			//   `exit(0)`   → 函数调用 (( 开头); shell 命令后不会紧跟括号
+			// 实测: `import sys\nexit(0)` 被判 sh, sh gate 失败 3 次后由 fallback
+			// 转 python 才成功 —— 用户看到「成功」, 代价是 3.1s 白烧 (audit 里
+			// lang=sh/ok=true/dur=3111ms)。这类「成功但绕路」的缺陷只有审计能看见。
+			if !strings.HasPrefix(after, "=") && !strings.HasPrefix(after, "(") {
+				return "sh"
+			}
 		}
 	}
-
 	if strings.Contains(code, "import ") && (strings.Contains(code, "def ") || strings.Contains(code, "print(")) {
 		return "python"
 	}
-
 	if strings.Contains(code, "console.log") || strings.Contains(code, "const ") {
 		return "node"
 	}
@@ -2726,11 +2586,9 @@ func forgeDetectLang(code, hint string) string {
 	if gate := detectSemanticGate(code); gate != "" {
 		return gate
 	}
-
 	if hint != "" {
 		return hint
 	}
-
 	return "python"
 }
 
@@ -2770,15 +2628,10 @@ func detectSemanticGate(code string) string {
 }
 
 func exeSuffix() string {
-
 	if runtime.GOOS == "windows" {
-
 		return ".exe"
-
 	}
-
 	return ""
-
 }
 
 // Ping returns "pong" with nanosecond timestamp for health checks.
@@ -2815,61 +2668,36 @@ func looksLikeValidGoTopLevel(code string) bool {
 }
 
 func ForgeToolSchema() json.RawMessage {
-
 	schema := map[string]interface{}{
-
 		"type": "function",
-
 		"function": map[string]interface{}{
-
-			"name": ForgeToolName,
-
+			"name":        ForgeToolName,
 			"description": ForgeToolDescription,
-
 			"parameters": map[string]interface{}{
-
 				"type": "object",
-
 				"properties": map[string]interface{}{
-
 					"action": map[string]interface{}{
-
-						"type": "string",
-
+						"type":        "string",
 						"description": "运行 (写代码、编译执行、销毁 —— 你唯一需要的操作)",
 					},
-
 					"code": map[string]interface{}{
-
-						"type": "string",
-
+						"type":        "string",
 						"description": "要执行的源代码。复杂逻辑推荐Python。Windows文件I/O用encoding='utf-8',errors='replace'。读取: open(path).read()。列目录: os.listdir()或os.walk()。搜索: re.findall()。运行命令: subprocess.run()。编辑: 读取、str.replace、写回。",
 					},
-
 					"input": map[string]interface{}{
-
-						"type": "string",
-
+						"type":        "string",
 						"description": "可选的JSON字符串，作为argv[1]传给脚本。",
 					},
-
 					"lang": map[string]interface{}{
-
-						"type": "string",
-
+						"type":        "string",
 						"description": "语言(可省略, 自动检测, 默认python, 90%场景无需指定)。python=默认代码执行; sh=shell命令(bash→sh); go=Go代码; node=JavaScript; math=数值/符号计算; logic=逻辑证明(含量词必走它); regex=正则验证; chain=多步编排; knowledge=知识查询(SPARQL); tcm=中医药药对(触发词: 查药对X Y/药对：A、B/配伍); browser=网页浏览(直连不走代理); self=源码自修改(需主人审批)。拿不准就省略lang, 自动检测默认python。",
-
-						"enum": []string{"go", "sh", "math", "logic", "knowledge", "regex", "chain", "python", "node", "self", "tcm", "browser"},
+						"enum":        []string{"go", "sh", "math", "logic", "knowledge", "regex", "chain", "python", "node", "self", "tcm", "browser"},
 					},
 				},
-
 				"required": []string{"action", "code"},
 			},
 		},
 	}
-
 	b, _ := json.Marshal(schema)
-
 	return b
-
 }

@@ -142,13 +142,20 @@ func cacheHealth(n int) string {
 		return "  无命中/未命中样本"
 	}
 	rate := float64(hit) * 100 / float64(hit+miss)
+	// 根因必须与分级同源: 黄档(85~98%)旧实现仍报"正常", 与 🟡 措辞矛盾,
+	// 会让使用者看到黄灯却拿不到排查方向。现按 rate 分档给根因。
 	root := "正常"
-	if changed*2 >= len(rows) {
+	switch {
+	case changed*2 >= len(rows):
 		root = "前缀频繁变更(锚点改动/system漂移)"
-	} else if rate < 85 && changed == 0 {
+	case rate < 85 && changed == 0:
 		root = "请求体不稳定(headLen/历史回放错位)"
-	} else if rate < 85 {
+	case rate < 85:
 		root = "前缀变更+请求体异常"
+	case rate < 98 && changed == 0:
+		root = "前缀稳定但命中偏低(首轮/历史回放/温度扰动)"
+	case rate < 98:
+		root = "前缀变更+命中偏低"
 	}
 	var badge string
 	switch {

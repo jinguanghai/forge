@@ -24,7 +24,7 @@ func TestCheckDangerousTarget(t *testing.T) {
 	}
 	for _, c := range blockCases {
 		t.Run(c.name, func(t *testing.T) {
-			kind, hit, danger := checkDangerousTarget(c.code)
+			kind, hit, danger := checkDangerousTarget(c.code, ".")
 			if !danger {
 				t.Fatalf("应拦: %q 实际未命中, kind=%q hit=%q", c.code, kind, hit)
 			}
@@ -52,7 +52,7 @@ func TestCheckDangerousTarget(t *testing.T) {
 	}
 	for _, c := range passCases {
 		t.Run(c.name, func(t *testing.T) {
-			kind, hit, danger := checkDangerousTarget(c.code)
+			kind, hit, danger := checkDangerousTarget(c.code, ".")
 			if danger {
 				t.Fatalf("不应拦: %q 命中 kind=%q hit=%q", c.code, kind, hit)
 			}
