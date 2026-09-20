@@ -528,6 +528,7 @@ func cmdHealth(agent *AgentRunner, cfg *Config, parts []string, historyFile stri
 	} else {
 		fmt.Printf("  %s %s\n", bold("LLM:"), color(ansi.red, "degraded"))
 	}
+	printQualityAlerts(cfg.WorkDir)
 	fmt.Println()
 }
 

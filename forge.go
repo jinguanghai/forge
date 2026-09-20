@@ -422,12 +422,20 @@ func (f *Forge) Build(code, lang, input string) (string, *ForgeGateResult, error
 			kind, hit, danger = k2, h2, true
 		}
 	}
+	// approvalWait 单独计量人工审批等待：它发生在 buildStart 之后，会被 duration_ms
+	// 一并计入(实测 410 条超长记录里 100 条是等主人按 y，最长 6.4 小时)。
+	// duration_ms 语义保持不变(仍是用户感知总时长)，审批等待另记 approval_wait_ms，
+	// 统计侧用 duration_ms - approval_wait_ms 还原净执行耗时。
+	var approvalWait time.Duration
 	if danger || lang == "self" {
 		if kind == "" {
 			kind = "自改"
 			hit = "self gate"
 		}
-		if !f.confirmDangerous(code, kind, hit) {
+		approveStart := time.Now()
+		approved := f.confirmDangerous(code, kind, hit)
+		approvalWait = time.Since(approveStart)
+		if !approved {
 			logGuardEvent(f.workDir, "medium", kind, hit, "deny", "代码层审批拒绝", code)
 			return fmt.Sprintf("--- ⛔ 操作被主人拒绝 ---\n危险操作 [%s] 命中「%s」\n主人未批准, 代码未执行。请调整方案(改用更安全的方式, 或先向主人说明用途取得批准)。\n--- 结束 ---", kind, hit), nil, nil
 		}
@@ -435,7 +443,9 @@ func (f *Forge) Build(code, lang, input string) (string, *ForgeGateResult, error
 	}
 
 	var result ForgeGateResult
-	defer func() { f.auditGate(lang, langOmitted, fallbackUsed, buildStart, len(code), len(input), &result) }()
+	defer func() {
+		f.auditGate(lang, langOmitted, fallbackUsed, buildStart, approvalWait, len(code), len(input), &result)
+	}()
 	if f.retryMax > 1 {
 		result = f.retryGate(code, lang, input)
 	} else {
@@ -513,7 +523,7 @@ func auditFilePath(dir string) string {
 // auditGate appends one JSON line per Build call to gate_audit.jsonl.
 // Best-effort only: failures are silent so auditing never blocks the main path.
 // Disable with FORGE_GATE_AUDIT=0.
-func (f *Forge) auditGate(lang string, omitted bool, fallbackUsed bool, start time.Time, codeLen, inputLen int, res *ForgeGateResult) {
+func (f *Forge) auditGate(lang string, omitted bool, fallbackUsed bool, start time.Time, approvalWait time.Duration, codeLen, inputLen int, res *ForgeGateResult) {
 	if os.Getenv("FORGE_GATE_AUDIT") == "0" {
 		return
 	}
@@ -526,6 +536,10 @@ func (f *Forge) auditGate(lang string, omitted bool, fallbackUsed bool, start ti
 		"duration_ms":  time.Since(start).Milliseconds(),
 		"code_len":     codeLen,
 		"input_len":    inputLen,
+	}
+	// 仅在有审批等待(>=1ms)时落字段：其余记录保持原样，既有统计口径不受影响。
+	if ms := approvalWait.Milliseconds(); ms > 0 {
+		entry["approval_wait_ms"] = ms
 	}
 	if res != nil {
 		entry["retries"] = res.Retries
@@ -1130,6 +1144,211 @@ func main() {
 	}
 }
 
+// ─── sh gate 执行器选择 (Windows) ───────────────────────────────────────────
+//
+// 缺陷背景 (gate_audit 20260913 实测): 52 条 tool_missing 里 17 条是
+// "shell execution failed: 'head'/'ls'/'tail'/'pwd'/'#!' is not recognized"
+// —— 模型写的是 POSIX shell, sh gate 却用 cmd.exe 执行, 必然报
+// "is not recognized as an internal or external command"。
+// 本机存在 Git Bash (C:\Program Files\Git\bin\bash.exe) 却从未被使用。
+//
+// 判据原则 (最小改动面):
+//   明确 POSIX 特征 (首词属 POSIX 工具集 / shebang / 命令替换) → bash
+//   cmd.exe 专有命令 → 保持 cmd.exe (bash 下语义不同或不存在)
+//   中性代码 (echo hi / python x.py) → 不动, 维持原路径
+// 逃生开关: FORGE_SH_NO_BASH=1 强制回 cmd.exe (一键回滚路径)。
+
+// cmdShellBuiltins 是 cmd.exe 内建命令表 (非独立 .exe, 必须经 shell 执行)。
+// 单一源: 判定与执行共用, 禁止在别处再散落字面量。
+var cmdShellBuiltins = map[string]bool{
+	"echo": true, "type": true, "cd": true, "chdir": true, "md": true, "mkdir": true,
+	"rd": true, "rmdir": true, "set": true, "copy": true, "del": true, "erase": true,
+	"ren": true, "rename": true, "dir": true, "date": true, "time": true, "ver": true,
+	"vol": true, "cls": true, "color": true, "title": true, "prompt": true,
+	"pushd": true, "popd": true, "start": true, "assoc": true, "ftype": true,
+}
+
+// posixShellTools 是 POSIX shell 工具集 (cmd.exe 下不存在或语义完全不同)。
+// 只收 "cmd 没有或行为迥异" 的; 与 cmd 同名的 (mkdir/echo/cd/date/more/whoami)
+// 一律排除, 以免把 cmd 命令误判给 bash。
+var posixShellTools = map[string]bool{
+	"ls": true, "head": true, "tail": true, "cat": true, "grep": true, "awk": true,
+	"sed": true, "find": true, "wc": true, "which": true, "chmod": true, "chown": true,
+	"touch": true, "rm": true, "mv": true, "cp": true, "ln": true, "du": true,
+	"df": true, "ps": true, "kill": true, "curl": true, "wget": true, "tar": true,
+	"gzip": true, "gunzip": true, "unzip": true, "xargs": true, "sort": true,
+	"uniq": true, "tr": true, "cut": true, "paste": true, "diff": true, "tee": true,
+	"env": true, "export": true, "source": true, "basename": true, "dirname": true,
+	"readlink": true, "stat": true, "seq": true, "printf": true, "sleep": true,
+	"pwd": true, "true": true, "false": true, "test": true, "nohup": true,
+	"base64": true, "sha256sum": true, "md5sum": true, "jq": true, "uname": true,
+	"id": true, "nproc": true, "free": true,
+}
+
+// bashOnlyKeywords 是 bash/sh 语法关键字: cmd.exe 完全没有对应物, 命中即必须走 bash。
+// 只收无歧义者 —— cmd 自己的 for/if/set/echo/rem 等同名关键字绝不收录,
+// 以免把合法 cmd 命令误判给 bash (如 "for %i in (*.go) do echo %i" 首词 for, 必须仍走 cmd)。
+//
+// 缺陷背景: gate_audit 实测 8 条真实失败 (08-25~09-14 均匀分布) 为
+// "The syntax of the command is incorrect" / "f was unexpected" / "<< was unexpected"
+// —— bash 语法 (if/then/fi/heredoc) 首词不在 posixShellTools 中 → 判 false → 落 cmd.exe → 语法错。
+var bashOnlyKeywords = map[string]bool{
+	"fi": true, "esac": true, "done": true, "then": true, "elif": true,
+	"function": true, "local": true, "declare": true, "[[": true,
+}
+
+// bashOnlySubstrings 是行内 bash 独有语法片段 (不依赖首词位置)。
+// 只收 cmd.exe 下必然报语法错的形态: heredoc(<<) / 参数展开(${) / case 分支终止(;;)。
+var bashOnlySubstrings = []string{"<<", "${", ";;"}
+
+// forgeFindBash 探测 Git Bash 可执行文件 (结果缓存, 只探一次)。找不到返回 ""。
+var (
+	bashPathOnce   sync.Once
+	bashPathCached string
+)
+
+func forgeFindBash() string {
+	bashPathOnce.Do(func() {
+		if runtime.GOOS != "windows" {
+			for _, n := range []string{"bash", "sh"} {
+				if p, err := exec.LookPath(n); err == nil {
+					bashPathCached = p
+					return
+				}
+			}
+			return
+		}
+		cands := []string{
+			`C:\Program Files\Git\bin\bash.exe`,
+			`C:\Program Files (x86)\Git\bin\bash.exe`,
+			`C:\Program Files\Git\usr\bin\bash.exe`,
+		}
+		if pf := os.Getenv("ProgramFiles"); pf != "" {
+			cands = append(cands, filepath.Join(pf, "Git", "bin", "bash.exe"))
+		}
+		if la := os.Getenv("LOCALAPPDATA"); la != "" {
+			cands = append(cands, filepath.Join(la, "Programs", "Git", "bin", "bash.exe"))
+		}
+		if p, err := exec.LookPath("bash"); err == nil {
+			cands = append(cands, p)
+		}
+		for _, c := range cands {
+			if st, err := os.Stat(c); err == nil && !st.IsDir() {
+				bashPathCached = c
+				return
+			}
+		}
+	})
+	return bashPathCached
+}
+
+// shPrefersBash 判断 shell 代码是否必须由 bash 执行。
+// 纯词法判据 (无猜测、无副作用), 只认三类硬特征:
+//  1. shebang (#! 开头)   2) 命令替换 ($(...) 或反引号)
+//  3. 任一行任一命令段的首词属 posixShellTools
+//
+// 其余一律返回 false (保持 cmd.exe 路径不变)。
+func shPrefersBash(code string) bool {
+	c := strings.TrimSpace(code)
+	if c == "" {
+		return false
+	}
+	if strings.HasPrefix(c, "#!") {
+		return true
+	}
+	if strings.Contains(c, "$(") || strings.Contains(c, "`") {
+		return true
+	}
+	// 行内 bash 独有语法片段 (heredoc / 参数展开 / case 分支)。
+	for _, marker := range bashOnlySubstrings {
+		if strings.Contains(c, marker) {
+			return true
+		}
+	}
+	for _, line := range strings.Split(c, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// 逐段扫描: 管道/串联右侧的命令首词也要看。
+		// 缺陷背景: 只取整行首词时 "type a.txt | head -2" 的 head 永不被看见
+		// → 判 false → 落 cmd.exe → "head is not recognized"。
+		for _, seg := range splitShellSegments(line) {
+			fields := strings.Fields(seg)
+			if len(fields) == 0 {
+				continue
+			}
+			word := strings.ToLower(fields[0])
+			if posixShellTools[word] || bashOnlyKeywords[word] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// splitShellSegments 按 shell 控制运算符 (| ; & && ||) 把一行切成命令段。
+// 纯词法切分: 不解析引号 —— 引号内的 | 会被切开, 但切出的段首词是普通
+// 文本, 不会命中 posixShellTools, 故不造成误判升级 (宁可漏判, 不误判)。
+// 目的: 让管道/串联右侧的 POSIX 命令被看见 (见 shPrefersBash 缺陷背景)。
+func splitShellSegments(line string) []string {
+	segs := []string{}
+	var cur strings.Builder
+	rs := []rune(line)
+	for i := 0; i < len(rs); i++ {
+		ch := rs[i]
+		if ch != '|' && ch != ';' && ch != '&' {
+			cur.WriteRune(ch)
+			continue
+		}
+		segs = append(segs, cur.String())
+		cur.Reset()
+		// 吞掉成对运算符的第二个字符 (&& ||); 单 & 也切 (后台执行)。
+		if (ch == '|' || ch == '&') && i+1 < len(rs) && rs[i+1] == ch {
+			i++
+		}
+	}
+	segs = append(segs, cur.String())
+	return segs
+}
+
+// runShViaBash 用 Git Bash 执行 shell 代码 (Windows 上 sh 语义的正确实现)。
+func (f *Forge) runShViaBash(bashPath, code, input string, start time.Time) ForgeGateResult {
+	ctx, cancel := context.WithTimeout(f.effCtx(), shGateTimeout)
+	defer cancel()
+	cmd := f.newCmd(ctx, bashPath, "-c", code)
+	cmd.Dir = f.workDir
+	// Git Bash (MSYS2) 默认把 /x 形态参数改写为 Windows 路径,
+	// 会破坏 `sed 's/a/b/'` 之类含斜杠的参数 → 关掉路径转换。
+	cmd.Env = append(cmd.Env, "MSYS_NO_PATHCONV=1", "MSYS2_ARG_CONV_EXCL=*")
+	if input != "" {
+		cmd.Env = append(cmd.Env, ForgeInputEnv+"="+input)
+		cmd.Stdin = strings.NewReader(input)
+	}
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := runWithTimeout(ctx, cmd); err != nil {
+		errMsg := stderr.String()
+		if errMsg == "" {
+			errMsg = err.Error()
+		}
+		return ForgeGateResult{
+			OK: false, Lang: "sh", Stage: "execute",
+			Error:    fmt.Sprintf("shell execution failed: %s", errMsg),
+			Stderr:   errMsg,
+			Timeout:  isTimeoutErr(err),
+			Duration: time.Since(start).Milliseconds(),
+		}
+	}
+	return ForgeGateResult{
+		OK: true, Lang: "sh", Stage: "done",
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		Duration: time.Since(start).Milliseconds(),
+	}
+}
+
 func (f *Forge) selfHostedSh(code, input string, start time.Time) ForgeGateResult {
 	// Windows: pure static "echo <text>" bypasses cmd entirely.
 	// cmd /c and .bat both corrupt non-ASCII args on GBK consoles
@@ -1141,6 +1360,13 @@ func (f *Forge) selfHostedSh(code, input string, start time.Time) ForgeGateResul
 				Stdout:   txt,
 				Duration: time.Since(start).Milliseconds(),
 			}
+		}
+	}
+	// Windows: 明确 POSIX 特征的代码交给 Git Bash 执行 (若本机有)。
+	// 旧行为一律走 cmd.exe → 模型写的 head/ls/管道必然 "is not recognized"。
+	if runtime.GOOS == "windows" && os.Getenv("FORGE_SH_NO_BASH") != "1" && shPrefersBash(code) {
+		if bp := forgeFindBash(); bp != "" {
+			return f.runShViaBash(bp, code, input, start)
 		}
 	}
 	ctx, cancel := context.WithTimeout(f.effCtx(), shGateTimeout)
@@ -1158,12 +1384,7 @@ func (f *Forge) selfHostedSh(code, input string, start time.Time) ForgeGateResul
 		if !needsShell && len(parts) > 0 {
 			prog := strings.ToLower(parts[0])
 			// cmd.exe builtins: not standalone .exe files, must use shell
-			switch prog {
-			case "echo", "type", "cd", "chdir", "md", "mkdir",
-				"rd", "rmdir", "set", "copy", "del", "erase",
-				"ren", "rename", "dir", "date", "time", "ver",
-				"vol", "cls", "color", "title", "prompt",
-				"pushd", "popd", "start", "assoc", "ftype":
+			if cmdShellBuiltins[prog] {
 				needsShell = true
 			}
 		}
@@ -1915,6 +2136,13 @@ func (f *Forge) retryGate(code, lang, input string) ForgeGateResult {
 			return retryResult
 		}
 		result = retryResult
+		// 循环内同样不重试超时/确定性失败：入口检查只覆盖第 1 次尝试，若第 1 次是
+		// 普通失败、第 2 次才跑满超时，继续下一轮只会再烧一个超时周期(实测残留
+		// 3 条: go 162.5s / self 72.4s / self 161.8s, 均 retries=2)。
+		if retryResult.Timeout || isDeterministicFailure(retryResult) {
+			result.Retries = attempt
+			return result
+		}
 		// Clear cache again before next retry
 		f.cacheMu.Lock()
 		delete(f.cache, cacheKey)
@@ -2075,7 +2303,7 @@ func (f *Forge) selfHostedSelf(code, input string, start time.Time) ForgeGateRes
 				Duration: time.Since(start).Milliseconds(),
 			}
 		}
-		pruneSelfBackups(srcPath, 10)
+		pruneSelfBackups(srcPath, backupKeepCount)
 		// 统一快照(源码+记忆+gate+exe) + git 历史点。
 		// self gate 强制主人审批, 批准后执行到此处才落快照。
 		ts := time.Now().Format("20060102_150405")
@@ -2088,6 +2316,9 @@ func (f *Forge) selfHostedSelf(code, input string, start time.Time) ForgeGateRes
 	switch {
 	case action == "build":
 		// just rebuild, no source modification
+	case action == "deploy":
+		// 仅重新编译并部署, 不改源码 (20260913): 供"改了非 forge.go 源文件后需热替换"的场景
+		// —— build 动作只编译不部署, append/replace 又必改源码, 此前无"只部署"通道。
 	case strings.HasPrefix(action, "replace:"):
 		rest := action[8:]
 		parts := strings.SplitN(rest, ":", 2)

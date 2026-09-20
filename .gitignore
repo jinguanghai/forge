@@ -115,6 +115,10 @@ test_scripts/
 defense_system/test_secret_scan/fake_leak.py
 
 # 守卫事件日志 (运行时文件, 取证档案在本机即可)
+# --- 20260914 质量告警层 (forge_watchdog) 运行时产物, 不入库 ---
+.forge/alerts.jsonl
+.forge/hourly_log.txt
+.forge/watchdog_state.json
 .forge/guard_log.jsonl
 
 # runtime artifacts (20260808)
@@ -233,3 +237,20 @@ memory_writes.jsonl
 
 # ASR 模型权重（78MB 二进制，本地保留不入库）
 .forge/asr_tool/asr_model/*.onnx
+
+# --- 20260913 安全修复: .forge/ 整体未被忽略, 凭据与运行时备份必须显式排除 ---
+.forge/vps_ttyd_cred.txt
+.forge/*cred*
+.forge/pending_memory_patch_*.md
+.forge/memory_bak_*.json
+.forge/memory.json.bak*
+
+# 编译产物备份(带后缀, 不被 *.exe 精确规则覆盖)
+forge.exe.*
+*.exe.*
+
+# --- 20260914 临时日志: 会话内临时产物一律不入库 (此前 _tmp_* 无规则, 被 self gate 快照带入) ---
+.forge/_tmp_*
+
+# 分形守卫运行时状态 (可再生, 非源码)
+.forge/fractal_state.json

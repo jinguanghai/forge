@@ -152,6 +152,16 @@ func buildBanner(cfg *Config) []string {
 	if nswEnabled() {
 		info = append(info, " "+dim("无 剑")+"  "+bold("已启用")+"   "+dim("算式求值兜底"))
 	}
+	// 表达式化状态位：独立开关 FORGE_NSW_EXPR (不受 FORGE_NOSWORD 限制)，此前同样
+	// 完全静默 —— 开关开着也看不出来。与无剑位同理，只走 stdout 不进 ChatMessage。
+	if nswExprEnabled() {
+		info = append(info, " "+dim("表达")+"  "+bold("已启用")+"   "+dim("{{算式}} 标记求值"))
+	}
+	// 质量告警位: forge_watchdog 超死阈值时在此现形 (此前告警只落文件, 无人知)。
+	// 与无剑位同理: 只走 stdout, 不进 ChatMessage, 不影响请求前缀缓存。
+	if line := qualityAlertBannerLine(cfg.WorkDir); line != "" {
+		info = append(info, " "+dim("告 警")+"  "+color(ansi.yellow, fitWidth(line, inW-10)))
+	}
 	body := append([]string{"", logoLine, subLine, ""}, info...)
 	card := tuiCard("", body, w, tuiAccent())
 	return strings.Split(strings.TrimSuffix(card, "\n"), "\n")

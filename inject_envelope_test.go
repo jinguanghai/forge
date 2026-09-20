@@ -75,20 +75,38 @@ func TestInjectEnvelope_EmptyFeedbackNoEnvelope(t *testing.T) {
 	if fb, _, _ := nswFeedbackTextFresh("今天天气不错"); fb != "" {
 		t.Fatalf("用例前提失效: 无算式文本不应产生反馈, 实得 %q", fb)
 	}
-	// 源码哨兵: 闭包内必须先判空再套信封, 顺序颠倒会导致空信封注入
+	// 源码哨兵: 每个注入点之前都必须先判空, 顺序颠倒会导致空信封注入。
+	// 20260920 更新: 注入点从 1 处增至 2 处 (无剑嗅探 + 表达式化拒绝权),
+	// 判据从"首个判空早于首个信封"改为"逐注入点检查其前文窗口内存在判空",
+	// 比原判据更严 (原来只看第一个注入点)。
 	src, err := os.ReadFile("agent.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(src)
-	iEmpty := strings.Index(s, "if fb == \"\" {")
-	iEnv := strings.Index(s, "autoInjectEnvelope(")
-	if iEmpty < 0 || iEnv < 0 {
-		t.Fatalf("agent.go 缺少判空(%d)或信封(%d)调用", iEmpty, iEnv)
+	sites := []int{}
+	for i := 0; ; {
+		j := strings.Index(s[i:], "autoInjectEnvelope(")
+		if j < 0 {
+			break
+		}
+		sites = append(sites, i+j)
+		i += j + 1
 	}
-	if iEmpty > iEnv {
-		t.Errorf("闭包内判空必须在套信封之前 (否则空反馈也会被注入信封)")
+	if len(sites) == 0 {
+		t.Fatal("agent.go 无 autoInjectEnvelope 调用点")
 	}
+	for _, idx := range sites {
+		lo := idx - 300
+		if lo < 0 {
+			lo = 0
+		}
+		win := s[lo:idx]
+		if !strings.Contains(win, `fb == ""`) && !strings.Contains(win, `fb != ""`) {
+			t.Errorf("注入点(偏移%d)前 300 字符内无判空: 空反馈也会被注入信封", idx)
+		}
+	}
+	t.Logf("agent.go 注入点 %d 处, 均先判空后套信封", len(sites))
 }
 
 // 5) 接线哨兵: 两个注入构造点都必须套信封 (将来被删掉 = 缺陷P 复发)
@@ -98,7 +116,7 @@ func TestInjectEnvelope_WiredAtBothSites(t *testing.T) {
 		want int
 		why  string
 	}{
-		{"agent.go", 1, "无剑注入闭包必须套信封 (缺失=反馈又被当成用户发言)"},
+		{"agent.go", 2, "无剑注入闭包 + 表达式化拒绝权 两处都必须套信封 (缺失=反馈又被当成用户发言)"},
 		{"verifyClaim.go", 1, "虚报干预必须套信封 (缺失=干预又被当成用户发言)"},
 	}
 	for _, c := range checks {

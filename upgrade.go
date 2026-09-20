@@ -123,7 +123,7 @@ func SelfUpgrade(cfg *Config) error {
 	fmt.Println(color(ansi.green, "OK"))
 
 	// 备份轮转: forge.exe.bak_* 最多留 10 个
-	pruneExeBackups(workDir, 10)
+	pruneExeBackups(workDir, backupKeepCount)
 
 	// 写重启脚本 (排空式: 等主进程自行退出, 超时才强杀)
 	script := buildRestartScript(workDir, os.Getpid(), ts)
@@ -212,6 +212,12 @@ func upgradeTailLines(s string, n int) []string {
 	}
 	return out
 }
+
+// backupKeepCount 备份/快照轮转保留份数。
+// IFR-2 理想解: 机制本已存在, 病根是一个数字 10 散落在 4 处 —— 收归一处并收窄。
+// 依据: 回滚只需 1 份, 保留 3 份即双保险; git 已提供完整历史, 快照仅兜底"未提交的工作区状态"。
+// 旧值 10 的成本: checkpoints 10x12.15MB=121MB + exe 10x11.4MB=114MB + bak_self 10x92KB。
+const backupKeepCount = 3
 
 // pruneExeBackups 轮转 forge.exe.bak_* 备份, 最多保留 n 个
 func pruneExeBackups(dir string, n int) {
@@ -314,7 +320,7 @@ func createCheckpoint(workDir, ts, reason string) error {
 		os.RemoveAll(dst)
 		return fmt.Errorf("快照未拷贝任何文件")
 	}
-	pruneCheckpoints(workDir, 10)
+	pruneCheckpoints(workDir, backupKeepCount)
 	return nil
 }
 

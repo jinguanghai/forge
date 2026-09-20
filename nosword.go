@@ -228,8 +228,27 @@ func (p *nswParser) factor() (float64, bool) {
 // 任何超出此范围的整数结果都不再可信 (2^53+1 == 2^53)。
 const nswFloatExactMax = 1 << 53
 
-func nswEval(expr string) (string, bool) {
-	if !nswIsCandidate(expr) {
+// nswEval 嗅探路径求值 (一期口径): 全部歧义闸生效。
+// 输入是从自由文本切出的片段 —— 死程序不知道模型是否"想算",
+// 故日期/区间/编号形态一律拒绝 (误算污染上下文的危害远大于漏算)。
+func nswEval(expr string) (string, bool) { return nswEvalMode(expr, false) }
+
+// nswEvalExplicit 显式标记路径求值 (20260920 三十三期)。
+//
+// 与嗅探路径的唯一差别: 跳过"数值范围歧义"类闸 (nswRangeRe / nswParenRangeRe /
+// nswUnaryBare / nswLeadZeroRe / nswSlashPlusRe / 裸数对升序)。
+// 根因: 那些闸的存在理由是"输入无位置信息, 分不清算式与区间"; 而 {{}} 标记
+// 本身就是模型的意图声明, 歧义已被消解。若显式路径仍套用嗅探闸, 升级的信息
+// 价值等于零 —— 实测 {{100-37}} 被拒 → 拒绝权回告 → 模型多烧一轮改写。
+//
+// 保留的闸 (不是"范围歧义", 而是语法/形态/精度):
+//   - 字符集白名单 / 悬空点 / 无算符纯常量 (语法非法)
+//   - 日期 2026-09-20 / 年月 / 3 段以上纯数字串 (电话·编号, 形态高度可信)
+//   - 16 位以上整数 / NaN / Inf / 2^53 (精度: 算不准就不算)
+func nswEvalExplicit(expr string) (string, bool) { return nswEvalMode(expr, true) }
+
+func nswEvalMode(expr string, explicit bool) (string, bool) {
+	if !nswIsCandidateMode(expr, explicit) {
 		return "", false
 	}
 	p := &nswParser{s: expr}
@@ -345,6 +364,13 @@ var (
 	// 判据: '0' 紧跟数字, 且该 '0' 前不是 '.' —— 排除 1.05 / 100.05 这类内嵌零;
 	// "100+2" 的 "00" 前是数字, [^\d.] 不匹配 → 不误伤 (实测 100+2 / 1000/2 均放行)。
 	nswLeadZeroRe = regexp.MustCompile(`(^|[^\d.])0\d`)
+
+	// 括号包裹的整数区间 (20260913 缺陷R): "(1853-1861)" 整串被一对半角括号包裹,
+	// 内部是纯整数区间。nswRangeRe 锚定整串, 括号使其失配 → 被当减法算出 -8。
+	nswParenRangeRe = regexp.MustCompile(`^\([ \t]*\d{1,6}[ \t]*-[ \t]*\d{1,6}[ \t]*\)$`)
+
+	// 斜杠任一侧带显式正号的数值对 (20260913 缺陷S): "0.45/+0.12" 权重表。
+	nswSlashPlusRe = regexp.MustCompile(`^[0-9.]+[ \t]*/[ \t]*\+[0-9.]+$|^\+[0-9.]+[ \t]*/[ \t]*[0-9.]+$`)
 )
 
 // nswHasDanglingDot 检测悬空点号: 点号后不是数字 (如 "0-9." "1+2.")。
@@ -359,7 +385,13 @@ func nswHasDanglingDot(s string) bool {
 	return false
 }
 
-func nswIsCandidate(s string) bool {
+// nswIsCandidate 嗅探口径的候选闸 (explicit=false): 全部闸生效。
+// 保留原签名供一期路径与既有测试使用, 行为逐字节不变。
+func nswIsCandidate(s string) bool { return nswIsCandidateMode(s, false) }
+
+// nswIsCandidateMode 候选闸。explicit=true 走显式标记口径 (三十三期, 见 nswEvalExplicit):
+// 只跳过"数值范围歧义"闸, 语法闸 / 形态闸 / 精度闸两条路径共用。
+func nswIsCandidateMode(s string, explicit bool) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return false
@@ -369,33 +401,60 @@ func nswIsCandidate(s string) bool {
 			return false
 		}
 	}
-	if nswDateRe.MatchString(s) || nswYearMonRe.MatchString(s) ||
-		nswRangeRe.MatchString(s) || nswUnaryBare.MatchString(s) ||
-		nswHugeIntRe.MatchString(s) || nswRangeDivRe.MatchString(s) ||
-		nswLeadZeroRe.MatchString(s) || nswMultiSegRe.MatchString(s) {
-		return false
-	}
+	// ── 形态闸 (两条路径共用) ────────────────────────────────────
+	// 这些不是"范围歧义", 而是高置信度的非算式形态 (日期/电话/编号/超长整数),
+	// 即使模型显式标记也拒绝 —— 算出的错值污染上下文, 危害远大于漏算。
+	//
 	// 多段纯数字减号串拒绝 (20260913 缺陷P): 电话 "138-1234-5678" / CAS 号 "50-78-2" /
 	// 编号 "1-2-3" / 美式日期 "9-13-2026" 全落此形, 此前被当连减算出 -6774 / -30 / -4 / -2030
 	// 等错值注入 LLM 上下文 —— 违反本文件"死程序产出错值危害远大于漏算"的原则。
 	// 两段对已由 nswRangeRe 全拒, 三段以上此前漏网。段数 >= 3 一律拒绝: 编号/电话/日期
 	// 是自然语言中的高频来源, 而真连减 (如 10-4-3) 罕见且漏算代价仅为"不纠正"。
 	// 前导负号 (-1-2-3) 与括号形式 ((-1)-2-3) 不匹配本正则, 照旧求值 (它们是算式形态)。
+	if nswDateRe.MatchString(s) || nswYearMonRe.MatchString(s) ||
+		nswMultiSegRe.MatchString(s) || nswHugeIntRe.MatchString(s) ||
+		nswRangeDivRe.MatchString(s) {
+		return false
+	}
+	if !explicit {
+		// ── 数值范围歧义闸 (仅嗅探路径) ──────────────────────────
+		// 存在理由: 嗅探输入无位置信息 —— "3-5" 既可能是区间也可能是减法,
+		// 中文文本里区间高频, 故一律拒绝 (宁漏勿误)。
+		// 显式标记 {{...}} 是模型的意图声明, 歧义已消解 → 跳过。
+		if nswRangeRe.MatchString(s) || nswUnaryBare.MatchString(s) ||
+			nswLeadZeroRe.MatchString(s) {
+			return false
+		}
+	}
 	// 悬空点号拒绝 (20260910 缺陷C): "[0-9.]+$" 经嗅探切分后剩 "0-9.", 会被
 	// number() 读成 "9." = 9 → 算出 -9 (正则片段被当算式)。点号后非数字即非法字面量。
 	if nswHasDanglingDot(s) {
 		return false
 	}
-	// 裸数对减号消歧 (20260910 缺陷A修复): 含小数时按数值序判定 ——
-	//   升序 (A < B) 是区间语义 ("价格 12.5-18.9 元") → 拒绝;
-	//   降序 (A > B) 保留为减法 ("18.9-12.5" → 6.4)。
-	// 纯整数对由上方 nswRangeRe 全拒 (中文 "3-5个工作日" 高频, 宁漏勿误), 不会走到这里。
-	if m := nswNumPairRe.FindStringSubmatch(s); m != nil &&
-		(strings.Contains(m[1], ".") || strings.Contains(m[2], ".")) {
-		a, e1 := strconv.ParseFloat(m[1], 64)
-		b, e2 := strconv.ParseFloat(m[2], 64)
-		if e1 == nil && e2 == nil && a < b {
+	if !explicit {
+		// 缺陷R (20260913): 整串 = 一对半角括号 + 纯整数区间 → 区间/编号语义, 一律拒
+		// (与 nswRangeRe 同口径)。嵌套算式 "(10-4)-3" 不以 ')' 结尾, 不落此判据。
+		if nswParenRangeRe.MatchString(s) {
 			return false
+		}
+		// 缺陷S (20260913): 权重表 "0.45/+0.12" 被当除法算出 3.75。J4 斜杠列举要求
+		// >=3 段纯数字, 此形态只有 2 段且带显式正号 → 漏网。算式里 "/+" 几乎不写
+		// (a/+b ≡ a/b), 而数值列举中 "+0.12" 是显式带号写法 (增量/正项)。
+		// 只认 '+' 不认 '-' —— 负分数 "-3/4" 是常见算式, 不得误伤。
+		if nswSlashPlusRe.MatchString(s) {
+			return false
+		}
+		// 裸数对减号消歧 (20260910 缺陷A修复): 含小数时按数值序判定 ——
+		//   升序 (A < B) 是区间语义 ("价格 12.5-18.9 元") → 拒绝;
+		//   降序 (A > B) 保留为减法 ("18.9-12.5" → 6.4)。
+		// 纯整数对由上方 nswRangeRe 全拒 (中文 "3-5个工作日" 高频, 宁漏勿误), 不会走到这里。
+		if m := nswNumPairRe.FindStringSubmatch(s); m != nil &&
+			(strings.Contains(m[1], ".") || strings.Contains(m[2], ".")) {
+			a, e1 := strconv.ParseFloat(m[1], 64)
+			b, e2 := strconv.ParseFloat(m[2], 64)
+			if e1 == nil && e2 == nil && a < b {
+				return false
+			}
 		}
 	}
 	stripped := strings.NewReplacer("(", "", ")", "", ",", "").Replace(s)
@@ -427,8 +486,12 @@ type nswCand struct {
 
 // nswSniffCands 保留位置与被修剪字符的嗅探器 (语境判据在 nswCtxReject)
 func nswSniffCands(text string) []nswCand {
+	// 范围符 (20260913 缺陷Q): en dash / em dash / 全角减号 / 波浪号必须留在候选内,
+	// 否则 "1–12 / 1–31" 被切成三段, 中间段 "12 / 1" 成了完整算式 (实测算出 12)。
+	// 留在候选内后由 nswIsCandidate 的字符白名单整段拒绝 (与"宁漏勿误"口径一致)。
 	opSet := func(r rune) bool {
 		return unicode.IsDigit(r) || r == '.' || r == '+' || r == '-' || r == '*' || r == '/' || r == '^' || r == '(' || r == ')' || r == ',' || r == '%' ||
+			r == '–' || r == '—' || r == '−' || r == '－' || r == '～' || r == '〜' || r == '~' ||
 			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' ||
 			r == ' ' || r == '\t'
 	}
@@ -627,6 +690,12 @@ func nswCtxReject(text string, c nswCand) bool {
 	pureFrac := nswPureFractionRe.MatchString(c.expr)
 	if !nswNumFollows(rs, c.end) &&
 		((pureFrac && nswHanBefore(rs, c.start)) || (!pureFrac && nswRatioWordBefore(rs, c.start))) {
+		return true
+	}
+	// J8 斜杠带显式正号 (20260913 缺陷S): "+0.45/0.12" 的前导 '+' 被
+	// flush 的 Trim("+*/^,") 剥成 trimmedLeft, expr 内看不到 → 在此补判。
+	// 仅当 expr 是纯分数形式时才拒, 避免误伤 "+1/2+1/3" 这类真算式。
+	if strings.Contains(c.trimmedLeft, "+") && nswPureFractionRe.MatchString(c.expr) {
 		return true
 	}
 	return false

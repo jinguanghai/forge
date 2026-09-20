@@ -9,10 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
-	"unsafe"
 )
 
 // ─── Welcome screen ─────────────────────────────────────────
@@ -289,22 +287,4 @@ func printHelp() {
 	fmt.Println("  FORGE_MAX_CODE_SIZE  最大代码长度 (默认 512KB)")
 	fmt.Println("  FORGE_TOOL_TIMEOUT   工具超时 (默认 60s)")
 	fmt.Println("  回合数限制已取消: 主循环无轮数上限, 由连续失败/重复调用/上下文取消兜底")
-}
-
-// enableWindowsUTF8 将 Windows 控制台代码页设为 UTF-8 (CP_UTF8 = 65001)，
-// 保证中文输出不乱码。
-func enableWindowsUTF8() {
-	k32 := syscall.NewLazyDLL("kernel32.dll")
-	// 输出代码页与输入代码页都设为 UTF-8 (CP_UTF8 = 65001)，否则交互
-	// 模式下粘贴/键入的中文可能被控制台按 GBK 解释成乱码。
-	k32.NewProc("SetConsoleOutputCP").Call(65001)
-	k32.NewProc("SetConsoleCP").Call(65001)
-
-	// 启用虚拟终端处理，让 \033[K 等 ANSI 光标控制在旧版控制台配置下也生效。
-	h := syscall.Handle(os.Stdout.Fd())
-	var mode uint32
-	const enableVirtualTerminalProcessing = 0x0004
-	if r1, _, _ := k32.NewProc("GetConsoleMode").Call(uintptr(h), uintptr(unsafe.Pointer(&mode))); r1 != 0 {
-		k32.NewProc("SetConsoleMode").Call(uintptr(h), uintptr(mode|enableVirtualTerminalProcessing))
-	}
 }

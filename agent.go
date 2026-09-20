@@ -200,6 +200,10 @@ func buildSystemPromptStable(workDir string, enabledGates []string) string {
 		sb.WriteString("</gates_enabled>\n")
 	}
 	sb.WriteString(fmt.Sprintf("\n\nWork directory: %s", workDir))
+	if nswExprEnabled() {
+		// 表达式化强制 (20260920 无剑二期): 固定约束段, 逐字节恒定 → 不打断前缀缓存
+		sb.WriteString(nswExprConstraint)
+	}
 	s := sb.String()
 	sum := sha256.Sum256([]byte(s))
 	currentSystemHash = hex.EncodeToString(sum[:8])
@@ -706,7 +710,18 @@ func (a *AgentRunner) RunStream(input string) (err error) {
 	// "碎片无效"路径上的算式错值静默漏过。抽成闭包保证两处行为逐字节一致。
 	// 返回非空 = 应把 asst+fb 追加进 messages 并 continue。
 	nswIntervene := func(asst string) string {
-		if !nswEnabled() || nswRounds >= maxNSWRounds {
+		if nswRounds >= maxNSWRounds {
+			return ""
+		}
+		// 拒绝权 (20260920 无剑二期): 标记内不是纯算式 → 死程序拒绝执行并回告模型。
+		// 独立开关 FORGE_NSW_EXPR, 不受 FORGE_NOSWORD 限制。
+		if nswExprEnabled() {
+			if fb := nswExprRejectText(asst); fb != "" {
+				nswRounds++
+				return autoInjectEnvelope("算式求值校验", fb)
+			}
+		}
+		if !nswEnabled() {
 			return ""
 		}
 		// 复述过滤 (20260911 缺陷M): 原文已含同形正确结论的锚点不再反馈, 切断
@@ -1105,6 +1120,16 @@ func (a *AgentRunner) processStream(
 	renderer := newStreamRenderer()
 	reasonRenderer := newReasoningRenderer()
 	firstEvent := true
+	// 表达式化过滤器 (20260920 无剑二期): 标记可能跨分块到达, 未闭合部分暂存。
+	exprF := &nswExprFilter{}
+	drainExpr := func() {
+		if !nswExprEnabled() {
+			return
+		}
+		if out := exprF.flush(); out != "" {
+			fmt.Print(renderer.feed(out))
+		}
+	}
 
 	for ev := range ch {
 		if firstEvent {
@@ -1116,6 +1141,7 @@ func (a *AgentRunner) processStream(
 		switch ev.Type {
 		case "error":
 			// 与其他出口一致地收尾: 已渲染内容必须 flush, 否则终端状态残留半行。
+			drainExpr()
 			fmt.Print(renderer.flush())
 			if close := reasonRenderer.close(); close != "" {
 				fmt.Fprint(os.Stderr, close)
@@ -1135,7 +1161,13 @@ func (a *AgentRunner) processStream(
 				fmt.Fprint(os.Stderr, close)
 			}
 			// Use the stream renderer for syntax highlighting
-			fmt.Print(renderer.feed(ev.Content))
+			shown := ev.Content
+			if nswExprEnabled() {
+				// 展示层替换 {{算式}} → 死程序求值结果; contentBuf 仍写原文 ——
+				// 历史里保留标记格式, 模型下一轮看到自己写过的格式才会自维持。
+				shown = exprF.feed(ev.Content)
+			}
+			fmt.Print(renderer.feed(shown))
 			contentBuf.WriteString(ev.Content)
 			tokenCount += int64(utf8.RuneCountInString(ev.Content))
 
@@ -1147,6 +1179,7 @@ func (a *AgentRunner) processStream(
 			// Replace accumulated deltas with merged result
 			*toolCalls = ev.ToolCalls
 			// Flush any remaining renderer state
+			drainExpr()
 			fmt.Print(renderer.flush())
 			if close := reasonRenderer.close(); close != "" {
 				fmt.Fprint(os.Stderr, close)
@@ -1161,12 +1194,17 @@ func (a *AgentRunner) processStream(
 
 		case "done":
 			// Flush any remaining renderer state
+			drainExpr()
 			fmt.Print(renderer.flush())
 			if close := reasonRenderer.close(); close != "" {
 				fmt.Fprint(os.Stderr, close)
 			}
 			fmt.Println()
 			a.stats.addToken(tokenCount)
+			if nswExprEnabled() {
+				// 表达式化埋点 (20260920): 触发率不可测则无法判断价值, 先埋点
+				nswExprAudit(a, exprF.marks, len(exprF.bad), exprF.saved)
+			}
 			if ev.Truncated {
 				fmt.Fprintf(os.Stderr, "%s⚠️ 输出被截断: 达到 max_tokens=%d 上限, 回复不完整%s\n",
 					ansi.yellow, a.cfg.MaxTokens, ansi.reset)
@@ -1179,6 +1217,7 @@ func (a *AgentRunner) processStream(
 		}
 	}
 
+	drainExpr()
 	fmt.Print(renderer.flush())
 	a.stats.addToken(tokenCount)
 	return nil
@@ -1241,7 +1280,8 @@ func (a *AgentRunner) maybeCompact() {
 	summary, err := a.llm.Summarize(ctx, oldest, 400)
 	if err != nil || strings.TrimSpace(summary) == "" {
 		appendAuditLine(a, map[string]interface{}{
-			"event": "compact_failed", "err": fmt.Sprint(err), "est_tokens": beforeTokens,
+			"event": "compact_failed", "ts": time.Now().Format(time.RFC3339Nano),
+			"err": fmt.Sprint(err), "est_tokens": beforeTokens,
 		})
 		return // 降级: 不阻塞, 走原裁剪
 	}
@@ -1256,6 +1296,7 @@ func (a *AgentRunner) maybeCompact() {
 	a.compactCooldown = a.cfg.CompactMinTurns
 	appendAuditLine(a, map[string]interface{}{
 		"event":           "compact",
+		"ts":              time.Now().Format(time.RFC3339Nano),
 		"compressed_msgs": n,
 		"summary_len":     utf8.RuneCountInString(summary),
 		"before_tokens":   beforeTokens,

@@ -67,7 +67,7 @@ func runSelfReplace() {
 		appendSelfReplaceEvent(exeDir, map[string]string{"result": "verify-failed", "err": serr.Error()})
 		return
 	}
-	pruneExeBackups(exeDir, 10)
+	pruneExeBackups(exeDir, backupKeepCount)
 	appendSelfReplaceEvent(exeDir, map[string]string{"result": "ok", "backup": backup})
 }
 
