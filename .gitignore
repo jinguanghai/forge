@@ -279,5 +279,5 @@ web/**/.tls/
 # --- 20261002 web 网关前端页面属源码: 从 *.html 通配(防草稿页)中豁免 ---
 # 动因: 网关的 index.html/login.html 是运行必需资产, 被通配规则排除后
 # 仓库里只剩 go 源码, 无法还原可用网关(实跑 dry-run 发现仅 13/23 文件会入库)。
-!web/static/*.html
+# (原 !web/static/*.html 一条随冗余副本归档而撤销)
 !web/gateway/static/*.html

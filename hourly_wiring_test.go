@@ -48,6 +48,7 @@ var wantHourlyTasks = map[string][]string{
 	"ignored":  {"hygiene_ignored_check.py"},
 	"bench":    {"bench_report_check.py"},
 	"version":  {"version_check.py"},
+	"webgw":    {"web_gateway_check.py"},
 }
 
 // parseHourlyTasks 解析 defense_system/hourly.py 的 TASKS 表。
