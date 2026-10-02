@@ -26,12 +26,12 @@ func TestNSWSelfLoop_EvalMarkLineRejected(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("含反馈前缀的行不应求值, 实际 %+v", got)
 	}
-	if fb := nswFeedbackText(real); fb != "" {
+	if fb := nswFeedbackTextForTest(real); fb != "" {
 		t.Errorf("含反馈前缀的行不应注入反馈, 实际 %q", fb)
 	}
 	// 反馈原文本身 (最直接的自激源)
 	raw := evalMark + "「3/4 = 0.75」"
-	if fb := nswFeedbackText(raw); fb != "" {
+	if fb := nswFeedbackTextForTest(raw); fb != "" {
 		t.Errorf("反馈原文不应再被求值 (自激), 实际 %q", fb)
 	}
 	// 多锚点形态

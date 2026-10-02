@@ -23,7 +23,7 @@ func TestSlowGateLongerCacheTTL(t *testing.T) {
 
 // P5: system prompt 稳定段(systemPrompt 常量)必须占据前缀开头 → 前缀缓存可命中段在前。
 func TestSystemPromptStableSegmentFirst(t *testing.T) {
-	s := buildSystemPrompt(t.TempDir(), nil) // 空目录: 无 memory 注入, 只测稳定段占比
+	s := buildSystemPromptStable(t.TempDir(), nil) // 空目录: 无 memory 注入, 只测稳定段占比
 	if !strings.HasPrefix(s, systemPrompt) {
 		t.Fatalf("system prompt 必须以稳定段 systemPrompt 常量开头 (前缀缓存守卫)")
 	}

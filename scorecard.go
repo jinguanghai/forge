@@ -20,6 +20,7 @@ import (
 // scorecardEntry gate_audit.jsonl 一行的解析结构 (只取聚合所需字段)
 type scorecardEntry struct {
 	Lang        string `json:"lang"`
+	Event       string `json:"event"`
 	LangOmitted bool   `json:"lang_omitted"`
 	Fallback    bool   `json:"fallback"`
 	OK          bool   `json:"ok"`
@@ -63,6 +64,16 @@ func scorecardAggregate(data []byte, windowN int) string {
 	for _, line := range valid {
 		var e scorecardEntry
 		if json.Unmarshal([]byte(line), &e) != nil {
+			continue
+		}
+		// 非 gate 记录过滤 —— 判据统一到 audit_schema.go 的单一数据源。
+		//
+		// 旧判据 (e.Lang == "" && e.Event != "") 只堵住了"无 lang 的混入",
+		// 漏掉了 gate_attempt (同时带 lang 与 event)。实测 20260930: 该判据
+		// 多收 194 条重试明细, 而重试明细 ok/duration_ms 字段名不同 (ms),
+		// 解析为零值 -> self/sh 等重试多的 gate 成功率与均耗时被系统性低估。
+		// 新判据只认显式 event=="gate", 与其余三个消费者同源。
+		if !auditIsGateEvent(e.Event) {
 			continue
 		}
 		lang := e.Lang

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -13,16 +15,16 @@ func TestEventLogRoundTrip(t *testing.T) {
 	logEvent(EvToolCalled, "python", map[string]string{"lang": "python"})
 	logEvent(EvToolResult, "python", map[string]interface{}{"ok": true, "duration_ms": 5})
 
-	evs := lastEvents(0)
+	evs := readEventsForTest(0)
 	if len(evs) != 3 {
 		t.Fatalf("应3条事件, got %d", len(evs))
 	}
 	if evs[0].Type != EvTurnStarted || evs[1].Type != EvToolCalled || evs[2].Type != EvToolResult {
 		t.Errorf("事件类型顺序异常: %s %s %s", evs[0].Type, evs[1].Type, evs[2].Type)
 	}
-	evs2 := lastEvents(2)
+	evs2 := readEventsForTest(2)
 	if len(evs2) != 2 || evs2[0].Type != EvToolCalled {
-		t.Errorf("lastEvents(2) 异常: %d 条, 首条=%s", len(evs2), evs2[0].Type)
+		t.Errorf("readEventsForTest(2) 异常: %d 条, 首条=%s", len(evs2), evs2[0].Type)
 	}
 }
 
@@ -43,4 +45,33 @@ func TestEventLogAppendOnly(t *testing.T) {
 	if len(b3) <= len(b2) {
 		t.Errorf("重复 init 不应清空日志")
 	}
+}
+
+// readEventsForTest 读取事件日志最后 n 条 (n<=0 返回全部)。
+// 原生产函数 lastEvents 因"仅测试引用"于死代码清理中删除, 读取逻辑迁至测试侧。
+func readEventsForTest(n int) []Event {
+	if eventsPath == "" {
+		return nil
+	}
+	evMu.Lock()
+	defer evMu.Unlock()
+	data, err := os.ReadFile(eventsPath)
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if n > 0 && len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	out := make([]Event, 0, len(lines))
+	for _, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		var ev Event
+		if json.Unmarshal([]byte(l), &ev) == nil {
+			out = append(out, ev)
+		}
+	}
+	return out
 }

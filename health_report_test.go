@@ -55,7 +55,7 @@ func TestHealthScanBasic(t *testing.T) {
 	}
 	oks := []bool{false, false, false, true}
 	path := writeTestEvents(t, dir, spec, oks)
-	issues, total := scanHealthEvents(path, 0, time.Time{})
+	issues, total := scanHealthEvents(path, 0)
 	if total != 5 {
 		t.Errorf("应5行, got %d", total)
 	}
@@ -80,7 +80,7 @@ func TestHealthThresholdSilent(t *testing.T) {
 	spec := [][2]string{{EvToolResult, "browser"}, {EvToolResult, "browser"}}
 	oks := []bool{false, false}
 	path := writeTestEvents(t, dir, spec, oks)
-	issues, _ := scanHealthEvents(path, 0, time.Time{})
+	issues, _ := scanHealthEvents(path, 0)
 	if r := buildHealthReport(issues, healthThreshold); r != "" {
 		t.Errorf("2次失败应静默, got %q", r)
 	}
@@ -92,12 +92,12 @@ func TestHealthWatermark(t *testing.T) {
 	spec := [][2]string{{EvToolResult, "python"}, {EvToolResult, "python"}, {EvToolResult, "python"}}
 	oks := []bool{false, false, false}
 	path := writeTestEvents(t, dir, spec, oks)
-	issues, total := scanHealthEvents(path, 0, time.Time{})
+	issues, total := scanHealthEvents(path, 0)
 	if r := buildHealthReport(issues, healthThreshold); r == "" {
 		t.Fatal("前3次应报告")
 	}
 	// 增量: 从 total 之后 → 无新问题
-	issues2, total2 := scanHealthEvents(path, total, time.Time{})
+	issues2, total2 := scanHealthEvents(path, total)
 	if total2 != total {
 		t.Errorf("行数应不变 %d, got %d", total, total2)
 	}
@@ -110,7 +110,7 @@ func TestHealthWatermark(t *testing.T) {
 		f.WriteString(`{"ts":"2026-08-12T21:00:00+08:00","type":"tool_result","detail":"browser","data":{"ok":false}}` + "\n")
 	}
 	f.Close()
-	issues3, total3 := scanHealthEvents(path, total2, time.Time{})
+	issues3, total3 := scanHealthEvents(path, total2)
 	if total3 != total2+3 {
 		t.Errorf("行数应 +3, got %d", total3)
 	}
@@ -126,18 +126,18 @@ func TestHealthBadLines(t *testing.T) {
 	os.MkdirAll(fdir, 0755)
 	path := filepath.Join(fdir, "events.jsonl")
 	os.WriteFile(path, []byte("{{{not json\n{\"ts\":\"x\",\"type\":\"tool_result\"\n\n"), 0644)
-	issues, total := scanHealthEvents(path, 0, time.Time{})
+	issues, total := scanHealthEvents(path, 0)
 	if len(issues) != 0 || total != 2 {
 		t.Errorf("坏行不产生问题但应计入行数(已消费): issues=%d total=%d", len(issues), total)
 	}
 	// 不存在文件
-	issues2, total2 := scanHealthEvents(filepath.Join(fdir, "nope.jsonl"), 0, time.Time{})
+	issues2, total2 := scanHealthEvents(filepath.Join(fdir, "nope.jsonl"), 0)
 	if len(issues2) != 0 || total2 != 0 {
 		t.Errorf("不存在应空: %d %d", len(issues2), total2)
 	}
 	// 空文件
 	os.WriteFile(path, []byte(""), 0644)
-	issues3, _ := scanHealthEvents(path, 0, time.Time{})
+	issues3, _ := scanHealthEvents(path, 0)
 	if len(issues3) != 0 {
 		t.Errorf("空文件应空")
 	}
@@ -152,7 +152,7 @@ func TestHealthFixedAfter(t *testing.T) {
 	}
 	oks := []bool{false, false, false}
 	path := writeTestEvents(t, dir, spec, oks)
-	issues, _ := scanHealthEvents(path, 0, time.Time{})
+	issues, _ := scanHealthEvents(path, 0)
 	if issues["browser"] == nil || !issues["browser"].FixedAfter {
 		t.Errorf("失败后自改应标 FixedAfter: %+v", issues["browser"])
 	}
@@ -162,7 +162,7 @@ func TestHealthFixedAfter(t *testing.T) {
 		{EvToolResult, "python"}, {EvToolResult, "python"}, {EvToolResult, "python"},
 	}
 	path2 := writeTestEvents(t, dir+"2", spec2, []bool{false, false, false})
-	issues2, _ := scanHealthEvents(path2, 0, time.Time{})
+	issues2, _ := scanHealthEvents(path2, 0)
 	if issues2["python"] != nil && issues2["python"].FixedAfter {
 		t.Errorf("自改在先不应标 FixedAfter: %+v", issues2["python"])
 	}

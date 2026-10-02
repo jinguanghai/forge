@@ -19,7 +19,33 @@ var exitRequested bool
 // (首次 Ctrl+C 取消任务计数, 任务结束重置)。
 var sigCount atomic.Int32
 
-const AppVersion = "3.0.0"
+const AppVersion = "4.0.0"
+
+// buildCommit / buildTime 是【构建事实】—— 源码里没有, 由构建命令用
+// -ldflags "-X main.buildCommit=... -X main.buildTime=..." 注入 (见 buildLdflags)。
+// 缺省 "dev" = 非 ldflags 构建 (go run / go test / 手工 go build)。
+//
+// 为什么 AppVersion 不交给 ldflags (20261002 决策):
+//
+//	版本号必须保持「源码 const 单一源 + git tag 背书」—— 一旦注入, "跑的是哪一版"
+//	就多一层构建参数的不确定性; 版本号的可信度来自 git, 不来自命令行。
+var (
+	buildCommit = "dev"
+	buildTime   = "dev"
+)
+
+// versionString 是版本号的唯一渲染入口 (--version / help 共用)。
+// 一律拼 AppVersion, 禁硬编码 "vX.Y.Z" 字面量 (version_check.py 判据钉住)。
+// 形态: "v4.0.0 (12de77c 2026-10-02)" / 无注入时 "v4.0.0"。
+func versionString() string {
+	if buildCommit == "" || buildCommit == "dev" {
+		return "v" + AppVersion
+	}
+	if buildTime == "" || buildTime == "dev" {
+		return fmt.Sprintf("v%s (%s)", AppVersion, buildCommit)
+	}
+	return fmt.Sprintf("v%s (%s %s)", AppVersion, buildCommit, buildTime)
+}
 
 func main() {
 	// 拆分: 启动序 → main_startup.go, 运行模式 → main_interactive.go,

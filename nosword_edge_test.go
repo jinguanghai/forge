@@ -85,12 +85,12 @@ func TestNSWEdge_OriginalPositive(t *testing.T) {
 // 确定性 (缓存前缀必要条件) 仍然成立
 func TestNSWEdge_Determinism(t *testing.T) {
 	txt := "帮我算 2 * 3 + 4 和 0.1+0.2 和 sqrt(16)"
-	first := nswFeedbackText(txt)
+	first := nswFeedbackTextForTest(txt)
 	if first == "" {
 		t.Fatal("应命中")
 	}
 	for i := 0; i < 500; i++ {
-		if got := nswFeedbackText(txt); got != first {
+		if got := nswFeedbackTextForTest(txt); got != first {
 			t.Fatalf("第%d次不确定: %q vs %q", i, got, first)
 		}
 	}

@@ -110,6 +110,9 @@ func firstLineOf(s string) string {
 
 // TestBench 基准入口: 输出报告到 bench/report_YYYYMMDD.md
 func TestBench(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 跳过 gate 端到端批量测试(每个用例起真实 gate 子进程)")
+	}
 	wd := "." // 真实 workdir: gate 二进制在 ./.forge/forge-tools (t.TempDir 会找不到 gate)
 	cfg := DefaultConfig()
 	cfg.WorkDir = wd

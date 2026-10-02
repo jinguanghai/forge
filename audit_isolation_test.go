@@ -29,6 +29,9 @@ func TestMain(m *testing.M) {
 		tmp = os.TempDir()
 	}
 	os.Setenv("FORGE_AUDIT_PATH", filepath.Join(tmp, "gate_audit.jsonl"))
+	// 同构隔离: 缓存统计的写入出口 (见 cache_stats.go cacheStatPathForWrite)。
+	// 缺此设置时, 测试里直接调 parseSSE/doStream 会把假模型记录写进仓库根。
+	os.Setenv("FORGE_CACHE_STATS_PATH", filepath.Join(tmp, "cache_stats.jsonl"))
 	code := m.Run()
 	_ = os.RemoveAll(tmp)
 	os.Exit(code)
@@ -40,15 +43,53 @@ func TestAuditIsolation_PathPriority(t *testing.T) {
 	if iso == "" {
 		t.Fatal("TestMain 未设置 FORGE_AUDIT_PATH, 审计隔离失效")
 	}
+	// 测试进程: 生产根强制隔离 (20260930 收紧)。此前只覆盖"WorkDir 无效",
+	// 用真实 WorkDir 构造 Forge 的测试 (TestForgeGateHost_*) 会绕过隔离写生产文件。
 	for _, dir := range []string{"", "."} {
 		if got := auditFilePath(dir); got != iso {
-			t.Fatalf("WorkDir=%q 应回退隔离路径, 实际 %s", dir, got)
+			t.Fatalf("测试进程里 WorkDir=%q 应回退隔离路径, 实际 %s", dir, got)
 		}
 	}
-	// 有效 WorkDir 必须优先 (否则会破坏已有的 t.TempDir() 类测试)
+	// 判据收窄到生产根: 非生产根的有效目录 (t.TempDir) 仍优先 —— 一刀切会打断
+	// 用临时目录写自己审计的合法测试 (实测 4 个用例红)。
 	valid := filepath.Join("C:", "tmp", "somewhere")
 	if got := auditFilePath(valid); got != filepath.Join(valid, "gate_audit.jsonl") {
-		t.Fatalf("有效 WorkDir 应优先, 实际 %s", got)
+		t.Fatalf("非生产根的有效 WorkDir 应优先, 实际 %s", got)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := auditFilePath(cwd); got != iso {
+		t.Fatalf("生产根 (%s) 必须强制隔离, 实际 %s", cwd, got)
+	}
+}
+
+// 哨兵 c: 用真实 WorkDir 的写入同样必须被隔离 (20260930 补)。
+//
+// 缺口: 旧隔离只覆盖"WorkDir 为空/点"的回退分支, 而跑真实 gate 的测试
+// (TestForgeGateHost_*) 用的是真实 WorkDir —— 实测一次全量测试往生产
+// gate_audit.jsonl 注入数十条带 event 的假记录 (含 approval_wait_ms 等构造值),
+// 直接污染 gate 失败率/耗时/重试率的统计基础。
+func TestAuditIsolation_RealWorkdirStillIsolated(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prod := filepath.Join(cwd, "gate_audit.jsonl")
+	const marker = "isolated_realwd_probe_9384756"
+	before := 0
+	if b, err := os.ReadFile(prod); err == nil {
+		before = strings.Count(string(b), marker)
+	}
+	f := &Forge{workDir: cwd} // 真实 WorkDir —— 旧实现会直接写生产文件
+	appendAuditJSONL(auditFilePath(f.workDir), map[string]interface{}{"event": "gate", "probe": marker})
+	if b, err := os.ReadFile(prod); err == nil && strings.Count(string(b), marker) > before {
+		t.Fatalf("真实 WorkDir 的写入落到了生产文件 %s —— 隔离仍有缺口", prod)
+	}
+	iso := os.Getenv("FORGE_AUDIT_PATH")
+	if b, err := os.ReadFile(iso); err != nil || !strings.Contains(string(b), marker) {
+		t.Fatalf("隔离文件未收到写入 (err=%v) —— 隔离过宽, 埋点被误关", err)
 	}
 }
 

@@ -6,6 +6,14 @@ import (
 	"unicode/utf8"
 )
 
+// Endpoint 描述一次请求应到达的提供商及其连接参数。
+type Endpoint struct {
+	Provider string
+	APIKey   string
+	BaseURL  string
+	Model    string
+}
+
 // ─── 动态模型路由 (Model Router) ─────────────────────────────
 // 简单任务 → flash (便宜)，复杂任务 → pro (强)。
 // 模式: auto(按复杂度自动) / flash(强制flash) / pro(强制pro) / fixed(固定Model,兼容旧行为)
@@ -17,9 +25,23 @@ const (
 	RouterFixed = "fixed"
 )
 
+// ─── 提供商路由 (Provider Router) ───────────────────────────
+// 高峰时段(工作日9-12/14-18)自动切 MiniMax M3 省钱, 其余/周末回 DeepSeek。
+// 与 DeepSeek 峰谷定价互补: 高峰 MiniMax 更省(实测便宜~19%), 非高峰 DeepSeek 更省。
+
+// 提供商名
+const (
+	EndpointDeepSeek = "deepseek"
+	EndpointMiniMax  = "minimax"
+)
+
 // peakHourNow 返回当前是否高峰时段 (价格×2)。
 // 包级变量便于测试注入固定状态; 生产默认取 isPeakHour (本机时钟, 等价北京时间)。
 var peakHourNow = isPeakHour
+
+// minimaxWindowNow 返回当前是否处于"切到 MiniMax 的时段"。
+// 包级变量便于测试注入; 生产默认取 minimaxWindow (本机时钟)。
+var minimaxWindowNow = minimaxWindow
 
 // classifyTask 返回任务复杂度 0.0~1.0。
 // 强信号每个 +0.45，弱信号每个 +0.12，长度 +0.08~0.15，结构信号每个 +0.08。
@@ -117,20 +139,6 @@ func pickModel(cfg *Config, task string) string {
 	}
 }
 
-// routerModeShort 返回路由模式的短标签（欢迎画面用，避免超宽破坏边框）。
-func routerModeShort(mode string) string {
-	switch mode {
-	case RouterFlash:
-		return "强制 flash"
-	case RouterPro:
-		return "强制 pro"
-	case RouterFixed:
-		return "固定模型"
-	default:
-		return "自动路由"
-	}
-}
-
 // routerModeLabel 返回路由模式的中文说明。
 func routerModeLabel(mode string) string {
 	switch mode {
@@ -153,28 +161,6 @@ func effortLabel(cfg *Config) string {
 	return "默认"
 }
 
-// ─── 提供商路由 (Provider Router) ───────────────────────────
-// 高峰时段(工作日9-12/14-18)自动切 MiniMax M3 省钱, 其余/周末回 DeepSeek。
-// 与 DeepSeek 峰谷定价互补: 高峰 MiniMax 更省(实测便宜~19%), 非高峰 DeepSeek 更省。
-
-// 提供商名
-const (
-	EndpointDeepSeek = "deepseek"
-	EndpointMiniMax  = "minimax"
-)
-
-// Endpoint 描述一次请求应到达的提供商及其连接参数。
-type Endpoint struct {
-	Provider string
-	APIKey   string
-	BaseURL  string
-	Model    string
-}
-
-// minimaxWindowNow 返回当前是否处于"切到 MiniMax 的时段"。
-// 包级变量便于测试注入; 生产默认取 minimaxWindow (本机时钟)。
-var minimaxWindowNow = minimaxWindow
-
 // minimaxWindow 判断当前是否为 MiniMax 适用窗口:
 // 周一~周五 且 高峰时段(9-12 / 14-18)。周六周日一律回 DeepSeek。
 func minimaxWindow() bool {
@@ -186,25 +172,4 @@ func minimaxWindow() bool {
 // 会各自漂移 (20260913 实测: 本函数已判周末, isPeakHour 未判, 同一文件内自相矛盾)。
 func isMiniMaxWindow(t time.Time) bool {
 	return isPeakHourAt(t)
-}
-
-// routeEndpoint 根据当前时段返回请求应使用的提供商端点。
-// 规则: MiniMax 三字段齐备(APIKey/BaseURL/Model) 且 处于 MiniMax 窗口
-//
-//	→ 走 MiniMax; 否则始终回 DeepSeek。
-func routeEndpoint(cfg *Config) Endpoint {
-	if cfg.MiniMaxAPIKey != "" && cfg.MiniMaxBaseURL != "" && cfg.MiniMaxModel != "" && minimaxWindowNow() {
-		return Endpoint{
-			Provider: EndpointMiniMax,
-			APIKey:   cfg.MiniMaxAPIKey,
-			BaseURL:  cfg.MiniMaxBaseURL,
-			Model:    cfg.MiniMaxModel,
-		}
-	}
-	return Endpoint{
-		Provider: EndpointDeepSeek,
-		APIKey:   cfg.APIKey,
-		BaseURL:  cfg.BaseURL,
-		Model:    cfg.Model,
-	}
 }

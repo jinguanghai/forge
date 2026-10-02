@@ -34,6 +34,9 @@ func TestGitSnapshotNonGitDir(t *testing.T) {
 }
 
 func TestGitSnapshotCommits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 跳过真实 git 快照测试")
+	}
 	wd := t.TempDir()
 	gitCmd(t, wd, "init", "-b", "main")
 
@@ -56,10 +59,28 @@ func TestGitSnapshotCommits(t *testing.T) {
 		t.Fatalf("commit 消息应含 reason: %s", log)
 	}
 
-	// 再次快照: 应生成新 commit
+	// 无变更再次快照: 不应产生空提交 (回归 20260925: 旧实现带 --allow-empty,
+	// 实测 208 commit 中 13 个是零变更空提交; 本条断言曾把错误行为固化)
+	before := gitCmd(t, wd, "rev-list", "--count", "HEAD")
 	h2 := gitSnapshot(wd, "pre-test-2")
-	if h2 == "" || h2 == h {
-		t.Fatalf("第二次快照应生成新 hash: h=%s h2=%s", h, h2)
+	after := gitCmd(t, wd, "rev-list", "--count", "HEAD")
+	if before != after {
+		t.Fatalf("工作区无变更不应新增 commit: count %s -> %s", before, after)
+	}
+	if h2 != h {
+		t.Fatalf("无变更应返回当前 HEAD (回滚点等价): h=%s h2=%s", h, h2)
+	}
+
+	// 有变更时必须照常提交 (防过度修复: 永不提交=回滚点丢失)
+	if err := os.WriteFile(filepath.Join(wd, "forge.go"), []byte("package main\n\n// changed\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	h3 := gitSnapshot(wd, "pre-test-3")
+	if h3 == "" || h3 == h {
+		t.Fatalf("有变更必须生成新 commit: h=%s h3=%s", h, h3)
+	}
+	if c := gitCmd(t, wd, "rev-list", "--count", "HEAD"); c == before {
+		t.Fatalf("有变更时 commit 数应增加, 仍为 %s", c)
 	}
 }
 

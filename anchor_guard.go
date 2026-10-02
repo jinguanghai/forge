@@ -22,11 +22,12 @@ import (
 
 // AnchorAuditEntry 锚点写入审计条目 (anchor_audit.jsonl 一行一条)
 type AnchorAuditEntry struct {
-	Time    string   `json:"time"`               // RFC3339 本地时间
-	File    string   `json:"file"`               // 被写入的文件 (memory.json)
-	Fields  []string `json:"fields"`             // 顶层字段差异 (改了什么)
-	SysHash string   `json:"sys_hash,omitempty"` // system 前缀指纹 (前16位)
-	Reason  string   `json:"reason,omitempty"`   // 备注 (missing_last_updated 等)
+	Time     string   `json:"time"`                // RFC3339 本地时间
+	File     string   `json:"file"`                // 被写入的文件 (memory.json)
+	Fields   []string `json:"fields"`              // 顶层字段差异 (改了什么)
+	SysHash  string   `json:"sys_hash,omitempty"`  // system 前缀指纹 (前16位)
+	Reason   string   `json:"reason,omitempty"`    // 备注 (missing_last_updated 等)
+	GuardOff bool     `json:"guard_off,omitempty"` // true=护栏关闭时写入 (留痕但不计配额)
 }
 
 const anchorAuditFileName = "anchor_audit.jsonl"
@@ -48,10 +49,13 @@ func sysHashPrefix(data []byte) string {
 
 // dynamicMemoryFields 动态字段清单 —— 不进 system 固定头的字段 (唯一真相源)。
 //
-// 三处消费方共用这一份清单, 防止各自维护导致漂移:
-//   - buildSystemPrompt / stripDynamicMemory : 剔除后进 system 固定头
-//   - buildMemoryTailText                    : 剔除后进 memory tail
-//   - isAnchorChange                         : 判定是否锚点改动
+// 两处消费方共用这一份清单, 防止各自维护导致漂移:
+//   - buildMemoryTailText : 剔除后进 system 固定头 (记忆锚点段)
+//   - isAnchorChange      : 判定是否锚点改动
+//
+// 20260925: 注释原写 "buildSystemPrompt / stripDynamicMemory" —— 前者早已被
+// buildSystemPromptStable 取代(全库无此符号), 后者生产零调用已删; 注释腐化本身
+// 就是"接线缺口"的一种, 由 relation gate 扫描捕获。
 //
 // 与此互补的"锚点集合"不另设白名单 —— 由 isAnchorChange 反推 (非动态即锚点)。
 var dynamicMemoryFields = []string{
@@ -93,6 +97,7 @@ func isAnchorChange(fields []string) bool {
 }
 
 // anchorAuditTodayCount 统计今天的锚点写入次数 (按审计文件 time 字段, 仅锚点改动计数)。
+// GuardOff 条目 (护栏关闭时写入) 不计入 —— 关护栏=不占配额, 语义与修正前一致。
 func anchorAuditTodayCount(workDir string) (int, error) {
 	data, err := os.ReadFile(anchorAuditPath(workDir))
 	if err != nil {
@@ -110,6 +115,9 @@ func anchorAuditTodayCount(workDir string) (int, error) {
 		}
 		var e AnchorAuditEntry
 		if json.Unmarshal([]byte(line), &e) != nil {
+			continue
+		}
+		if e.GuardOff {
 			continue
 		}
 		if strings.HasPrefix(e.Time, today) {
@@ -179,18 +187,29 @@ func jsonEqual(a, b interface{}) bool {
 
 // anchorGuardAudit 追加一条审计记录 (幂等, 失败静默——审计失败不阻断主流程)。
 // 仅锚点字段改动入审计; 纯片段写入 (key_findings 等) 不计数。
+//
+// 20260925 修正: 原实现首行 `if !anchorGuardEnabled() { return }` —— 关护栏不只是
+// 放行写入, 还让审计彻底静默("关掉护栏即无人知道发生过写入", 属失效不留痕家族)。
+// 现改为: 关护栏照写审计并打 GuardOff 标记, 该条目不占当日配额
+// (anchorAuditTodayCount 跳过), 故护栏关闭时的放行语义逐字节不变。
 func anchorGuardAudit(workDir string, fields []string, reason string) {
-	if !anchorGuardEnabled() {
-		return
-	}
 	if !isAnchorChange(fields) {
 		return
 	}
+	guardOff := !anchorGuardEnabled()
+	if guardOff {
+		if reason == "" {
+			reason = "guard_disabled"
+		} else {
+			reason += " guard_disabled"
+		}
+	}
 	entry := AnchorAuditEntry{
-		Time:   time.Now().Format(time.RFC3339),
-		File:   "memory.json",
-		Fields: fields,
-		Reason: reason,
+		Time:     time.Now().Format(time.RFC3339),
+		File:     "memory.json",
+		Fields:   fields,
+		Reason:   reason,
+		GuardOff: guardOff,
 	}
 	if data, err := os.ReadFile(memoryFilePath(workDir)); err == nil {
 		entry.SysHash = sysHashPrefix(data)
@@ -251,6 +270,9 @@ func anchorAuditSummary(workDir string) string {
 			fields = "(未记录字段)"
 		}
 		sb.WriteString(fmt.Sprintf("    %s [%s] %s", e.Time, fields, e.Reason))
+		if e.GuardOff {
+			sb.WriteString(" [护栏关闭]")
+		}
 		if e.SysHash != "" {
 			sb.WriteString(fmt.Sprintf(" sha=%s", e.SysHash))
 		}

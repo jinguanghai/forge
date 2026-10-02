@@ -99,8 +99,8 @@ func TestNSW_FeedbackLowEntropy(t *testing.T) {
 
 func TestNSW_FeedbackText(t *testing.T) {
 	// nswFeedbackText 输出形态稳定: 【求值】「EXPR = VAL」
-	fb1 := nswFeedbackText("帮我算 2*3+4 和 (1+2)*3")
-	fb2 := nswFeedbackText("帮我算 2*3+4 和 (1+2)*3")
+	fb1 := nswFeedbackTextForTest("帮我算 2*3+4 和 (1+2)*3")
+	fb2 := nswFeedbackTextForTest("帮我算 2*3+4 和 (1+2)*3")
 	if fb1 != fb2 {
 		t.Fatalf("feedback 不稳定: %q vs %q", fb1, fb2)
 	}
@@ -109,7 +109,11 @@ func TestNSW_FeedbackText(t *testing.T) {
 	}
 	t.Logf("feedback=%q", fb1)
 	// 无锚点 → 空
-	if x := nswFeedbackText("价格12元，版本2.0"); x != "" {
+	if x := nswFeedbackTextForTest("价格12元，版本2.0"); x != "" {
 		t.Fatalf("语境数字不应命中: %q", x)
 	}
 }
+
+// nswFeedbackTextForTest 等价于已删的生产函数 nswFeedbackText:
+// 嗅探求值 + 格式化为稳定低熵反馈文本 (nswFormatAnchors(nswEvaluate(x))).
+func nswFeedbackTextForTest(asst string) string { return nswFormatAnchors(nswEvaluate(asst)) }

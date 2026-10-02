@@ -91,7 +91,7 @@ func TestNSWFresh_PlainExprMatchesOldFeedback(t *testing.T) {
 		"",
 	}
 	for _, in := range inputs {
-		want := nswFeedbackText(in)
+		want := nswFeedbackTextForTest(in)
 		got, _, _ := nswFeedbackTextFresh(in)
 		if got != want {
 			t.Errorf("无冗余时应与 nswFeedbackText 逐字节相同: %q -> %q (期望 %q)", in, got, want)

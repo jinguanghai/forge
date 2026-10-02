@@ -3,6 +3,9 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"unicode"
@@ -15,24 +18,6 @@ func abortUnknownTools(unknownTools, maxFails int) (bool, string) {
 		return true, fmt.Sprintf("连续 %d 次调用未知工具（工具幻觉），已中止", unknownTools)
 	}
 	return false, ""
-}
-
-// parseErrMessage 构造参数解析失败回执消息。
-func parseErrMessage(parseErr error) string {
-	return fmt.Sprintf("参数解析失败: %v。请检查 JSON 格式。有效的参数: action(必需), code(必需), lang(可选), input(可选)。", parseErr)
-}
-
-// truncateDetail 截断错误详情到 maxLen（超长补省略号）。
-func truncateDetail(detail string, maxLen int) string {
-	if len(detail) > maxLen {
-		return detail[:maxLen] + "..."
-	}
-	return detail
-}
-
-// consecutiveFailMessage 构造连续铸剑炉调用失败中止消息。
-func consecutiveFailMessage(fails int) string {
-	return fmt.Sprintf("连续 %d 次铸剑炉调用失败（非瞬时错误），已中止", fails)
 }
 
 // goalAnchor 构造带原始任务锚点的 tool 回执内容。
@@ -184,19 +169,16 @@ func classifyTransient(result *ForgeGateResult) bool {
 	if result == nil {
 		return false
 	}
-	stage := result.Stage
-	errLower := strings.ToLower(result.Error)
-	// compile/check stage failures are real code bugs in the LLM output → count fully.
-	// execute stage timeouts or missing tools are environmental → no penalty.
-	if stage == "execute" && (strings.Contains(errLower, "timeout") ||
-		strings.Contains(errLower, "not found") ||
-		strings.Contains(errLower, "找不到")) {
-		return true
-	}
-	if stage == "compile" && strings.Contains(errLower, "not found") {
-		return true
-	}
-	return false
+	// 类型化判据(与 forge_retry.go isTransientError 同口径): 只看 Timeout /
+	// EnvFailure 两个字段, 不看错误文本 —— 文本不是类型。
+	//
+	// 旧实现嗅探 Error 文本("timeout"/"not found"/"找不到"), 实测三重失效:
+	//   ① 真实超时文本是 "context deadline exceeded", 不含 "timeout" 子串 →
+	//      环境失败被判非瞬态 → 计入 consecutiveFails;
+	//   ② 反向误判: 用户代码打印 "not found" 会被当成环境失败而免责;
+	//   ③ 净效果: 累计到阈值即斩断整个会话, 而报错文案写的是"非瞬时错误",
+	//      归因恰好说反。环境性失败的产生点已全部打标, 文本匹配一并删除。
+	return result.Timeout || result.EnvFailure
 }
 
 // stripCrossTurnReasoning 跨 user turn 清理 history 中 assistant 消息的
@@ -259,4 +241,66 @@ func completePairs(msgs []ChatMessage, start, end int) (int, int) {
 		end++
 	}
 	return start, end
+}
+
+// ─── Tool call helpers ─────────────────────────────────────
+
+func parseForgeParams(argsJSON string) (ForgeParams, error) {
+	var p ForgeParams
+	if err := json.Unmarshal([]byte(argsJSON), &p); err != nil {
+		return p, fmt.Errorf("invalid JSON: %w", err)
+	}
+	if p.Code == "" {
+		return p, fmt.Errorf("code field is required")
+	}
+	return p, nil
+}
+
+func hashCall(code, lang, input string) string {
+	// 循环检测用"语义等价"哈希: 先归一化(去注释/空白), 防模型每轮改个
+	// 注释或换行就绕过重复检测。lang/input 保持原样参与哈希。
+	h := sha256.New()
+	h.Write([]byte(normalizeCode(code)))
+	h.Write([]byte{0})
+	h.Write([]byte(lang))
+	h.Write([]byte{0})
+	h.Write([]byte(input))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// hashOutput 归一化输出哈希: 仅去首尾空白, 用于"连续 N 次输出无变化"的无进展检测。
+func hashOutput(s string) string {
+	h := sha256.New()
+	h.Write([]byte(strings.TrimSpace(s)))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// extractAssistantText 收尾兜底: 正文为空时依次回退到 reasoning 与占位符。
+// 两处收尾块共用(No tool calls 分支 + 流片段过滤后空分支), 消除重复逻辑。
+func extractAssistantText(asst, reason *strings.Builder) string {
+	s := asst.String()
+	if strings.TrimSpace(s) == "" && strings.TrimSpace(reason.String()) != "" {
+		s = reason.String() // 模型仅输出 reasoning，兜底为正文避免 API 400
+	}
+	if strings.TrimSpace(s) == "" {
+		s = "[empty response]"
+	}
+	return s
+}
+
+// buildUnknownToolMsg returns the error message fed back to the LLM when it
+// invokes a tool other than forge (hallucinated tool names). A single
+// hallucinated tool name is not a code failure, but a model that keeps
+// inventing tools must terminate: otherwise the agent loops forever.
+func buildUnknownToolMsg(name string) string {
+	return fmt.Sprintf("未知工具: %s。你只有 forge（铸剑炉）一个工具。请用 forge。", name)
+}
+
+// checkRepeatedCall increments the call-hash counter and reports whether the
+// same (semantically normalized) code has been executed more than maxRepeated
+// times (loop detection). It returns the updated counter and whether the
+// threshold was exceeded.
+func checkRepeatedCall(callHash string, callHistory map[string]int, maxRepeated int) (bool, int) {
+	callHistory[callHash]++
+	return callHistory[callHash] > maxRepeated, callHistory[callHash]
 }

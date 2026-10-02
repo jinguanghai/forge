@@ -113,7 +113,8 @@ func TestRouteEndpoint(t *testing.T) {
 
 	// MiniMax 未配 → 始终 DeepSeek
 	minimaxWindowNow = func() bool { return true }
-	if ep := routeEndpoint(cfg); ep.Provider != EndpointDeepSeek {
+	c := &LLMClient{cfg: cfg}
+	if ep := c.resolveEndpoint("", nil); ep.Provider != EndpointDeepSeek {
 		t.Errorf("MiniMax 未配, 应 DeepSeek, got %s", ep.Provider)
 	}
 
@@ -121,7 +122,7 @@ func TestRouteEndpoint(t *testing.T) {
 	cfg.MiniMaxAPIKey = "mm-key"
 	cfg.MiniMaxBaseURL = "https://api.minimaxi.com/v1"
 	cfg.MiniMaxModel = "MiniMax-M3"
-	ep := routeEndpoint(cfg)
+	ep := c.resolveEndpoint("", nil)
 	if ep.Provider != EndpointMiniMax {
 		t.Errorf("窗口且已配, 应 MiniMax, got %s", ep.Provider)
 	}
@@ -131,7 +132,7 @@ func TestRouteEndpoint(t *testing.T) {
 
 	// 非窗口 → 回 DeepSeek
 	minimaxWindowNow = func() bool { return false }
-	ep = routeEndpoint(cfg)
+	ep = c.resolveEndpoint("", nil)
 	if ep.Provider != EndpointDeepSeek {
 		t.Errorf("非窗口, 应 DeepSeek, got %s", ep.Provider)
 	}

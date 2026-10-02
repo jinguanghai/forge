@@ -40,9 +40,9 @@ func (s *SessionStats) StringZh() string {
 	defer s.mu.RUnlock()
 	elapsed := time.Since(s.StartTime).Round(time.Second)
 	return fmt.Sprintf(
-		"轮次:%d | 令牌:%d | 工具:%d✓/%d✗ | 计算耗时:%v | 会话时长:%v | 模型:%s",
+		"轮次:%d | 令牌:%d | 工具:%d✓/%d✗ | 计算耗时:%v | 会话时长:%v",
 		s.Turns, s.TotalTokens, s.ToolOK, s.ToolFail,
-		time.Duration(s.TotalMs)*time.Millisecond, elapsed, s.LastModel,
+		time.Duration(s.TotalMs)*time.Millisecond, elapsed,
 	)
 }
 
@@ -79,6 +79,7 @@ func (s *SessionStats) addToolFail(d time.Duration) {
 	s.mu.Unlock()
 }
 
+// addCache 累加一次请求的缓存命中/未命中 (会话级实时命中率数据源)。
 func (s *SessionStats) addCache(hit, miss int) {
 	s.mu.Lock()
 	s.CacheHit += int64(hit)
@@ -86,6 +87,7 @@ func (s *SessionStats) addCache(hit, miss int) {
 	s.mu.Unlock()
 }
 
+// cacheRate 返回当前会话累计缓存命中率 (%), 无数据时 ok=false。
 func (s *SessionStats) cacheRate() (rate float64, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

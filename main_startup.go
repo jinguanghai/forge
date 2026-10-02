@@ -115,7 +115,7 @@ func parseFlags() (showReasoning bool, nonFlagArgs []string) {
 			printHelp()
 			os.Exit(0)
 		case "--version", "-v":
-			fmt.Printf("铸剑炉 v%s — 流式智能体 · 编译器沙箱\n", AppVersion)
+			fmt.Printf("铸剑炉 %s — 流式智能体 · 编译器沙箱\n", versionString())
 			os.Exit(0)
 		default:
 			nonFlagArgs = append(nonFlagArgs, arg)
@@ -137,6 +137,9 @@ func runStartupConfig(showReasoning bool) (*Config, error) {
 	}
 	cfg.ShowReasoning = showReasoning
 	initEventLog(cfg.WorkDir)
+	// 非正常退出检测: 必须紧跟 initEventLog —— 早于本次进程写的任何事件,
+	// 否则判据会读到自己的新记录而永远判"正常"(见 exit_watch.go)。
+	reportLastExit(cfg.WorkDir)
 	reportLastUpgrade(cfg.WorkDir)
 	if recovered, herr := HealMemory(cfg.WorkDir); herr != nil {
 		fmt.Fprintf(os.Stderr, "%s 记忆自愈失败: %v\n", color(ansi.yellow, "⚠"), herr)
@@ -151,6 +154,9 @@ func runStartupConfig(showReasoning bool) (*Config, error) {
 		senseCmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8", "PYTHONUTF8=1")
 		senseCmd.Run()
 	}
+	// 5S 出口: 一次性临时区启动即清空。必须在 initEventLog 之后(留痕需要 eventsPath),
+	// 且只能落在这里 —— 放 NewForge 会让 17 个测试调用点互踩, 详见 cleanupWorkTempDir 注释。
+	cleanupWorkTempDir(cfg.WorkDir)
 	setCacheStatPath(cfg.WorkDir)
 	return cfg, nil
 }

@@ -76,7 +76,12 @@ func SelfUpgrade(cfg *Config) error {
 
 	// 编译新版本 (最后一步: 刚生成的 forge_new.exe 不经过防御基线比对)
 	fmt.Printf("  [%d/%d] go build → forge_new.exe ... ", len(steps)+2, len(steps)+2)
-	build := exec.Command("go", "build", "-o", "forge_new.exe", ".")
+	buildArgs := []string{"build"}
+	if ld := buildLdflags(workDir); ld != "" {
+		buildArgs = append(buildArgs, "-ldflags", ld)
+	}
+	buildArgs = append(buildArgs, "-o", "forge_new.exe", ".")
+	build := exec.Command("go", buildArgs...)
 	build.Dir = workDir
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Println(color(ansi.red, "FAIL"))
@@ -126,10 +131,14 @@ func SelfUpgrade(cfg *Config) error {
 	pruneExeBackups(workDir, backupKeepCount)
 
 	// 写重启脚本 (排空式: 等主进程自行退出, 超时才强杀)
+	// 落点归 .forge/ (restartScriptPath): 根目录是工作区, 自动生成物须有专属容器(2S 定置)。
 	script := buildRestartScript(workDir, os.Getpid(), ts)
-	scriptPath := filepath.Join(workDir, "restart_self.ps1")
+	scriptPath := restartScriptPath(workDir)
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0755); err != nil {
+		return fmt.Errorf("创建重启脚本目录失败: %v", err)
+	}
 	// 带 BOM 写: PowerShell 5.1 对无 BOM 的 UTF-8 按 ANSI 解释 → 中文日志乱码。
-	if err := os.WriteFile(scriptPath, append([]byte("\ufeff"), script...), 0644); err != nil {
+	if err := atomicWrite(scriptPath, append([]byte("\ufeff"), script...)); err != nil {
 		return fmt.Errorf("写重启脚本失败: %v", err)
 	}
 
@@ -141,6 +150,20 @@ func SelfUpgrade(cfg *Config) error {
 		return fmt.Errorf("启动重启脚本失败: %v", err)
 	}
 	return nil
+}
+
+// restartScriptPath 返回重启脚本落点(单一来源: 产生点与哨兵测试共用, 防路径拼接漂移)。
+//
+// 归属 .forge/: 重启脚本是「运行态控制脚本」, 生命周期跨越「主进程退出 → 新进程启动」,
+// 与其日志 .forge/upgrade_restart.log 同处一地。
+//
+// 为何不放 .forge-temp/: 该目录启动即被清空(见 cleanupWorkTempDir)。实测 PowerShell 5.1
+// 下小脚本会被整体读入内存, 3/3 语句在「执行中途删脚本」后仍续跑 —— 但那是未文档化的
+// 实现细节, 不是契约。脚本执行到 Start-Process 拉起新进程时, 清空恰好可能发生;
+// 把安全押在「读得比删得快」上 = 依赖实现细节(公理四: 确定性须由死程序保证)。
+// 选零风险: 放一个不会被清空的目录。
+func restartScriptPath(workDir string) string {
+	return filepath.Join(workDir, ".forge", "restart_self.ps1")
 }
 
 // buildRestartScript 生成排空式重启脚本内容 (纯函数, 可测试):
@@ -238,44 +261,6 @@ func pruneExeBackups(dir string, n int) {
 // I-3 快照: 自改前统一备份 (.forge\checkpoints\{ts}_{reason}\)
 // ────────────────────────────────────────────────────────────────
 
-// gitSnapshot 自改前 git 快照: 工作区是 git 仓库时
-// `git add -A` + `git commit` 形成不可逆历史点, 返回 commit hash。
-// 失败静默返回空串(不阻塞自改 —— .forge\checkpoints 文件快照仍是兜底)。
-// 运行时文件已被 .gitignore 排除(memory.json/events.jsonl/checkpoint 等), 不入库。
-func gitSnapshot(workDir, reason string) string {
-	if _, err := os.Stat(filepath.Join(workDir, ".git")); err != nil {
-		return "" // 非 git 仓库, 跳过
-	}
-	// auto 快照用固定身份 (不依赖用户全局 git 配置; 仅用于 auto commit)
-	autoEnv := append(os.Environ(),
-		"GIT_AUTHOR_NAME=forge-auto", "GIT_AUTHOR_EMAIL=auto@forge.local",
-		"GIT_COMMITTER_NAME=forge-auto", "GIT_COMMITTER_EMAIL=auto@forge.local",
-		"GIT_TERMINAL_PROMPT=0")
-	ts := time.Now().Format("20060102_150405")
-	msg := "auto: pre-selfmod " + ts + " " + sanitizeReason(reason)
-	add := exec.Command("git", "add", "-A")
-	add.Dir = workDir
-	add.Env = autoEnv
-	if out, err := add.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "%s git add 失败(静默跳过): %v %s\n", color(ansi.yellow, "⚠"), err, strings.TrimSpace(string(out)))
-		return ""
-	}
-	commit := exec.Command("git", "commit", "-m", msg, "--allow-empty")
-	commit.Dir = workDir
-	commit.Env = autoEnv
-	if out, err := commit.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "%s git commit 失败(静默跳过): %v %s\n", color(ansi.yellow, "⚠"), err, strings.TrimSpace(string(out)))
-		return ""
-	}
-	rev := exec.Command("git", "rev-parse", "--short", "HEAD")
-	rev.Dir = workDir
-	rev.Env = autoEnv
-	if out, err := rev.Output(); err == nil {
-		return strings.TrimSpace(string(out))
-	}
-	return "committed"
-}
-
 // createCheckpoint 拷贝顶层 *.go + memory.json + gate 源码 + 当前二进制
 // 到 .forge\checkpoints\{ts}_{reason}\, 轮转最多留 n 个目录。
 func createCheckpoint(workDir, ts, reason string) error {
@@ -309,10 +294,26 @@ func createCheckpoint(workDir, ts, reason string) error {
 			copied++
 		}
 	}
-	// 当前二进制 (回滚用)
+	// 当前二进制: 只记指纹, 不落盘 (20260928 修)。
+	//
+	// 根因: 旧版 copyFile 把 11.3MB 的 forge.exe 完整复制进每份快照 ——
+	// 实测单份 12.90MB 中 exe 占 11.32MB(87.8%), keep=3 即 33.96MB 纯冗余。
+	// (upgrade.go 自己算过成本 "exe 10x11.4MB=114MB" 却只收紧了 keep 值, 没找到根因)
+	//
+	// 为何可省: 实测全仓库从 checkpoint 读 forge.exe 的消费点为 0 处。
+	// exe 回滚走独立体系 forge.exe.bak_* (pruneExeBackups), 源码回滚走 git,
+	// checkpoint 里那份是第三重冗余。与 selfheal.SKIP_SNAPSHOT_COPY 同构。
+	//
+	// 为何仍记指纹: 否则"自改前跑的是哪个版本"永久丢失, 事后无法比对。
+	meta := checkpointMeta{Ts: ts, Reason: reason}
 	exe := filepath.Join(workDir, "forge.exe")
-	if _, err := os.Stat(exe); err == nil {
-		if copyFile(exe, filepath.Join(dst, "forge.exe")) == nil {
+	if st, err := os.Stat(exe); err == nil {
+		if sum, herr := sha256File(exe); herr == nil {
+			meta.Binary = &checkpointBinary{Name: "forge.exe", Size: st.Size(), SHA256: sum}
+		}
+	}
+	if mb, merr := json.MarshalIndent(meta, "", "  "); merr == nil {
+		if os.WriteFile(filepath.Join(dst, "checkpoint.json"), mb, 0644) == nil {
 			copied++
 		}
 	}
@@ -389,6 +390,23 @@ func sanitizeReason(s string) string {
 // ────────────────────────────────────────────────────────────────
 
 // upgradeAudit 一次自改的审计记录 (status: ready=待生效, done=已消费)
+// checkpointMeta 记录快照元数据 —— 尤其是二进制的指纹。
+//
+// 二进制不再落盘(见 createCheckpoint 注释), 指纹是它留下的唯一痕迹:
+// 有了它才能事后判断"这份快照对应哪个 exe 版本"。
+type checkpointMeta struct {
+	Ts     string            `json:"ts"`
+	Reason string            `json:"reason"`
+	Binary *checkpointBinary `json:"binary,omitempty"`
+}
+
+// checkpointBinary 是不落盘二进制的指纹 (sha256 + 体积)。
+type checkpointBinary struct {
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
 type upgradeAudit struct {
 	ID     string `json:"id"`
 	TS     string `json:"ts"`

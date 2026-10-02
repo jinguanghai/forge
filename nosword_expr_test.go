@@ -2,8 +2,6 @@ package main
 
 import (
 	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -186,59 +184,39 @@ func TestNSWExprConstraintStable(t *testing.T) {
 
 // ── 接线哨兵 (教训 20260910: 实现完整但零调用 = 设开关也不生效) ──────────
 
-// TestNSWExprWire_CallSitesExist agent.go 主干接线点存在性
+// TestNSWExprWire_CallSitesExist 主干接线点存在性
+//
+// 扫描范围是**整个包**而非 agent.go (B3 批5): 接线是包级属性, 硬编码单个文件
+// 会在代码重组时误报 —— 功能还在, 只是换了文件。批5 把无剑干预入口与主循环
+// 迁到 agent_stream_setup.go 后, nswExprEnabled / nswExprRejectText 即搬离了
+// agent.go。功能真被删仍会被抓到 (全包也找不到调用点)。
+//
+// 判据为 AST 口径(见 prodSymbolRefs): 文本版会被函数定义行与注释提及满足。
 func TestNSWExprWire_CallSitesExist(t *testing.T) {
-	agent, err := os.ReadFile("agent.go")
-	if err != nil {
-		t.Fatalf("读 agent.go 失败: %v", err)
-	}
-	src := string(agent)
-	cases := []struct{ call, why string }{
-		{"nswExprEnabled()", "表达式化开关未接线 -> FORGE_NSW_EXPR=1 不生效"},
-		{"nswExprConstraint", "system 约束段未接线 -> 模型不知道要写标记"},
-		{"exprF.feed(", "流式过滤器未接线 -> 用户看到标记原文而非求值结果"},
-		{"exprF.flush()", "出口 flush 未接线 -> 未闭合标记残留在终端"},
-		{"nswExprRejectText(", "拒绝权未接线 -> 非法标记静默漏过"},
-		{"nswExprAudit(", "埋点未接线 -> 表达式化触发率不可测"},
+	refs := prodSymbolRefs(t)
+	cases := []struct {
+		name string
+		kind wireKind
+		why  string
+	}{
+		{"nswExprEnabled", wireCall, "表达式化开关未接线 -> FORGE_NSW_EXPR=1 不生效"},
+		{"nswExprConstraint", wireRef, "system 约束段未接线 -> 模型不知道要写标记"},
+		{"exprF.feed", wireSelector, "流式过滤器未接线 -> 用户看到标记原文而非求值结果"},
+		{"exprF.flush", wireSelector, "出口 flush 未接线 -> 未闭合标记残留在终端"},
+		{"nswExprRejectText", wireCall, "拒绝权未接线 -> 非法标记静默漏过"},
+		{"nswExprAudit", wireCall, "埋点未接线 -> 表达式化触发率不可测"},
 	}
 	for _, c := range cases {
-		if !strings.Contains(src, c.call) {
-			t.Errorf("接线缺失: agent.go 未出现 %q (%s)", c.call, c.why)
+		if !refs.wired(c.kind, c.name) {
+			t.Errorf("接线缺失: 生产代码中未见 %s 的%s (%s)", c.name, c.kind, c.why)
 		}
 	}
 }
 
-// TestNSWExprWire_NoOrphanFunctions nosword_expr.go 顶层函数零调用检测
+// TestNSWExprWire_NoOrphanFunctions nosword_expr.go 包级函数零引用检测
 func TestNSWExprWire_NoOrphanFunctions(t *testing.T) {
-	files, _ := filepath.Glob("*.go")
-	var corpus strings.Builder
-	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
-			continue
-		}
-		b, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		corpus.Write(b)
-		corpus.WriteString("\n")
-	}
-	all := corpus.String()
-
-	src, err := os.ReadFile("nosword_expr.go")
-	if err != nil {
-		t.Fatalf("读 nosword_expr.go 失败: %v", err)
-	}
-	re := regexp.MustCompile(`(?m)^func (\w+)\(`)
-	for _, m := range re.FindAllStringSubmatch(string(src), -1) {
-		name := m[1]
-		defs := strings.Count(all, "func "+name+"(")
-		refs := len(regexp.MustCompile(`\b`+name+`\s*\(`).FindAllString(all, -1)) - defs
-		refs += len(regexp.MustCompile(`\b`+name+`\b`).FindAllString(all, -1)) - defs
-		if refs <= 0 {
-			t.Errorf("孤儿函数(零调用点): %s — 实现完整但未接线, 设开关也不生效", name)
-		}
-	}
+	refs := prodSymbolRefs(t)
+	assertNoOrphanFuncs(t, refs, "nosword_expr.go", nil)
 }
 
 // TestNSWExprSystemPromptSwitch 缓存前缀守卫: 开关关时 system 必须与改动前逐字节相同。

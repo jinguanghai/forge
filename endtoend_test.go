@@ -31,7 +31,7 @@ func TestEndToEndUpgradeFlow(t *testing.T) {
 		t.Fatalf("审计应标记 done, got %+v", a)
 	}
 	// ④ 事件日志应含 self_restart
-	evs := lastEvents(0)
+	evs := readEventsForTest(0)
 	found := false
 	for _, e := range evs {
 		if e.Type == EvSelfRestart {

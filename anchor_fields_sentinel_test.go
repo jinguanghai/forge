@@ -74,8 +74,10 @@ func TestAnchorSentinel_UnknownFieldIsAnchor(t *testing.T) {
 	}
 }
 
-// 三处消费方共用同一份清单: 每个动态字段都必须被 buildMemoryTailText
-// 与 stripDynamicMemory 同时剔除 (防清单再次分叉)。
+// 消费方共用同一份清单: 每个动态字段都必须被 buildMemoryTailText 剔除
+// (防清单与实际剔除行为分叉)。
+// 20260925: 原第二实现 stripDynamicMemory 生产零调用(死代码), 已删 ——
+// 它在时本测试看似"双实现交叉验证", 实为给死代码背书。
 func TestAnchorSentinel_AllConsumersDropAllDynamicFields(t *testing.T) {
 	dir := t.TempDir()
 	m := map[string]interface{}{"identity": "哨兵", "lessons": "教训"}
@@ -92,24 +94,16 @@ func TestAnchorSentinel_AllConsumersDropAllDynamicFields(t *testing.T) {
 	if tail == "" {
 		t.Fatal("buildMemoryTailText 返回空")
 	}
-	// ② stripDynamicMemory (走字节)
-	stripped := string(stripDynamicMemory(raw))
 
 	for _, f := range dynamicMemoryFields {
 		if hasKey(tail, f) {
 			t.Errorf("buildMemoryTailText 未剔除动态字段 %q", f)
-		}
-		if hasKey(stripped, f) {
-			t.Errorf("stripDynamicMemory 未剔除动态字段 %q", f)
 		}
 	}
 	// 锚点字段必须保留 (剔除过度 = 记忆丢失)
 	for _, k := range []string{"identity", "lessons"} {
 		if !hasKey(tail, k) {
 			t.Errorf("buildMemoryTailText 误删锚点字段 %q", k)
-		}
-		if !hasKey(stripped, k) {
-			t.Errorf("stripDynamicMemory 误删锚点字段 %q", k)
 		}
 	}
 }

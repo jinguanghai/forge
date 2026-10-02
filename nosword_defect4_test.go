@@ -49,7 +49,7 @@ func TestNSWDefect4a_RatioStatementNotEvaluated(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("比例陈述不应求值, 实际得到 %d 个锚点: %+v", len(got), got)
 	}
-	if fb := nswFeedbackText(asst); fb != "" {
+	if fb := nswFeedbackTextForTest(asst); fb != "" {
 		t.Errorf("比例陈述不应注入反馈, 实际: %q", fb)
 	}
 }

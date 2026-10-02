@@ -17,6 +17,60 @@ import (
 // currentGates 当前 gate 清单 —— 引用唯一源 铸剑炉_GATES, 不再保留副本。
 var currentGates = 铸剑炉_GATES
 
+// pluginUnpublishedGates 有意不进入公开发布包的 gate (插件版 forge-gates)。
+//
+// sh 已于 20261001 退役 (实测失败率 48.2%), 不在 currentGates 中, 故本清单也不再列它。
+//
+// 显式声明的作用: ⑤ 从"永远报警"变成"可判定" —— 报警只对"本该发布却漏了"的
+// gate 响, 有意不发布的在这里留档, 理由逐条可审计。
+//
+//	media    : 依赖 MiniMax 私有 API 密钥与账号, 第三方无密钥不可用
+//	tcm      : 私有中医域 (家传理论/药对数据不入公开仓库)
+//	browser  : 依赖 playwright, 发布环境通常未装 → 发布也不可用
+//	self     : 自改源码 gate, 公开有风险
+//	relation : Python 实现依赖本地源码扫描, 发布需移植为 JS (待定)
+var pluginUnpublishedGates = []string{"tcm", "browser", "self", "relation", "media"}
+
+// hasGateToken 检查 data 中是否出现"独立的" gate 名 (词边界判定)。
+//
+// 不用裸子串: 短名(如 sh)会被 push/shell/finish 之类无关词假命中 →
+// 该面等于永远不报警。发布包 index.js 的写法是 gate: 'x', fixture 用裸名列表,
+// 词边界判定对两种写法都成立。
+func hasGateToken(data, name string) bool {
+	for i := 0; ; {
+		j := strings.Index(data[i:], name)
+		if j < 0 {
+			return false
+		}
+		j += i
+		var l, r byte = ' ', ' '
+		if j > 0 {
+			l = data[j-1]
+		}
+		if j+len(name) < len(data) {
+			r = data[j+len(name)]
+		}
+		if !isWordByte(l) && !isWordByte(r) {
+			return true
+		}
+		i = j + len(name)
+	}
+}
+
+func isWordByte(b byte) bool {
+	return b == '_' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// isPluginUnpublished 判定该 gate 是否"有意不发布"。
+func isPluginUnpublished(name string) bool {
+	for _, g := range pluginUnpublishedGates {
+		if g == name {
+			return true
+		}
+	}
+	return false
+}
+
 // gateSyncCheck 检查五处一致性, 返回差异清单 (只读)。
 //
 //	① 代码: currentGates (本函数定义处即代码列表)
@@ -45,7 +99,7 @@ func gateSyncCheck(workDir string, pluginReleaseDir string) string {
 			}
 		}
 		if !containsIssue(issues, "memory.json.gates") {
-			okLines = append(okLines, "③ 记忆 gates 字段: 12 面齐全 ✓")
+			okLines = append(okLines, fmt.Sprintf("③ 记忆 gates 字段: %d 面齐全 ✓", len(currentGates)))
 		}
 	}
 
@@ -71,13 +125,20 @@ func gateSyncCheck(workDir string, pluginReleaseDir string) string {
 	pluginIndex := filepath.Join(pluginReleaseDir, "dsh-forge-plugins", "plugins", "forge-gates", "index.js")
 	if data, err := os.ReadFile(pluginIndex); err == nil {
 		var missing []string
+		shouldPublish := 0
 		for _, c := range currentGates {
-			if !strings.Contains(string(data), c) {
+			if isPluginUnpublished(c) {
+				continue
+			}
+			shouldPublish++
+			if !hasGateToken(string(data), c) {
 				missing = append(missing, c)
 			}
 		}
 		if len(missing) == 0 {
-			okLines = append(okLines, "⑤ 发布包 forge-gates/index.js 含全部 gate ✓")
+			okLines = append(okLines, fmt.Sprintf(
+				"⑤ 发布包 forge-gates/index.js: 应发布 %d 面齐全 ✓ (有意不发布 %d 面: %s)",
+				shouldPublish, len(pluginUnpublishedGates), strings.Join(pluginUnpublishedGates, ",")))
 		} else {
 			issues = append(issues, fmt.Sprintf("⑤ 发布包缺 gate 名: %s", strings.Join(missing, ",")))
 		}
@@ -85,7 +146,7 @@ func gateSyncCheck(workDir string, pluginReleaseDir string) string {
 		issues = append(issues, "⑤ 发布包 forge-gates/index.js 不可读 (插件版未同步)")
 	}
 
-	okLines = append(okLines, "①② 代码列表 (currentGates): 12 面 ✓")
+	okLines = append(okLines, fmt.Sprintf("①② 代码列表 (currentGates): %d 面 ✓", len(currentGates)))
 
 	var sb strings.Builder
 	sb.WriteString("🔗 gate 五处同步检查\n")

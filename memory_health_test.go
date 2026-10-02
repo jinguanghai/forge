@@ -3,6 +3,7 @@ package main
 // memory_health_test.go — 六期 DMAIC I3: 记忆体检测试
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,7 +40,10 @@ func TestMemHealthReportCorrupt(t *testing.T) {
 
 func TestMemHealthReportHealthy(t *testing.T) {
 	wd := t.TempDir()
-	os.WriteFile(filepath.Join(wd, "memory.json"), []byte(`{"identity":"id","role":"role","language":"zh","working_dir":"wd","gates":"python/go/sh/node/math/logic/regex/knowledge/tcm/browser/chain/self","axioms":"公理","self_governance":{}}`), 0644)
+	// gates 由 铸剑炉_GATES 动态生成 —— 手写清单必腐化 (加 gate 即失效)
+	body := fmt.Sprintf(`{"identity":"id","role":"role","language":"zh","working_dir":"wd","gates":%q,"axioms":"公理","self_governance":{}}`,
+		strings.Join(铸剑炉_GATES, "/"))
+	os.WriteFile(filepath.Join(wd, "memory.json"), []byte(body), 0644)
 	r := memHealthReport(wd)
 	if strings.Contains(r, "🔴") || strings.Contains(r, "🟡") {
 		t.Fatalf("健康记忆不应报异常: %s", r)

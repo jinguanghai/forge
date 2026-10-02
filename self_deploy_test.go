@@ -299,3 +299,11 @@ func TestSelfGateE2E_SandboxDeploy(t *testing.T) {
 	}
 	t.Logf("端到端通过: %s", strings.Split(res.Stdout, "\n")[1])
 }
+
+// ─── self gate 子过程 (清 F3 重构抽出的独立单元) ──────────────────
+//
+// 这些函数原先内联在 selfHostedSelf(243 行) 里, 只能靠 TestSelfGateE2E
+// (需 FORGE_SELF_E2E=1 + 真 go build 约 20s) 间接覆盖。抽出后失败路径可确定性单测 ——
+// 尤其"失败时不得改动源码"这条红线, 此前无任何用例钉住。
+
+// TestSelfGateErr_Shape 失败结果形状统一: compile 阶段 / ExitCode -1 / 带耗时。

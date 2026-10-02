@@ -66,7 +66,7 @@ func TestGateDisabledBlock(t *testing.T) {
 func TestSystemPromptDynamicGates(t *testing.T) {
 	// 稳定段守卫: 动态段追加在 systemPrompt 之后, 前缀不变 (空目录避免 memory 注入稀释)
 	wd := t.TempDir()
-	s := buildSystemPrompt(wd, nil)
+	s := buildSystemPromptStable(wd, nil)
 	if !strings.HasPrefix(s, systemPrompt) {
 		t.Fatal("稳定段 systemPrompt 必须在前缀 (前缀缓存守卫)")
 	}
@@ -78,7 +78,7 @@ func TestSystemPromptDynamicGates(t *testing.T) {
 		t.Fatal("全启用应含 tcm 规则")
 	}
 	// 禁用 tcm: 不含
-	s2 := buildSystemPrompt(wd, []string{"math", "logic"})
+	s2 := buildSystemPromptStable(wd, []string{"math", "logic"})
 	if strings.Contains(s2, "中医药") {
 		t.Fatal("禁用 tcm 后 prompt 不应含其规则")
 	}
@@ -96,8 +96,8 @@ func TestSystemPromptDynamicGates(t *testing.T) {
 // TestTrimmedGateRegistry 验收: gate 注册表 8 个, 不含已删 gate
 func TestTrimmedGateRegistry(t *testing.T) {
 	names := gateNames()
-	if len(names) != 8 {
-		t.Fatalf("gate 注册表应为 8 个, got %d: %v", len(names), names)
+	if len(names) != 10 {
+		t.Fatalf("gate 注册表应为 10 个, got %d: %v", len(names), names)
 	}
 	for _, gone := range []string{"eprover", "repair", "system"} {
 		for _, n := range names {
@@ -109,26 +109,26 @@ func TestTrimmedGateRegistry(t *testing.T) {
 	// describeGates 输出 8 条 (立项书验收标准 3)
 	all := describeGates(nil)
 	lines := strings.Count(all, "   - ")
-	if lines != 8 {
-		t.Fatalf("describeGates 应为 8 条, got %d", lines)
+	if lines != 10 {
+		t.Fatalf("describeGates 应为 10 条, got %d", lines)
 	}
 	if strings.Contains(all, "eprover") || strings.Contains(all, "repair") || strings.Contains(all, "system_gate") {
 		t.Fatalf("describeGates 含已删 gate: %s", all)
 	}
 }
 
-// TestTrimmedCompilers 验收: COMPILERS 12 个, 不含已删 6 个
+// TestTrimmedCompilers 验收: COMPILERS 13 个 (sh 退役后), 不含已删 7 个
 func TestTrimmedCompilers(t *testing.T) {
-	if len(铸剑炉_COMPILERS) != 12 {
-		t.Fatalf("COMPILERS 应为 12 个, got %d", len(铸剑炉_COMPILERS))
+	if len(铸剑炉_COMPILERS) != 13 {
+		t.Fatalf("COMPILERS 应为 13 个 (sh 已于 20261001 退役), got %d", len(铸剑炉_COMPILERS))
 	}
 	for _, gone := range []string{"deno", "rust", "tcc", "system", "repair", "eprover"} {
 		if _, ok := 铸剑炉_COMPILERS[gone]; ok {
 			t.Fatalf("已裁剪 %s 仍在 COMPILERS", gone)
 		}
 	}
-	// 保留 12 个核心面
-	for _, keep := range []string{"python", "go", "sh", "node", "math", "logic", "regex", "knowledge", "tcm", "browser", "chain", "self"} {
+	// 保留 13 个核心面 (sh 已于 20261001 退役)
+	for _, keep := range []string{"python", "go", "node", "math", "logic", "regex", "knowledge", "tcm", "browser", "chain", "self", "relation", "media"} {
 		if _, ok := 铸剑炉_COMPILERS[keep]; !ok {
 			t.Fatalf("应保留的 %s 不在 COMPILERS", keep)
 		}

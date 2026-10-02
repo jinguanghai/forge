@@ -28,76 +28,91 @@ import (
 
 // auditCallSite 一个 appendAuditLine 调用点的摘要。
 type auditCallSite struct {
+	file  string
 	line  int
 	event string
 	hasTS bool
 }
 
-// scanAuditCallSites 用 AST 解析 srcFile, 返回全部 appendAuditLine 调用点。
+// scanAuditCallSites 用 AST 解析全包生产 .go 文件, 返回全部 appendAuditLine 调用点。
 // 用 AST 而非文本匹配: 文本匹配分不清"注释里提到 ts"与"真的写了 ts 键"。
-func scanAuditCallSites(t *testing.T, srcFile string) []auditCallSite {
+//
+// 扫描范围是包级而非单文件: 埋点会随重构换文件 (agent.go → agent_audit.go)。
+// 写死文件名会让哨兵在搬家后"扫不到任何调用点", 报的是"扫描逻辑失效"——
+// 症状指向哨兵自己, 而真正要守的"埋点必须带 ts"反而静默失守。
+func scanAuditCallSites(t *testing.T) []auditCallSite {
 	t.Helper()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, srcFile, nil, 0)
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("解析 %s 失败: %v", srcFile, err)
+		t.Fatalf("readdir: %v", err)
 	}
 	var out []auditCallSite
-	ast.Inspect(f, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
 		}
-		id, ok := call.Fun.(*ast.Ident)
-		if !ok || id.Name != "appendAuditLine" || len(call.Args) < 2 {
-			return true
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("解析 %s 失败: %v", name, err)
 		}
-		lit, ok := call.Args[1].(*ast.CompositeLit)
-		if !ok {
-			return true
-		}
-		site := auditCallSite{line: fset.Position(call.Pos()).Line, event: "?"}
-		for _, e := range lit.Elts {
-			kv, ok := e.(*ast.KeyValueExpr)
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
 			if !ok {
-				continue
+				return true
 			}
-			key, ok := kv.Key.(*ast.BasicLit)
-			if !ok || key.Kind != token.STRING {
-				continue
+			id, ok := call.Fun.(*ast.Ident)
+			if !ok || id.Name != "appendAuditLine" || len(call.Args) < 2 {
+				return true
 			}
-			k, _ := strconv.Unquote(key.Value)
-			switch k {
-			case "ts":
-				site.hasTS = true
-			case "event":
-				if v, ok := kv.Value.(*ast.BasicLit); ok && v.Kind == token.STRING {
-					site.event, _ = strconv.Unquote(v.Value)
+			lit, ok := call.Args[1].(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			site := auditCallSite{file: name, line: fset.Position(call.Pos()).Line, event: "?"}
+			for _, el := range lit.Elts {
+				kv, ok := el.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				key, ok := kv.Key.(*ast.BasicLit)
+				if !ok || key.Kind != token.STRING {
+					continue
+				}
+				k, _ := strconv.Unquote(key.Value)
+				switch k {
+				case "ts":
+					site.hasTS = true
+				case "event":
+					if v, ok := kv.Value.(*ast.BasicLit); ok && v.Kind == token.STRING {
+						site.event, _ = strconv.Unquote(v.Value)
+					}
 				}
 			}
-		}
-		out = append(out, site)
-		return true
-	})
+			out = append(out, site)
+			return true
+		})
+	}
 	return out
 }
 
-// TestAuditCallSitesHaveTS 静态判定: agent.go 每个埋点都必须带 ts。
+// TestAuditCallSitesHaveTS 静态判定: 全包每个埋点都必须带 ts。
 func TestAuditCallSitesHaveTS(t *testing.T) {
-	sites := scanAuditCallSites(t, "agent.go")
+	sites := scanAuditCallSites(t)
 	if len(sites) == 0 {
 		t.Fatal("未扫描到任何 appendAuditLine 调用点 — 扫描逻辑失效")
 	}
 	var bad []string
 	for _, s := range sites {
 		if !s.hasTS {
-			bad = append(bad, fmt.Sprintf("%s(agent.go:%d)", s.event, s.line))
+			bad = append(bad, fmt.Sprintf("%s(%s:%d)", s.event, s.file, s.line))
 		}
 	}
 	if len(bad) > 0 {
 		t.Errorf("埋点缺 ts 字段 %d/%d: %v", len(bad), len(sites), bad)
 	}
-	t.Logf("agent.go 共 %d 个 appendAuditLine 调用点, 全部含 ts", len(sites))
+	t.Logf("全包共 %d 个 appendAuditLine 调用点, 全部含 ts", len(sites))
 }
 
 // TestAuditTSRoundTrip 端到端: ts 真的落盘, 且是合法 RFC3339Nano。

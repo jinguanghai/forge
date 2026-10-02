@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -45,22 +46,6 @@ func TestDisplayWidth(t *testing.T) {
 		if got := displayWidth(c.in); got != c.want {
 			t.Errorf("displayWidth(%q) = %d, want %d", c.in, got, c.want)
 		}
-	}
-}
-
-// ---- padRight ----
-func TestPadRight(t *testing.T) {
-	if got := padRight("abc", 5); got != "abc  " {
-		t.Errorf("padRight(abc,5) = %q", got)
-	}
-	if got := padRight("中文", 5); got != "中文 " {
-		t.Errorf("padRight(中文,5) = %q", got)
-	}
-	if got := padRight("abcdef", 5); got != "abcdef" {
-		t.Errorf("padRight(abcdef,5) = %q, want unchanged", got)
-	}
-	if got := padRight("", 3); got != "   " {
-		t.Errorf("padRight(empty,3) = %q", got)
 	}
 }
 
@@ -362,7 +347,8 @@ func TestHandleCommand_Tools(t *testing.T) {
 	out := captureStdout(t, func() {
 		handleCommand("/tools", agent, cfg, hist, &sr)
 	})
-	if !strings.Contains(out, "12 gates") || !strings.Contains(out, "python") {
+	// 面数动态断言: 硬编码 "12 gates" 会在 gate 增减时静默过期 (旧版即如此)。
+	if !strings.Contains(out, strconv.Itoa(len(gateDisplayNames))+" gates") || !strings.Contains(out, "python") {
 		t.Fatalf("tools output = %q", out[:min(300, len(out))])
 	}
 	if !strings.Contains(out, "tcm") || !strings.Contains(out, "browser") {

@@ -53,12 +53,12 @@ func TestNSWDefectL_ColumnGap(t *testing.T) {
 		{"3.14 * 2^2", "【求值】「3.14 * 2^2 = 12.56」"},
 	}
 	for _, c := range cases {
-		got := nswFeedbackText(c.in)
+		got := nswFeedbackTextForTest(c.in)
 		if got != c.want {
-			t.Errorf("nswFeedbackText(%q)\n  got  %q\n  want %q", c.in, got, c.want)
+			t.Errorf("nswFeedbackTextForTest(%q)\n  got  %q\n  want %q", c.in, got, c.want)
 		}
 	}
-	if got := nswFeedbackText("2  +  3"); got != "" {
+	if got := nswFeedbackTextForTest("2  +  3"); got != "" {
 		t.Errorf("双空格算式应漏算, got %q", got)
 	}
 	// 既有取舍不得被本次改动破坏: 整数区间 / 裸带号常量仍全拒

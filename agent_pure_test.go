@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -19,13 +18,6 @@ func TestAbortUnknownTools(t *testing.T) {
 	}
 	if abort, _ := abortUnknownTools(0, 0); !abort {
 		t.Error("0/0 应中止")
-	}
-}
-
-func TestParseErrMessage(t *testing.T) {
-	msg := parseErrMessage(errors.New("bad json"))
-	if !strings.Contains(msg, "bad json") || !strings.Contains(msg, "action") {
-		t.Errorf("消息应含错误与参数说明: %q", msg)
 	}
 }
 
@@ -82,25 +74,6 @@ func TestRepeatReminderSummaryTruncation(t *testing.T) {
 	ib := strings.Index(b, "相同代码")
 	if a[ia:] != b[ib:] {
 		t.Errorf("语义等价代码摘要应一致:\n%s\nvs\n%s", a[ia:], b[ib:])
-	}
-}
-
-func TestTruncateDetail(t *testing.T) {
-	if got := truncateDetail("short", 10); got != "short" {
-		t.Errorf("短串不应截断: %q", got)
-	}
-	if got := truncateDetail("123456789012", 10); got != "1234567890..." {
-		t.Errorf("长串截断错误: %q", got)
-	}
-	if got := truncateDetail("1234567890", 10); got != "1234567890" {
-		t.Errorf("边界不应截断: %q", got)
-	}
-}
-
-func TestConsecutiveFailMessage(t *testing.T) {
-	msg := consecutiveFailMessage(4)
-	if !strings.Contains(msg, "4") {
-		t.Errorf("应含失败次数: %q", msg)
 	}
 }
 
@@ -175,12 +148,23 @@ func TestClassifyTransient(t *testing.T) {
 	if classifyTransient(r) {
 		t.Error("exit status 不应判为瞬态")
 	}
-	// 超时/工具缺失是环境瞬态
-	if !classifyTransient(&ForgeGateResult{OK: false, Stage: "execute", Error: "execution timeout after 15s"}) {
-		t.Error("timeout 应判为瞬态")
+	// 环境瞬态改为类型化判定(20260927): 只看 Timeout / EnvFailure 字段。
+	if !classifyTransient(&ForgeGateResult{OK: false, Stage: "execute", Timeout: true}) {
+		t.Error("Timeout 字段应判为瞬态")
 	}
-	if !classifyTransient(&ForgeGateResult{OK: false, Stage: "execute", Error: "exec: python not found"}) {
-		t.Error("tool not found 应判为瞬态")
+	if !classifyTransient(&ForgeGateResult{OK: false, Stage: "compile", EnvFailure: true}) {
+		t.Error("EnvFailure 字段应判为瞬态")
+	}
+	// 反例钉住: 仅错误文本含关键词、字段未打标 → 不得判瞬态(文本不是类型)。
+	// 旧实现嗅探 "timeout"/"not found", 用户代码自己打印这些词即被误判免责。
+	for _, txt := range []string{"execution timeout after 15s", "exec: python not found"} {
+		if classifyTransient(&ForgeGateResult{OK: false, Stage: "execute", Error: txt}) {
+			t.Errorf("仅文本 %q 不得判瞬态", txt)
+		}
+	}
+	// 真实超时: 文本是 "context deadline exceeded"(不含 "timeout" 子串), 旧实现漏判
+	if !classifyTransient(&ForgeGateResult{OK: false, Stage: "execute", Error: "python execution failed: context deadline exceeded", Timeout: true}) {
+		t.Error("真实超时应判为瞬态")
 	}
 	// 编译错误是真实代码 bug, 非瞬态
 	if classifyTransient(&ForgeGateResult{OK: false, Stage: "compile", Error: "undefined: foo"}) {

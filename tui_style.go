@@ -157,6 +157,11 @@ func buildBanner(cfg *Config) []string {
 	if nswExprEnabled() {
 		info = append(info, " "+dim("表达")+"  "+bold("已启用")+"   "+dim("{{算式}} 标记求值"))
 	}
+	// 委托状态位: FORGE_DELEGATE 开启时显示。与无剑位同理 —— 开关类功能若完全静默,
+	// 主人无法判断是否生效 (无剑模式踩过这个坑: 三种取值下横幅逐字节相同)。
+	if mode := approvalDelegateMode(); mode != "" {
+		info = append(info, " "+dim("委 托")+"  "+bold("已启用("+approvalDelegateLabel(mode)+")")+"   "+dim("危险操作自动放行+留痕"))
+	}
 	// 质量告警位: forge_watchdog 超死阈值时在此现形 (此前告警只落文件, 无人知)。
 	// 与无剑位同理: 只走 stdout, 不进 ChatMessage, 不影响请求前缀缓存。
 	if line := qualityAlertBannerLine(cfg.WorkDir); line != "" {
@@ -183,7 +188,10 @@ func cacheSparkline(n int) string {
 	if n <= 0 {
 		n = 20
 	}
-	blocks := "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
+	// []rune 而非 string: 必须按【字符】索引。
+	// 若写成 string, blocks[idx] 取到的是 UTF-8 字节(▁ = E2 96 81),
+	// rune(byte) 得到 U+00E2 / U+0096 这类字符 → 火花线显示为乱码。
+	blocks := []rune("\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588")
 	type rec struct{ hit, miss int }
 	var rows []rec
 	cacheStatMu.Lock()
@@ -219,7 +227,7 @@ func cacheSparkline(n int) string {
 				idx = 0
 			}
 		}
-		sb.WriteRune(rune(blocks[idx]))
+		sb.WriteRune(blocks[idx])
 	}
 	return sb.String()
 }
@@ -271,7 +279,7 @@ func tuiThemeLoad() string {
 // tuiThemeSave 将当前主题名持久化到 .forge/theme。
 func tuiThemeSave() {
 	_ = os.MkdirAll(".forge", 0755)
-	_ = os.WriteFile(filepath.Join(".forge", "theme"), []byte(tuiThemeName), 0644)
+	_ = atomicWrite(filepath.Join(".forge", "theme"), []byte(tuiThemeName))
 }
 
 // setTheme 切换主题, 返回是否成功。

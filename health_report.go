@@ -22,10 +22,9 @@ import (
 )
 
 const (
-	healthThreshold  = 3               // 同模块失败 ≥3 次才算"问题"
-	healthMaxBytes   = 5 * 1024 * 1024 // events.jsonl 超 5MB 轮转
-	healthMaxLines   = 50000           // 或超 5 万行轮转
-	healthTimeWindow = 24 * time.Hour  // 启动报告只看最近 24h
+	healthThreshold = 3               // 同模块失败 ≥3 次才算"问题"
+	healthMaxBytes  = 5 * 1024 * 1024 // events.jsonl 超 5MB 轮转
+	healthMaxLines  = 50000           // 或超 5 万行轮转
 )
 
 // HealthIssue 一个问题: 同模块失败聚合
@@ -40,13 +39,13 @@ type HealthIssue struct {
 
 // scanHealthEvents 解析 events.jsonl 中 fromLine(1-based, 0=全部) 之后的事件。
 // 返回: 按模块聚合的问题表 + 文件总行数。永不 panic。
-func scanHealthEvents(path string, fromLine int, since time.Time) (map[string]*HealthIssue, int) {
+// 不做时间窗过滤: 水位线增量扫描已保证只报新问题, 叠加时间窗只会漏报。
+func scanHealthEvents(path string, fromLine int) (map[string]*HealthIssue, int) {
 	issues := make(map[string]*HealthIssue)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return issues, 0 // 文件不存在/读失败 → 空, 不阻塞
 	}
-	cutoff := since.Format(time.RFC3339)
 	lines := strings.Split(string(data), "\n")
 	total := 0
 	lastFixLine := 0
@@ -62,10 +61,6 @@ func scanHealthEvents(path string, fromLine int, since time.Time) (map[string]*H
 		var ev Event
 		if json.Unmarshal([]byte(line), &ev) != nil {
 			continue // 坏行(写一半)跳过, 不崩溃
-		}
-		// 时间窗过滤: 早于 cutoff 的失败不计 (仅当 since 非零值)
-		if !since.IsZero() && ev.Ts < cutoff {
-			continue
 		}
 		switch ev.Type {
 		case EvSelfModified, EvSelfRestart:
@@ -174,7 +169,7 @@ func printHealthReport(workDir string) {
 	}
 	path := filepath.Join(workDir, ".forge", "events.jsonl")
 	last := readWatermark(workDir)
-	issues, total := scanHealthEvents(path, last, time.Time{})
+	issues, total := scanHealthEvents(path, last)
 	if report := buildHealthReport(issues, healthThreshold); report != "" {
 		fmt.Fprintf(os.Stderr, "%s 躯壳自检: %s — 建议检修\n", color(ansi.yellow, "⚙"), report)
 	}
@@ -190,7 +185,7 @@ func maybePrintHealthHint(workDir string) {
 	}
 	path := filepath.Join(workDir, ".forge", "events.jsonl")
 	last := readWatermark(workDir)
-	issues, total := scanHealthEvents(path, last, time.Time{})
+	issues, total := scanHealthEvents(path, last)
 	if report := buildHealthReport(issues, healthThreshold); report != "" {
 		fmt.Fprintf(os.Stderr, "%s 自检: %s — 建议检修\n", color(ansi.yellow, "⚙"), report)
 	}

@@ -98,10 +98,15 @@ func TestOverlapsAny(t *testing.T) {
 
 func TestGetTermWidth(t *testing.T) {
 	w := getTermWidth()
-	if w <= 0 {
-		t.Fatalf("终端宽度应为正数, 实际 %d", w)
+	// 0 = 不可用 (stdout 非控制台/管道, 或非 Windows 平台), 是设计语义而非异常:
+	// 全部调用点都对 0/过小值做了兜底 (readLine 80 / banner 60 / 结算卡 40 / 推理行 72)。
+	// 20260920 修好控制台符号后本用例在管道环境首次拿到 0 —— 旧断言"必须为正数"
+	// 依赖的恰是缺陷态 (符号解析失败 → 恒返回 80), 属错误假设, 已按设计语义更正。
+	if w == 0 {
+		t.Log("终端宽度不可用 (stdout 非控制台), 返回 0 属设计语义")
+		return
 	}
-	if w > 1000 {
-		t.Fatalf("终端宽度异常偏大: %d", w)
+	if w < 20 || w > 1000 {
+		t.Fatalf("终端宽度超出合理区间 [20,1000]: %d", w)
 	}
 }

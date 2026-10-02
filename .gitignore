@@ -268,3 +268,16 @@ cache_stats*.jsonl
 #       取证全文逐次追加且体积大, 属运行时数据非源码。只忽略入库, 绝不删除内容。
 .forge/approvals/
 .forge/backups/
+
+# --- 20261002 web 网关定性: 源码可入库, 私钥与凭据必须排除 ---
+# 动因: web/.tls/key.pem 是 TLS 私钥、web/*/.auth 是访问凭据, 一旦 git add -A
+# 就会写进历史(本地 remote 也照样留档)。*.exe 已由上方规则覆盖。
+web/.auth
+web/**/.auth
+web/**/.tls/
+
+# --- 20261002 web 网关前端页面属源码: 从 *.html 通配(防草稿页)中豁免 ---
+# 动因: 网关的 index.html/login.html 是运行必需资产, 被通配规则排除后
+# 仓库里只剩 go 源码, 无法还原可用网关(实跑 dry-run 发现仅 13/23 文件会入库)。
+!web/static/*.html
+!web/gateway/static/*.html

@@ -66,29 +66,30 @@ func nswExprEvalMark(inner string) (string, bool) {
 	return nswEvalExplicit(expr)
 }
 
-// nswFenceToggle 统计 s 中 ``` 的出现次数, 奇数次翻转代码围栏状态。
-func nswFenceToggle(in bool, s string) bool {
-	if strings.Count(s, "```")%2 == 1 {
+// nswFenceFlip 每 3 个连续反引号翻转一次围栏状态 (与旧 Count 语义一致)。
+func nswFenceFlip(in bool, run int) bool {
+	if (run/3)%2 == 1 {
 		return !in
 	}
 	return in
 }
 
-// nswExprRenderFrom 从给定围栏状态开始替换 text 中的标记。
-// 返回 (渲染文本, 新围栏状态, 求值失败的标记列表)。
+// nswExprRenderFrom 从给定围栏状态开始替换 text 中的标记, 并就地推进该状态。
+// 返回 (渲染文本, 求值失败的标记列表)。
 // 围栏内的标记原样保留 (代码块里的 {{}} 是模板语法, 不是算式);
 // 求值失败的标记也原样保留 —— 不静默吞掉, 让模型与用户都看得见。
-func nswExprRenderFrom(text string, inFence bool) (string, bool, []string) {
+func nswExprRenderFrom(text string, st *nswFenceState) (string, []string) {
 	var sb strings.Builder
 	var bad []string
 	last := 0
 	for _, m := range nswExprMarkRe.FindAllStringSubmatchIndex(text, -1) {
 		seg := text[last:m[0]]
 		sb.WriteString(seg)
-		inFence = nswFenceToggle(inFence, seg)
+		st.feed(seg)
+		st.settle() // 标记以 '{' 开头, 打断反引号串
 		last = m[1]
 		raw := text[m[0]:m[1]]
-		if inFence {
+		if st.in {
 			sb.WriteString(raw)
 			continue
 		}
@@ -99,14 +100,15 @@ func nswExprRenderFrom(text string, inFence bool) (string, bool, []string) {
 		bad = append(bad, strings.TrimSpace(text[m[2]:m[3]]))
 		sb.WriteString(raw)
 	}
-	sb.WriteString(text[last:])
-	return sb.String(), inFence, bad
+	tail := text[last:]
+	sb.WriteString(tail)
+	st.feed(tail) // 旧实现漏了尾巴: 返回的围栏状态漏掉最后一段
+	return sb.String(), bad
 }
 
 // nswExprRender 一次性替换 text 中的全部标记 (非流式入口 / 拒绝权扫描)。
 func nswExprRender(text string) (string, []string) {
-	out, _, bad := nswExprRenderFrom(text, false)
-	return out, bad
+	return nswExprRenderFrom(text, &nswFenceState{})
 }
 
 // nswExprPendingTail 返回必须留在缓冲区中的尾部字节数。
@@ -129,7 +131,7 @@ func nswExprPendingTail(s string) int {
 // 未闭合的尾部必须暂存到闭合后再替换。
 type nswExprFilter struct {
 	buf   strings.Builder
-	fence bool
+	fence nswFenceState
 	marks int      // 已渲染的标记数 (审计)
 	saved int      // 显式口径救回的标记数 (审计, 三十三期)
 	bad   []string // 被拒绝的标记 (审计)
@@ -146,8 +148,7 @@ func (f *nswExprFilter) feed(chunk string) string {
 	if ready == "" {
 		return ""
 	}
-	out, nf, bad := nswExprRenderFrom(ready, f.fence)
-	f.fence = nf
+	out, bad := nswExprRenderFrom(ready, &f.fence)
 	f.bad = append(f.bad, bad...)
 	f.marks += len(nswExprMarkRe.FindAllString(ready, -1))
 	f.saved += nswExprCountSaved(ready)
@@ -161,8 +162,7 @@ func (f *nswExprFilter) flush() string {
 	if s == "" {
 		return ""
 	}
-	out, nf, bad := nswExprRenderFrom(s, f.fence)
-	f.fence = nf
+	out, bad := nswExprRenderFrom(s, &f.fence)
 	f.bad = append(f.bad, bad...)
 	f.marks += len(nswExprMarkRe.FindAllString(s, -1))
 	f.saved += nswExprCountSaved(s)

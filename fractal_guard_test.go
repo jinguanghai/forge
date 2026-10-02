@@ -32,8 +32,43 @@ const (
 	fractalMaxFuncLines    = 150
 	fractalComplexShapeLen = 6
 	fractalBaselinePath    = ".forge/fractal_baseline.json"
-	fractalDumpBegin       = "<<<FRACTAL_JSON_BEGIN>>>"
-	fractalDumpEnd         = "<<<FRACTAL_JSON_END>>>"
+	// fractalDebtCeiling 是豁免清单条数的历史最高水位 —— 只能改小, 不能改大。
+	//
+	// 缺口(20260927): 原守卫只拦「实际违规不在基线里」(added), 却不拦「基线被加条目」——
+	// 往清单里塞一条, 新增违规就静默洗白, 守卫从约束退化成台账。
+	// 改大这一行 = 一次显式决策(必须同时改测试), 而不是静默膨胀。
+	// 20260927 定案 37 条 → 同日清 F3(config.LoadConfig / forge.selfHostedSelf /
+	// main_interactive.runInteractive)后收紧至 33 条 → 补 main_interactive_test.go
+	// 消掉一条 F4 后收紧至 32 条: 水位必须跟随真实债务下降,
+	// 否则水位会变成"允许反弹的空间"。
+	// 同日拆解 agent.go (1028 行 → 157 行, shape 7 → 3) 后收紧至 30 条 ——
+	// 拆出的 agent_memory/history/trim/audit/stream_loop 五个文件此后永久受
+	// F1/F2/F4 约束 (再涨回 >500 行或 shape >6 立即失败), 这才是收缩的实质收益。
+	// 同日拆解 llm.go (1124 行 → 266 行, shape 20 → 5) 后收紧至 27 条 ——
+	// 拆出 llm_types/error/stream/sanitize 四个文件, 并补齐 5 个同名测试文件 (F4)。
+	// 20260927 F4 收尾: 15 条 F4(cache_stats/ctrlclose/gatesync/guard/main/
+	// main_commands/main_startup/main_utils/session_stats/stats/style/term/tool_ref/
+	// tui_style/ux) 全部补齐同名测试文件后收紧至 2 条 —— 只剩两条结构性不可解项:
+	//   F2|forge.go            (self gate 的 srcPath 写死该文件, 拆它等于拆自己的手术刀)
+	//   F2|readline_windows.go (需真拆分 + 显式 //go:build windows + VPS 侧 Linux 构建实测)
+	// 同日拆解 readline_windows.go (1056 行 → 375 行, shape 23 → 4) 后收紧至 1 条 ——
+	// 纯拆分 + 重排不新建顶层声明即不触碰 _windows 隐式 build constraint, 拆出的
+	// readline_editor_windows.go / readline_session_windows.go 各配同名 _windows_test.go,
+	// 此后永久受 F1/F2/F4 约束。仅剩唯一一条结构性不可解项:
+	//   F2|forge.go (self gate 的 srcPath 写死该文件, 拆它等于拆自己的手术刀)
+	// 同日拆解 forge.go (3224 行 → 371 行, shape 53 → 5) 后收紧至 0 条 ——
+	// 前置改造 locateSelfSource(按内容搜索全包)解除了"self gate 只能改 forge.go"
+	// 的硬绑定, 否则拆它就是拆自己的手术刀。拆出 11 个文件各配同名测试(F4)。
+	// 至此 F1/F2/F3/F4 四项债务全部清零, 豁免清单为空。
+	//
+	// 缺口(20260927): 上面这次"清零"只覆盖实现文件 —— fractalScan 对 *_test.go 直接
+	// continue, 测试文件从不进入 F1/F2/F3 检查, 于是 4 条测试文件违规长期隐形
+	// (F1|wiring_sentinel_test.go shape 8; F2|llm_http_test.go 988 / self_deploy_test.go 629 /
+	// cov_b3_branches_test.go 582), 而注释却宣称"四项债务全部清零"。
+	// 已去掉豁免并拆解这 4 个文件, 今后测试文件与实现文件同受 F1/F2/F3 约束。
+	fractalDebtCeiling = 2 // 20261002 加 cookguard (cookedBaseline/ensureCookedForApproval), 集中覆盖委托模式+控制台守护
+	fractalDumpBegin   = "<<<FRACTAL_JSON_BEGIN>>>"
+	fractalDumpEnd     = "<<<FRACTAL_JSON_END>>>"
 )
 
 type fractalViolation struct {
@@ -150,11 +185,13 @@ func fractalScan(dir string) ([]fractalViolation, int, error) {
 			continue
 		}
 		name := e.Name()
+		// 测试文件同样受 F1/F2/F3 约束 —— 此前这里直接 continue, 使 4 条测试文件违规
+		// 长期隐形, 而下方注释宣称"四项债务全部清零"(声称范围 ≠ 实际范围)。
 		if strings.HasSuffix(name, "_test.go") {
 			testBase[fractalBase(name)] = true
-			continue
+		} else {
+			implBase[fractalBase(name)] = true
 		}
-		implBase[fractalBase(name)] = true
 
 		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
 		if err != nil {
@@ -241,7 +278,21 @@ func TestFractalGuard(t *testing.T) {
 			t.Logf("     %s", v)
 		}
 	}
-	t.Logf("分形守卫: 实现文件 %d 个 | 基线允许 %d 条 | 实际违规 %d 条", nFiles, len(bl.Violations), len(vs))
+	// 债务水位: 基线条数不得突破历史最高水位。只靠 added 检测堵不住
+	// 「往基线里塞条目」这条洗白路径(塞进去后新违规就在 allowed 里了)。
+	if len(bl.Violations) > fractalDebtCeiling {
+		t.Errorf("❌ 豁免清单膨胀: %d 条 > 水位 %d —— 新增违规不得靠加基线洗白; "+
+			"确需提高水位必须同时改 fractalDebtCeiling(显式决策)",
+			len(bl.Violations), fractalDebtCeiling)
+	}
+	// FORGE_FRACTAL_DUMP=1: 输出当前全部违规的结构化清单, 供
+	// defense_system/fractal_check.py --shrink 重算基线(单向收缩)。
+	// 判定权仍在死程序(此处), 脚本只负责搬运与护栏。
+	if os.Getenv("FORGE_FRACTAL_DUMP") == "1" {
+		fractalDump(t, vs)
+	}
+	t.Logf("分形守卫: 扫描 .go 文件 %d 个(含测试) | 基线允许 %d 条 | 实际违规 %d 条 | 水位 %d",
+		nFiles, len(bl.Violations), len(vs), fractalDebtCeiling)
 }
 
 // TestFractalShapeRule 自检1: 指纹计算是否正确。

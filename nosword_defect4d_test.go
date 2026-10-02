@@ -30,7 +30,7 @@ func TestNSWDefect4d_InlineCodePhraseRejected(t *testing.T) {
 		if got := nswEvaluate(s); len(got) != 0 {
 			t.Errorf("行内代码跨度内不应求值: %q -> %+v", s, got)
 		}
-		if fb := nswFeedbackText(s); fb != "" {
+		if fb := nswFeedbackTextForTest(s); fb != "" {
 			t.Errorf("行内代码跨度内不应注入反馈: %q -> %q", s, fb)
 		}
 	}

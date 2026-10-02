@@ -1,8 +1,11 @@
-// 记忆召回引擎 v2.2 —— BM25 关键词检索 + 新鲜度三态（memory_recall.go）
+// 记忆召回引擎 v2.3 —— BM25 关键词检索 + 新鲜度三态 + 显式时间锚点（memory_recall.go）
 //
 // 借鉴 DeepSeek-Reasonix Context Engine:
 //   BM25 自动召回: key_findings 不再全量进 system, 按用户输入打分取 top-K
 //   新鲜度三态: fresh(<7天)/current(<30天)/stale(≥30天) 降权, 无硬截断（stale 权重 0.5）
+//   时间锚点 ts (20260926): 条目自带 "static"(永久事实) 或 20060102(具体事实);
+//   缺 ts 且正文无日期 → fail-closed 判 stale(降权), 不再静默 current ——
+//   原实现"无日期即 current"使 16/17 条永久免降权, 过时锚点(旧模型名/旧脚本路径)长期霸榜。
 //   低权威声明: 召回块自带宽泛免责前缀(可能过期/不得覆盖常驻指令)
 //   缓存守护: 动态内容只进用户轮次, system 保持纯锚点恒定 → DeepSeek 前缀缓存不破
 //
@@ -27,6 +30,7 @@ type KeyFinding struct {
 	Content  string   `json:"content"`
 	Keywords []string `json:"keywords,omitempty"`
 	Session  string   `json:"session,omitempty"` // 三期 I1: 归属会话; 空 = 全局经验
+	TS       string   `json:"ts,omitempty"`      // 时间锚点: "static" 或 20060102; 空 = fail-closed 降权
 }
 
 // loadKeyFindings 读取 memory.json 的 key_findings 段; 兼容 {title,content} 与纯字符串。
@@ -65,6 +69,7 @@ func loadKeyFindings(workDir string) ([]KeyFinding, error) {
 			Content  string   `json:"content"`
 			Keywords []string `json:"keywords,omitempty"`
 			Session  string   `json:"session,omitempty"`
+			TS       string   `json:"ts,omitempty"`
 		}
 		if err := json.Unmarshal(r, &d); err == nil && d.Content != "" {
 			if d.Title == "" {
@@ -75,7 +80,7 @@ func loadKeyFindings(workDir string) ([]KeyFinding, error) {
 					d.Title = d.Content
 				}
 			}
-			out = append(out, KeyFinding{Title: d.Title, Content: d.Content, Keywords: d.Keywords, Session: d.Session})
+			out = append(out, KeyFinding{Title: d.Title, Content: d.Content, Keywords: d.Keywords, Session: d.Session, TS: d.TS})
 		}
 	}
 	return out, nil
@@ -167,15 +172,28 @@ func bm25Score(docs [][]string, query []string, k1, b float64) []float64 {
 
 var datePat = regexp.MustCompile(`20\d{6}`)
 
-// freshnessOf 从文本提取最近日期(20YYMMDD)计算新鲜度三态; 无日期→current。
-func freshnessOf(s string) (state string, days int) {
-	m := datePat.FindString(s)
-	if m == "" {
+// freshnessOf 计算新鲜度三态。ts 是显式时间锚点(唯一真相源, 20260926):
+//
+//	"static"   → 永久事实(机制/原则/硬约束), 恒 current;
+//	"20060102" → 具体事实(模型名/路径/清单), 按日期算三态;
+//	""         → 回退到 text 内的 20YYMMDD(兼容旧数据); 仍无 → stale(fail-closed)。
+//
+// 原实现只看 text 且"无日期→current": 实测 17 条中 16 条永久免降权,
+// 过时锚点(旧模型名/旧脚本路径)因此长期霸榜 (20260926 审计)。
+func freshnessOf(ts, text string) (state string, days int) {
+	anchor := strings.TrimSpace(ts)
+	if anchor == "static" {
 		return "current", 0
 	}
-	t, err := time.Parse("20060102", m)
+	if anchor == "" {
+		anchor = datePat.FindString(text)
+	}
+	if anchor == "" {
+		return "stale", 0
+	}
+	t, err := time.Parse("20060102", anchor)
 	if err != nil {
-		return "current", 0
+		return "stale", 0
 	}
 	days = int(time.Since(t).Hours() / 24)
 	if days < 0 {
@@ -245,7 +263,7 @@ func RecallMemory(workDir, input string, topK int) (block string, hitCount int) 
 	}
 	items := make([]scored, 0, len(kfs))
 	for i := range kfs {
-		st, age := freshnessOf(kfs[i].Content)
+		st, age := freshnessOf(kfs[i].TS, kfs[i].Content)
 		items = append(items, scored{kfs[i], scores[i] * freshnessWeight(st), st, age})
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].s > items[j].s })
@@ -275,7 +293,11 @@ func RecallMemory(workDir, input string, topK int) (block string, hitCount int) 
 		}
 		stMark := "🟢" + it.st
 		if it.st == "stale" {
-			stMark = "🔴stale" + fmt.Sprintf("(%dd)", it.age)
+			if it.age > 0 {
+				stMark = fmt.Sprintf("🔴stale(%dd)", it.age)
+			} else {
+				stMark = "🔴stale(无时间锚点)"
+			}
 		}
 		sb.WriteString(fmt.Sprintf("• [%s] %s\n   %s\n", stMark, it.kf.Title, content))
 	}

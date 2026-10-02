@@ -179,19 +179,23 @@ func TestNSWExprExplicit_Wired(t *testing.T) {
 	if !strings.Contains(string(exprSrc), `"saved":`) {
 		t.Error("nswExprAudit 缺 saved 字段 —— 三十三期收益不可度量")
 	}
-	nswSrc, err := os.ReadFile("nosword.go")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// 函数存在性用 AST 口径: 文本断言 "func nswIsCandidate(s string) bool" 会被
+	// 注释或字符串满足, 且不校验归属文件。refs.funcs 来自 AST FuncDecl, 两者都管。
+	//
+	// 归属判据只到"无剑家族"粒度, 不绑死 nosword.go —— 拆分后 nswEval* 在
+	// nosword_eval.go、nswIsCandidate* 在 nosword_cand.go。绑死单文件会让每次
+	// 拆分都误报, 而它真正要防的是"函数被删"。
+	refs := prodSymbolRefs(t)
 	for _, need := range []string{
-		"func nswEval(expr string) (string, bool)",
-		"func nswEvalExplicit(expr string) (string, bool)",
-		"func nswEvalMode(expr string, explicit bool)",
-		"func nswIsCandidate(s string) bool",
-		"func nswIsCandidateMode(s string, explicit bool) bool",
+		"nswEval", "nswEvalExplicit", "nswEvalMode", "nswIsCandidate", "nswIsCandidateMode",
 	} {
-		if !strings.Contains(string(nswSrc), need) {
-			t.Errorf("nosword.go 缺 %q", need)
+		got := refs.funcs[need]
+		if got == "" {
+			t.Errorf("全包缺顶层函数 %s —— 函数被删", need)
+			continue
+		}
+		if !strings.HasPrefix(got, "nosword") {
+			t.Errorf("顶层函数 %s 归属 %q, 不在无剑家族文件内", need, got)
 		}
 	}
 	// 标记路径必须走显式口径 (行为断言, 不只查文本)

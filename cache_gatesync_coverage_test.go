@@ -246,3 +246,61 @@ func TestContainsIssue(t *testing.T) {
 		t.Fatal("空列表应返回 false")
 	}
 }
+
+// TestGateSyncCheck_ShortNameNotFalselyMatched 短名(如 sh)不得被无关词假命中。
+//
+// 20260925 实测: ⑤ 原用裸子串匹配, "sh" 被 push/shell/finish 之类词命中 →
+// sh 这一面永远不报警 (假通过)。改用词边界判定后两侧都要成立。
+func TestGateSyncCheck_ShortNameNotFalselyMatched(t *testing.T) {
+	for _, bad := range []string{"push shell finish", "slash", "hashed", "mathematics"} {
+		if hasGateToken(bad, "sh") && bad != "mathematics" {
+			t.Errorf("%q 不该命中 sh", bad)
+		}
+	}
+	if hasGateToken("mathematics", "math") {
+		t.Error("math 被 mathematics 假命中")
+	}
+	for _, good := range []struct{ data, name string }{
+		{"gate: 'sh',", "sh"},
+		{"// python go sh node", "sh"},
+		{"'math'", "math"},
+		{"gate: 'relation'", "relation"},
+	} {
+		if !hasGateToken(good.data, good.name) {
+			t.Errorf("%q 应命中 %s", good.data, good.name)
+		}
+	}
+}
+
+// TestPluginUnpublishedGates_Declared 有意不发布的 gate 必须显式留档(可审计),
+// 而发布包核心 gate 绝不能被误列入豁免(否则漏同步将静默)。
+func TestPluginUnpublishedGates_Declared(t *testing.T) {
+	for _, g := range []string{"tcm", "browser", "self"} {
+		if !isPluginUnpublished(g) {
+			t.Errorf("%s 应列为有意不发布 (私有域/依赖缺失/安全)", g)
+		}
+	}
+	for _, g := range []string{"python", "go", "node", "math", "logic", "regex", "knowledge", "chain"} {
+		if isPluginUnpublished(g) {
+			t.Errorf("%s 是发布包核心 gate, 不应被豁免", g)
+		}
+	}
+}
+
+// TestGateSyncCheck_RealEnvironment 真实环境五处同步 —— 用生产配置路径跑一遍。
+//
+// fixture 测试只证明"逻辑对"; 本用例证明"当前仓库 + 当前发布包真的同步",
+// 把 /gatesync 的人工动作固化为死程序判定 (接线哨兵同款思路)。
+func TestGateSyncCheck_RealEnvironment(t *testing.T) {
+	wd, _ := os.Getwd()
+	cfg := DefaultConfig()
+	idx := filepath.Join(cfg.PluginReleaseDir, "dsh-forge-plugins", "plugins", "forge-gates", "index.js")
+	if _, err := os.Stat(idx); err != nil {
+		t.Skipf("发布包不存在(%s), 跳过真实环境检查", idx)
+	}
+	out := gateSyncCheck(wd, cfg.PluginReleaseDir)
+	if !strings.Contains(out, "五处全部一致") {
+		t.Fatalf("真实环境五处未同步:\n%s", out)
+	}
+	t.Logf("真实环境五处同步通过")
+}

@@ -10,6 +10,13 @@ import (
 	"time"
 )
 
+type spinner struct {
+	stopCh chan struct{}
+	doneCh chan struct{}
+	mu     sync.Mutex
+	msg    string
+}
+
 // ─── ANSI helpers ───────────────────────────────────────────
 
 var ansi = struct {
@@ -20,21 +27,16 @@ var ansi = struct {
 	blue: "\033[34m", magenta: "\033[35m", cyan: "\033[36m", white: "\033[37m",
 }
 
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 func color(c, s string) string { return c + s + ansi.reset }
 
 func bold(s string) string { return ansi.bold + s + ansi.reset }
 
 func dim(s string) string { return ansi.dim + s + ansi.reset }
 
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
-type spinner struct {
-	stopCh chan struct{}
-	doneCh chan struct{}
-	mu     sync.Mutex
-	msg    string
-}
-
+// startSpinner renders an animated indicator on stderr until stop() is called.
+// 帧彩色化 + 阶段标签可动态更新, 过程节奏可见。
 func startSpinner(msg string) *spinner {
 	s := &spinner{stopCh: make(chan struct{}), doneCh: make(chan struct{}), msg: msg}
 	go func() {
@@ -57,15 +59,6 @@ func startSpinner(msg string) *spinner {
 	return s
 }
 
-func (s *spinner) stop() {
-	select {
-	case <-s.stopCh:
-	default:
-		close(s.stopCh)
-	}
-	<-s.doneCh
-}
-
 func formatSize(bytes int) string {
 	if bytes < 1024 {
 		return fmt.Sprintf("%dB", bytes)
@@ -76,15 +69,23 @@ func formatSize(bytes int) string {
 	return fmt.Sprintf("%.1fMB", float64(bytes)/(1024*1024))
 }
 
-func displayToolCode(code, lang string) {
-	emoji := langEmoji(lang)
+// toolCodeHeader 工具代码块的头部边框。
+// 流式显示(toolCodeStreamer.render)与整块兜底显示(displayToolCode)共用同一实现,
+// 防止两处格式漂移 —— 同一次工具调用的代码块首行必须视觉一致。
+func toolCodeHeader(lang string) string {
 	langLabel := strings.ToUpper(lang)
 	if lang == "" {
 		langLabel = "CODE"
 	}
+	return fmt.Sprintf("  %s %s\n", langEmoji(lang), color(ansi.cyan, "─── "+langLabel+" "+strings.Repeat("─", max(0, 40-len(langLabel)))))
+}
 
-	// Top border
-	fmt.Fprintf(os.Stderr, "  %s %s\n", emoji, color(ansi.cyan, "─── "+langLabel+" "+strings.Repeat("─", max(0, 40-len(langLabel)))))
+// ─── Tool execution display (anti-hallucination) ───────────────
+
+// displayToolCode prints the source code being executed with syntax highlighting.
+// This lets the user verify that the tool was actually called, preventing LLM hallucination.
+func displayToolCode(code, lang string) {
+	fmt.Fprint(os.Stderr, toolCodeHeader(lang))
 
 	codeLines := strings.Split(code, "\n")
 	maxShow := codeMaxLines()
@@ -104,4 +105,13 @@ func displayToolCode(code, lang string) {
 	if truncated {
 		fmt.Fprintf(os.Stderr, "  %s %s\n", dim("│"), dim(fmt.Sprintf("... +%d more lines", len(codeLines)-maxShow)))
 	}
+}
+
+func (s *spinner) stop() {
+	select {
+	case <-s.stopCh:
+	default:
+		close(s.stopCh)
+	}
+	<-s.doneCh
 }

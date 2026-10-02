@@ -58,7 +58,10 @@ func TestIsDeterministicFailure(t *testing.T) {
 	}{
 		{"编译语法错误", ForgeGateResult{OK: false, Stage: "compile", Error: "go build failed: expected 'package'"}, true},
 		{"超时归 Timeout 管", ForgeGateResult{OK: false, Stage: "compile", Error: "x", Timeout: true}, false},
-		{"工具缺失属环境", ForgeGateResult{OK: false, Stage: "compile", Error: "python: not found"}, false},
+		{"工具缺失属环境", ForgeGateResult{OK: false, Stage: "compile", EnvFailure: true, Error: "python: not found"}, false},
+		// 反例(20260927): 文本含 "not found" 但未打标 → 判确定性失败(不重试)。
+		// 旧实现文本匹配, 用户代码报错含该词即被当成环境瞬时, 白重试一次。
+		{"文本含not found但非环境", ForgeGateResult{OK: false, Stage: "compile", Error: "bash: cat: command not found"}, true},
 		{"执行阶段保留重试", ForgeGateResult{OK: false, Stage: "execute", Error: "boom"}, false},
 		{"成功", ForgeGateResult{OK: true, Stage: "done"}, false},
 	}

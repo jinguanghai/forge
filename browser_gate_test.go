@@ -18,6 +18,9 @@ func bingReachable() bool {
 }
 
 func TestBrowserGateIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 跳过真实网络集成测试")
+	}
 	if !bingReachable() {
 		t.Skipf("外网不可达(cn.bing.com:443 连不通), 跳过真实网络集成测试")
 	}

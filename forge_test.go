@@ -85,20 +85,37 @@ func TestShouldFallback(t *testing.T) {
 	if shouldFallback(ForgeGateResult{OK: true}) {
 		t.Error("OK result should not fallback")
 	}
-	for _, errText := range []string{"timeout after 30s", "command not found", "找不到 python", "unsupported language: xx"} {
-		if !shouldFallback(ForgeGateResult{OK: false, Error: errText}) {
-			t.Errorf("should fallback for %q", errText)
-		}
+	// 类型化判据: 只有产生点打了 EnvFailure 才算环境性失败。
+	if !shouldFallback(ForgeGateResult{OK: false, EnvFailure: true, Error: "gate 二进制缺失"}) {
+		t.Error("EnvFailure 应触发 fallback")
+	}
+	if shouldFallback(ForgeGateResult{OK: false, Timeout: true, EnvFailure: true}) {
+		t.Error("超时不得换语言(重跑只会再烧一个超时周期)")
 	}
 	if shouldFallback(ForgeGateResult{OK: false, Error: "syntax error"}) {
 		t.Error("compile error should NOT fallback")
+	}
+	// 缺陷回归哨兵(20260927): 错误文本含环境性关键词但类型未打标 → 不得换语言。
+	// 旧实现用 strings.Contains 嗅探文本, 用户代码/脚本报错含这些词即被误判为
+	// 环境失败, 触发无意义的换语言重跑(烧掉一个完整超时周期)。
+	for _, errText := range []string{
+		"timeout after 30s",
+		"command not found",
+		"FileNotFoundError: [Errno 2] No such file or directory",
+		"bash: cat: command not found",
+		"找不到 python",
+		"不支持的语言: xx",
+		"connection reset by peer",
+	} {
+		if shouldFallback(ForgeGateResult{OK: false, Error: errText}) {
+			t.Errorf("文本嗅探不得复辟: %q 不应触发 fallback", errText)
+		}
 	}
 }
 
 func TestPickFallback(t *testing.T) {
 	// 四期 I: deno/tcc/rust 已裁剪, 不再有 fallback 分支
 	cases := map[string]string{
-		"sh": "python", "bash": "python",
 		"python": "node", "node": "python", "js": "python",
 		"go": "", "deno": "", "ts": "", "tcc": "", "c": "", "rust": "",
 	}
@@ -144,55 +161,42 @@ func TestValidGateJSON(t *testing.T) {
 	}
 }
 
-func TestForgeSplitCommand(t *testing.T) {
-	cases := []struct {
-		in   string
-		want []string
-	}{
-		{"python code.py", []string{"python", "code.py"}},
-		{`echo "hello world"`, []string{"echo", "hello world"}},
-		{`echo 'a b'`, []string{"echo", "a b"}},
-		{"a  b   c", []string{"a", "b", "c"}},
-		{`x"y z"w`, []string{"xy zw"}}, // 引号被吞, 内部空格保留
-		{"", nil},
-	}
-	for _, c := range cases {
-		got := forgeSplitCommand(c.in)
-		if len(got) != len(c.want) {
-			t.Errorf("split(%q) = %v, want %v", c.in, got, c.want)
-			continue
-		}
-		for i := range got {
-			if got[i] != c.want[i] {
-				t.Errorf("split(%q) = %v, want %v", c.in, got, c.want)
-				break
-			}
-		}
-	}
-}
-
 func TestSummarizeOutput(t *testing.T) {
+	// 全空 → 全空 (P1-2: stderr 空不打印标签)
 	if s := summarizeOutput("", ""); s != "" {
 		t.Errorf("empty summary = %q", s)
 	}
+	// stderr 空时不应出现 [stderr] 标签 (向后兼容前缀, 但内容必须不含 stderr 提示)
 	short := "a\nb"
-	if s := summarizeOutput(short, ""); !strings.Contains(s, "a") || !strings.Contains(s, "b") {
+	s := summarizeOutput(short, "")
+	if !strings.Contains(s, "a") || !strings.Contains(s, "b") {
 		t.Errorf("short summary = %q", s)
 	}
-	// 8 行 → 前后各 3 + 省略标记
-	long := ""
-	for i := 1; i <= 8; i++ {
-		long += "line" + string(rune('0'+i)) + "\n"
+	if strings.Contains(s, "[stderr]") {
+		t.Errorf("stderr 为空时不应含 [stderr] 标签, 得到 %q", s)
 	}
-	s := summarizeOutput(long, "")
-	if !strings.Contains(s, "(8 lines total)") || !strings.Contains(s, "line1") || !strings.Contains(s, "line8") {
-		t.Errorf("long summary = %q", s)
+	// 9 行(含 Go test 样板) → 过滤样板后 ≤8 行, 全量展示
+	long := "=== RUN TestX\n=== PAUSE TestX\n=== CONT  TestX\n"
+	long += "line1\nline2\nline3\nline4\nline5\nline6\n"
+	s = summarizeOutput(long, "")
+	if !strings.Contains(s, "line1") || !strings.Contains(s, "line6") {
+		t.Errorf("过滤样板后应含有效内容, 得到 %q", s)
+	}
+	// 样板行 === RUN/PAUSE/CONT 不应出现在摘要中
+	for _, b := range []string{"=== RUN", "=== PAUSE", "=== CONT"} {
+		if strings.Contains(s, b) {
+			t.Errorf("摘要应已过滤样板行 %q, 得到 %q", b, s)
+		}
 	}
 	// stderr > 200 截断
 	bigErr := strings.Repeat("e", 300)
 	s2 := summarizeOutput("", bigErr)
 	if len(s2) > 220 {
 		t.Errorf("stderr not truncated: %d", len(s2))
+	}
+	// stderr 有内容时直接附 stderr 段 (不再套 [stderr] 标签)
+	if !strings.Contains(s2, "eee") {
+		t.Errorf("stderr 应有内容, 得到 %q", s2)
 	}
 }
 

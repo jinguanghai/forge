@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,35 +29,32 @@ func displayWidth(s string) int {
 	return w
 }
 
-// padRight 将字符串填充到目标显示宽度（右侧补空格）
-func padRight(s string, targetWidth int) string {
-	current := displayWidth(s)
-	if current >= targetWidth {
-		return s
-	}
-	return s + strings.Repeat(" ", targetWidth-current)
-}
-
 // fitWidth 将字符串截断到 maxW 显示宽度（超宽时以 … 结尾），保留 ANSI 转义序列。
 // 用于欢迎画面等定宽排版：任何超长内容（模型名/接口等）都不会破坏边框。
+//
+// 安全: 即使输入未超宽, 也必须扫描全串丢弃残缺 ANSI (无 'm' 终结符的序列)。
+// 否则残缺 ESC 序列会原样返回 → 终端把后续文本当作 CSI 参数解析 → 颜色错乱/吞输出。
+// 测试: TestFitWidth_DropsMalformedEscape (main_helpers_test.go)。
 func fitWidth(s string, maxW int) string {
-	if displayWidth(s) <= maxW {
-		return s
+	// 先扫描: 剥离残缺 ANSI, 得到"安全"输入
+	safe := stripMalformedEscape(s)
+	if displayWidth(safe) <= maxW {
+		return safe
 	}
 	var sb strings.Builder
 	w := 0
 	needEllipsis := false
-	for len(s) > 0 {
-		if s[0] == 0x1b { // ANSI 转义序列原样保留（不占显示宽度）
-			idx := strings.IndexByte(s, 'm')
+	for len(safe) > 0 {
+		if safe[0] == 0x1b { // ANSI 转义序列原样保留（不占显示宽度）
+			idx := strings.IndexByte(safe, 'm')
 			if idx < 0 {
 				break
 			}
-			sb.WriteString(s[:idx+1])
-			s = s[idx+1:]
+			sb.WriteString(safe[:idx+1])
+			safe = safe[idx+1:]
 			continue
 		}
-		r, size := utf8.DecodeRuneInString(s)
+		r, size := utf8.DecodeRuneInString(safe)
 		rw := runeWidth(r)
 		if w+rw > maxW-1 {
 			needEllipsis = true
@@ -64,7 +62,7 @@ func fitWidth(s string, maxW int) string {
 		}
 		sb.WriteRune(r)
 		w += rw
-		s = s[size:]
+		safe = safe[size:]
 	}
 	if needEllipsis {
 		sb.WriteString("…")
@@ -72,17 +70,33 @@ func fitWidth(s string, maxW int) string {
 	return sb.String()
 }
 
+// stripMalformedEscape 删除所有残缺 ANSI 序列 (无 'm' 终结符的 ESC 序列)。
+// 完整序列 (ESC[...m) 原样保留 —— 它们不占可见宽度, 也不应被剥离。
+func stripMalformedEscape(s string) string {
+	var sb strings.Builder
+	for len(s) > 0 {
+		if s[0] == 0x1b {
+			idx := strings.IndexByte(s, 'm')
+			if idx < 0 {
+				// 残缺: 整段剩余序列丢弃 (从 ESC 到结尾)
+				// 但保留 ESC 之前的可见字符 (sb 中已有)
+				// 这里 s[0] 即 ESC, 直接跳出循环, 不再写任何东西
+				break
+			}
+			// 完整序列: 原样写
+			sb.WriteString(s[:idx+1])
+			s = s[idx+1:]
+			continue
+		}
+		sb.WriteByte(s[0])
+		s = s[1:]
+	}
+	return sb.String()
+}
+
 func printWelcome(cfg *Config) {
 	// 升级: 调用炫酷横幅, 取代旧的单色 ASCII 框。
 	printTuiBanner(cfg)
-}
-
-// buildRouteText 构建路由行文本。单模型(Flash==Pro)时不重复模型名，双模型时完整展示，避免窄终端截断。
-func buildRouteText(cfg *Config, textMax int) string {
-	if cfg.ModelFlash == cfg.ModelPro {
-		return fitWidth(color(ansi.dim, "路由:")+" 未分档（"+routerModeShort(cfg.RouterMode)+"）", textMax)
-	}
-	return fitWidth(color(ansi.dim, "路由:")+" "+cfg.ModelFlash+" ⚡ ↔ "+cfg.ModelPro+" ("+routerModeShort(cfg.RouterMode)+")", textMax)
 }
 
 // ─── Commands ───────────────────────────────────────────────
@@ -97,6 +111,86 @@ func clampF(v, lo, hi float64) float64 {
 	return v
 }
 
+// ─── Holiday table ───────────────────────────────────────────
+// isChineseHoliday(id, t) 纯函数: t 这天是否为中国法定节假日 (春节/国庆等)。
+// 加载: .forge/holidays_<year>.json (内嵌 holidays 数组, 每项 [YYYY-MM-DD, name])。
+// 失败: 文件缺失或格式错 → 返回 false (fail-closed: 节假日判定不到即按"非节假日"算, 不会误抬高高峰)。
+//
+// 数据源: 国务院 2025-11-04 公布的《关于 2026 年部分节假日安排的通知》;
+// 主调档源 api.apihubs.cn 单日抽样校验 (2026-02-17=春节 ✓)。本表硬编码 2026,
+// 2027+ 需在主循环启动前扩展对应年的表 (setx FORGE_HOLIDAY_FILE 可指外部表)。
+//
+// isChristmasHolidayOnly=true 的日期是本地按摩日历节日 (元旦/春节等); 周末 = 周六+周日;
+// 调休工作日 (国务院把周末改成工作日的, 例如 2026-02-14) 即使落在周末也不算"休息日"。
+type holidayEntry struct {
+	date string
+	name string
+}
+
+var holidayTableCache = make(map[string][]holidayEntry)
+var holidayTableLoaded = make(map[string]bool)
+
+func loadHolidayTable(year string) []holidayEntry {
+	if holidayTableLoaded[year] {
+		return holidayTableCache[year]
+	}
+	holidayTableLoaded[year] = true
+	// 路径: .forge/holidays_<year>.json (与 go.mod 同级, exe 同级)
+	paths := []string{
+		filepath.Join(".forge", "holidays_"+year+".json"),
+		filepath.Join("holidays_" + year + ".json"),
+	}
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var doc struct {
+			Holidays [][]string `json:"holidays"`
+		}
+		if err := json.Unmarshal(data, &doc); err != nil {
+			continue
+		}
+		var entries []holidayEntry
+		for _, h := range doc.Holidays {
+			if len(h) >= 1 {
+				entries = append(entries, holidayEntry{date: h[0], name: safeAt(h, 1)})
+			}
+		}
+		holidayTableCache[year] = entries
+		return entries
+	}
+	holidayTableCache[year] = nil
+	return nil
+}
+
+// isChineseHoliday 纯函数: t 这天是否为中国法定节假日。
+// 失败: 表缺失或日期未登记 → false (与"工作日"一致, 不破坏价格计算)。
+func isChineseHoliday(t time.Time) bool {
+	year := fmt.Sprintf("%04d", t.Year())
+	key := fmt.Sprintf("%04d-%02d-%02d", t.Year(), int(t.Month()), t.Day())
+	for _, e := range loadHolidayTable(year) {
+		if e.date == key {
+			return true
+		}
+	}
+	return false
+}
+
+func safeAt(s []string, i int) string {
+	if i < len(s) {
+		return s[i]
+	}
+	return ""
+}
+
+// reloadHolidaysForTest 重置节假日缓存, 在表更新后可重载。
+// 仅供测试 (文件名后缀 _test.go 调用)。
+func reloadHolidaysForTest(year string) {
+	delete(holidayTableLoaded, year)
+	delete(holidayTableCache, year)
+}
+
 // ─── Peak-hour reminder ─────────────────────────────────────
 // isPeakHourAt 纯函数: t 是否处于 DeepSeek 高峰时段 (价格×2)。
 //
@@ -106,6 +200,11 @@ func clampF(v, lo, hi float64) float64 {
 func isPeakHourAt(t time.Time) bool {
 	wd := t.Weekday() // Sunday=0 ... Saturday=6
 	if wd == time.Saturday || wd == time.Sunday {
+		return false
+	}
+	// 节假日按"非高峰"计: DeepSeek 官方定价节假日不设高峰时段 (节假日全天闲时单价)。
+	// 表缺失/未登记 → false (fail-closed, 不误抬高高峰)。
+	if isChineseHoliday(t) {
 		return false
 	}
 	h := t.Hour()
@@ -263,7 +362,7 @@ func unbalancedDelimiters(s string) bool {
 // ─── Help ───────────────────────────────────────────────────
 
 func printHelp() {
-	fmt.Println("铸剑炉 v" + AppVersion + " — LLM 驱动的多语言编译器沙箱")
+	fmt.Println("铸剑炉 " + versionString() + " — LLM 驱动的多语言编译器沙箱")
 	fmt.Println()
 	fmt.Println("用法:")
 	fmt.Println("  forge.exe              交互模式（默认）")

@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -31,6 +30,9 @@ const (
 	EvGuardBlocked = "guard_blocked"  // 输入护栏阻断
 	EvApproved     = "approved"       // 三期 I2: 危险操作经主人批准执行
 	EvGoalUpdate   = "goal_update"    // 三期 I5: 目标状态变更 (create/pause/resume/blocked/complete/clear)
+	// EvShutdown 正常收尾留痕 (20261002): 非正常退出检测的判据基准, 见 exit_watch.go。
+	// 只允许正常退出路径(agent.Shutdown)写, 不得由任何业务逻辑写 —— 否则判据失效。
+	EvShutdown = "shutdown"
 )
 
 // Event 一条事件记录
@@ -88,32 +90,4 @@ func logEvent(typ, detail string, data interface{}) {
 	}
 	defer f.Close()
 	f.Write(append(b, '\n'))
-}
-
-// lastEvents 返回最后 n 条事件 (n<=0 返回全部)
-func lastEvents(n int) []Event {
-	if eventsPath == "" {
-		return nil
-	}
-	evMu.Lock()
-	defer evMu.Unlock()
-	data, err := os.ReadFile(eventsPath)
-	if err != nil {
-		return nil
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if n > 0 && len(lines) > n {
-		lines = lines[len(lines)-n:]
-	}
-	out := make([]Event, 0, len(lines))
-	for _, l := range lines {
-		if strings.TrimSpace(l) == "" {
-			continue
-		}
-		var ev Event
-		if json.Unmarshal([]byte(l), &ev) == nil {
-			out = append(out, ev)
-		}
-	}
-	return out
 }

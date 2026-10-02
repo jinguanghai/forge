@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -79,22 +78,23 @@ func TestInjectEnvelope_EmptyFeedbackNoEnvelope(t *testing.T) {
 	// 20260920 更新: 注入点从 1 处增至 2 处 (无剑嗅探 + 表达式化拒绝权),
 	// 判据从"首个判空早于首个信封"改为"逐注入点检查其前文窗口内存在判空",
 	// 比原判据更严 (原来只看第一个注入点)。
-	src, err := os.ReadFile("agent.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(src)
+	// 扫描范围是**整个包** (B3 批5): 两个无剑注入构造点现同在 agent_stream_setup.go
+	// 的 runState.nswIntervene 内 —— 硬编码文件名会误报, 而功能真被删仍会被抓到。
+	// 按 kind 限定为无剑反馈: 虚报干预的判空在调用方 (turnFinalizer.finalize 的
+	// 条件表达式里), 不属本哨兵口径。
+	s := prodGoSources(t)
+	const marker = `autoInjectEnvelope("算式求值校验"`
 	sites := []int{}
 	for i := 0; ; {
-		j := strings.Index(s[i:], "autoInjectEnvelope(")
+		j := strings.Index(s[i:], marker)
 		if j < 0 {
 			break
 		}
 		sites = append(sites, i+j)
 		i += j + 1
 	}
-	if len(sites) == 0 {
-		t.Fatal("agent.go 无 autoInjectEnvelope 调用点")
+	if len(sites) != 2 {
+		t.Fatalf("无剑反馈注入点应为 2 处 (嗅探 + 拒绝权), 实际 %d", len(sites))
 	}
 	for _, idx := range sites {
 		lo := idx - 300
@@ -106,26 +106,27 @@ func TestInjectEnvelope_EmptyFeedbackNoEnvelope(t *testing.T) {
 			t.Errorf("注入点(偏移%d)前 300 字符内无判空: 空反馈也会被注入信封", idx)
 		}
 	}
-	t.Logf("agent.go 注入点 %d 处, 均先判空后套信封", len(sites))
+	t.Logf("无剑反馈注入点 %d 处, 均先判空后套信封", len(sites))
 }
 
 // 5) 接线哨兵: 两个注入构造点都必须套信封 (将来被删掉 = 缺陷P 复发)
 func TestInjectEnvelope_WiredAtBothSites(t *testing.T) {
+	// 无剑嗅探 + 表达式化拒绝权两处构造点现同在 agent_stream_setup.go 的
+	// runState.nswIntervene 内 (B3 批5 迁出), 虚报干预在 verifyClaim.go。
+	// 判据按 kind 计数, 不再绑定文件名 —— 接线是包级属性, 硬编码文件名会在
+	// 代码重组时误报, 而信封真被删 (该 kind 计数归零) 仍会被抓到。
+	all := prodGoSources(t)
 	checks := []struct {
-		file string
+		kind string
 		want int
 		why  string
 	}{
-		{"agent.go", 2, "无剑注入闭包 + 表达式化拒绝权 两处都必须套信封 (缺失=反馈又被当成用户发言)"},
-		{"verifyClaim.go", 1, "虚报干预必须套信封 (缺失=干预又被当成用户发言)"},
+		{`autoInjectEnvelope("算式求值校验"`, 2, "无剑嗅探 + 表达式化拒绝权 两处都必须套信封 (缺失=反馈又被当成用户发言)"},
+		{`autoInjectEnvelope("完成态核验"`, 1, "虚报干预必须套信封 (缺失=干预又被当成用户发言)"},
 	}
 	for _, c := range checks {
-		b, err := os.ReadFile(c.file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := strings.Count(string(b), "autoInjectEnvelope("); got != c.want {
-			t.Errorf("%s 中 autoInjectEnvelope 出现 %d 次, 期望 %d (%s)", c.file, got, c.want, c.why)
+		if got := strings.Count(all, c.kind); got != c.want {
+			t.Errorf("%s 出现 %d 次, 期望 %d (%s)", c.kind, got, c.want, c.why)
 		}
 	}
 }

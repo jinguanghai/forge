@@ -3,9 +3,15 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
 	"os"
@@ -38,8 +44,10 @@ var urlImageRe = regexp.MustCompile(`(?i)https?://[\w.\-/:%?@#&=+~;,]+\.(png|jpe
 // detectImages 从输入提取图片路径 → 读文件 → base64 data URL。
 // 本地文件按内容 magic 校验内联 (第一式); http(s) URL 经 loadImageURL 下载内联
 // (第二式修正在地: 不再裸透传)。只收录存在且头部 magic 匹配的图片;
-// 提取失败/不存在/URL 非图则跳过 (文本误匹配或无效链接不污染请求),
+// 提取失败/不存在/URL 非图/结构无效则跳过 (文本误匹配或坏图不污染请求),
 // 但"路径存在而读取失败"返回 error (真文件读不动必须报错, 不能静默丢图)。
+// 注意区分两类失败: IO 失败 (读不动) 报错; 结构无效 (读到了但不是可用图片) 跳过 ——
+// 后者若报错会让一张坏图毁掉整轮会话, 若静默发送会让服务端 400 毁掉整轮会话。
 func detectImages(input, workDir string) ([]ImagePart, error) {
 	seen := make(map[string]bool)
 	var parts []ImagePart
@@ -87,8 +95,10 @@ func detectImages(input, workDir string) ([]ImagePart, error) {
 	return parts, firstErr
 }
 
-// loadImagePart 读图片文件 → magic 判定格式 → base64 data URL。
+// loadImagePart 读图片文件 → magic 判定格式 → 结构有效性校验 → base64 data URL。
 // Detail=high 保原图 (舌象/处方截图要细节; 模型侧仍自动缩放计费)。
+// 两道闸缺一不可: sniffImageMIME 判"像什么格式", verifyImagePayload 判"能不能用"。
+// 任一不过返回 error 由调用方跳过 —— 绝不让坏图触达服务端 (400 会炸整轮请求)。
 func loadImagePart(path string) (ImagePart, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -97,6 +107,9 @@ func loadImagePart(path string) (ImagePart, error) {
 	mime, ok := sniffImageMIME(b)
 	if !ok {
 		return ImagePart{}, fmt.Errorf("不支持的图片格式 (仅 JPEG/PNG/GIF/WebP) 或文件损坏")
+	}
+	if err := verifyImagePayload(b, mime); err != nil {
+		return ImagePart{}, fmt.Errorf("图片结构校验失败: %w", err)
 	}
 	if len(b) > 32*1024*1024 {
 		return ImagePart{}, fmt.Errorf("图片 %d bytes 超 32MiB 内联上限 (大图请压缩或裁剪)", len(b))
@@ -136,6 +149,9 @@ func loadImageURL(u string) (ImagePart, error) {
 	if !ok {
 		return ImagePart{}, fmt.Errorf("URL 返回内容非受支持图片格式 (JPEG/PNG/GIF/WebP)")
 	}
+	if err := verifyImagePayload(b, mime); err != nil {
+		return ImagePart{}, fmt.Errorf("URL 图片结构校验失败: %w", err)
+	}
 	return ImagePart{
 		URL:    "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(b),
 		Detail: "high",
@@ -155,6 +171,82 @@ func sniffImageMIME(b []byte) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// verifyImagePayload 校验图片字节流的结构有效性 —— magic 之后的第二道闸。
+//
+// 事故背景 (2026-09-28): 4 字节伪 JPEG (FF D8 FF E0) 能通过 sniffImageMIME 的
+// 前缀判定, 被当合法图 base64 内联发出 → 服务端解码失败 → HTTP 400
+// (".messages[N].image[0]: You have uploaded an unsupported image") 使整轮会话
+// 请求失败。触发路径: 演示目录里的 4B/9B 伪造图片被工具输出扫到 →
+// detectToolImages 误收 → 注入。教训: magic 匹配 != 图片可用 ——
+// 前缀判据只证明"像什么格式", 不证明"能解码"。
+//
+// 判据三档:
+//  1. PNG/JPEG/GIF: 标准库 image.DecodeConfig 真解析头部 + 宽高必须 > 0
+//     (零依赖; 纯魔数垃圾文件在此报 unexpected EOF)
+//  2. 尾部结束标记完整: PNG IEND / JPEG EOI / GIF trailer(0x3B) ——
+//     DecodeConfig 只读头部, 挡不住截断文件, 尾部校验补这一格 (零解码成本)
+//  3. WebP: 标准库无解码器, 退为容器自洽校验 (RIFF 长度字段 + VP8 chunk 存在)。
+//     残余风险: RIFF 自洽但 VP8 载荷损坏的 WebP 仍可能被服务端拒 —— 已显著收窄,
+//     但未归零 (要归零需引入 x/image/webp 依赖并全量解码, 代价不成比例)。
+func verifyImagePayload(b []byte, mime string) error {
+	switch mime {
+	case "image/png", "image/jpeg", "image/gif":
+		cfg, _, err := image.DecodeConfig(bytes.NewReader(b))
+		if err != nil {
+			return fmt.Errorf("图片头解析失败 (%d bytes): %w", len(b), err)
+		}
+		if cfg.Width <= 0 || cfg.Height <= 0 {
+			return fmt.Errorf("图片尺寸非法: %dx%d", cfg.Width, cfg.Height)
+		}
+		return checkImageTail(b, mime)
+	case "image/webp":
+		return checkWebPContainer(b)
+	}
+	return nil
+}
+
+// pngIEND PNG 结束块字节 (长度 0 + "IEND" + CRC32)。
+var pngIEND = []byte{0x00, 0x00, 0x00, 0x00, 'I', 'E', 'N', 'D', 0xAE, 0x42, 0x60, 0x82}
+
+// checkImageTail 校验图片尾部结束标记 —— 挡住"头部合法但文件被截断"的图。
+// 标准库 DecodeConfig 只解析到头部 (IHDR/SOF), 截断文件在它眼里仍然合法;
+// 但服务端要真解码才能缩放, 截断图会解码失败 → 400。尾部标记是零成本的补丁。
+func checkImageTail(b []byte, mime string) error {
+	switch mime {
+	case "image/png":
+		if len(b) < len(pngIEND) || !bytes.Equal(b[len(b)-len(pngIEND):], pngIEND) {
+			return fmt.Errorf("PNG 尾部 IEND 缺失 (文件截断或损坏)")
+		}
+	case "image/jpeg":
+		if len(b) < 2 || b[len(b)-2] != 0xFF || b[len(b)-1] != 0xD9 {
+			return fmt.Errorf("JPEG 尾部 EOI(FFD9) 缺失 (文件截断或损坏)")
+		}
+	case "image/gif":
+		if len(b) < 1 || b[len(b)-1] != 0x3B {
+			return fmt.Errorf("GIF 尾部 trailer(0x3B) 缺失 (文件截断或损坏)")
+		}
+	}
+	return nil
+}
+
+// checkWebPContainer WebP 容器自洽校验 (无标准库解码器可用时的替代判据)。
+// RIFF 头自带长度字段 (偏移 4, 小端 uint32 = 文件总长 - 8), 据此验证完整性;
+// 再要求首个 chunk 是 VP8/VP8L/VP8X 之一 (排除改名的非图 RIFF 容器如 WAV)。
+func checkWebPContainer(b []byte) error {
+	if len(b) < 20 {
+		return fmt.Errorf("WebP 文件过短 (%d bytes)", len(b))
+	}
+	if total := int(binary.LittleEndian.Uint32(b[4:8])) + 8; total != len(b) {
+		return fmt.Errorf("WebP RIFF 长度不自洽 (声明 %d, 实际 %d)", total, len(b))
+	}
+	switch cc := string(b[12:16]); cc {
+	case "VP8 ", "VP8L", "VP8X":
+	default:
+		return fmt.Errorf("WebP 缺少 VP8 chunk (fourcc=%q)", cc)
+	}
+	return nil
 }
 
 // discoverImagesInDir 遍历目录收集全部图片文件 (按内容 magic 校验, 非扩展名)。

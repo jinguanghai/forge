@@ -51,8 +51,16 @@ var gateRegistry = []GateDef{
 		Description: "源码自修改/热替换 → self gate (replace:旧:新 / append; 需主人审批, 自动快照; 编译通过后自动冒烟→就位 forge.exe, 冒烟失败自动回滚)",
 	},
 	{
+		Name:        "relation",
+		Description: "接线/关系断言校验 → relation gate (骨架=Go源码符号表+引用图; 输入 {\"type\":\"assert\",\"claim\":\"agent.go 调用了 X\"} 或 {\"type\":\"symbol\",\"name\":\"X\"} 或 {\"type\":\"scan\"}; 剥离注释与字符串后枚举, 注释里提及不算接线)",
+	},
+	{
 		Name:        "chain",
 		Description: "多 gate 顺序编排 → chain gate (lang=\"chain\", JSON stages 条件执行, 减少 LLM 往返)",
+	},
+	{
+		Name:        "media",
+		Description: "图片/视频生成 → media gate (MiniMax 云端; {\"action\":\"image|video|status|models\",\"prompt\":\"...\"}; 视频异步=先提交拿 task_id, 下一轮用 status 查询; 默认 draft 低成本档; 成本硬护栏 单次≤5元/日≤50元; 产物落 .forge/media/)",
 	},
 }
 

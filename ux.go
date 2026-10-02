@@ -5,6 +5,31 @@ import (
 	"strings"
 )
 
+// span represents a highlighted region in a line
+type span struct {
+	start, end int
+	color      string
+}
+
+// ─── Streaming Markdown/Code renderer ────────────────────────
+
+type streamRenderer struct {
+	inCodeBlock bool
+	codeLang    string
+	codeBuf     strings.Builder
+	lineBuf     strings.Builder // for partial lines
+}
+
+// ========================== Streaming Reasoning renderer ==========================
+// 把模型的推理内容渲染为可读的缩进块 (流式, 按行缓冲)。
+// 独立于正文渲染器, 输出到 stderr, 与正文 (stdout) 分离。
+
+type reasoningRenderer struct {
+	opened  bool
+	closed  bool
+	lineBuf strings.Builder
+}
+
 // ─── Terminal syntax highlighter ────────────────────────────
 //
 // Renders code blocks and inline code with terminal ANSI colors.
@@ -55,12 +80,6 @@ var (
 	reInlineCode = regexp.MustCompile("`([^`]+)`")
 	reNumbered   = regexp.MustCompile(`^(\d+\.\s)`)
 )
-
-// span represents a highlighted region in a line
-type span struct {
-	start, end int
-	color      string
-}
 
 // highlightLine applies syntax highlighting to a single line of code
 func highlightLine(line, lang string) string {
@@ -167,18 +186,119 @@ func normalizeLang(lang string) string {
 	}
 }
 
-// ─── Streaming Markdown/Code renderer ────────────────────────
-
-type streamRenderer struct {
-	inCodeBlock  bool
-	openingFence bool
-	codeLang     string
-	codeBuf      strings.Builder
-	lineBuf      strings.Builder // for partial lines
-}
-
 func newStreamRenderer() *streamRenderer {
 	return &streamRenderer{}
+}
+
+// renderMarkdownLine renders a single line of markdown text with basic formatting.
+func renderMarkdownLine(line string) string {
+	l := line
+
+	// Bold: **text** or __text__
+	l = reBold.ReplaceAllStringFunc(l, func(m string) string {
+		inner := m
+		if strings.HasPrefix(m, "**") {
+			inner = m[2 : len(m)-2]
+		} else {
+			inner = m[2 : len(m)-2]
+		}
+		return ansi.bold + inner + ansi.reset
+	})
+
+	// Italic: *text* or _text_ (but not inside words like a_b)
+	l = reItalic.ReplaceAllStringFunc(l, func(m string) string {
+		inner := strings.Trim(m, " *_")
+		// Preserve the match's own leading/trailing whitespace instead of forcing
+		// spaces — that would break indented text like "    *note*".
+		prefix, suffix := "", ""
+		if strings.HasPrefix(m, " ") || strings.HasPrefix(m, "\t") {
+			prefix = " "
+		}
+		if strings.HasSuffix(m, " ") || strings.HasSuffix(m, "\t") {
+			suffix = " "
+		}
+		return prefix + ansi.dim + inner + ansi.reset + suffix
+	})
+
+	// Inline code: `code`
+	l = reInlineCode.ReplaceAllStringFunc(l, func(m string) string {
+		inner := m[1 : len(m)-1]
+		return ansi.yellow + inner + ansi.reset
+	})
+
+	// ### Headers — 剥离 # 前缀再加色, 避免主人看到原始 Markdown 符号 (P2-1)
+	if strings.HasPrefix(l, "### ") {
+		return ansi.bold + ansi.cyan + l[len("### "):] + ansi.reset
+	}
+	if strings.HasPrefix(l, "## ") {
+		return ansi.bold + ansi.cyan + l[len("## "):] + ansi.reset
+	}
+	if strings.HasPrefix(l, "# ") {
+		return ansi.bold + ansi.cyan + l[len("# "):] + ansi.reset
+	}
+
+	// > Blockquote
+	if strings.HasPrefix(strings.TrimSpace(l), "> ") {
+		return ansi.dim + "▎ " + l + ansi.reset
+	}
+
+	// - List items / 1. Numbered list
+	//
+	// l 是调用方喂入的"含行尾换行"整行, 缩进与换行必须原样保留:
+	// 早期实现直接用 TrimSpace(l) 当输出源 → 列表行与下一行粘连, 嵌套列表缩进丢失。
+	indent := l[:len(l)-len(strings.TrimLeft(l, " \t"))]
+	nl := l[len(strings.TrimRight(l, "\r\n")):]
+	trimmed := strings.TrimSpace(l)
+	if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
+		item := strings.TrimPrefix(strings.TrimPrefix(trimmed, "- "), "* ")
+		return indent + ansi.cyan + "• " + ansi.reset + item + nl
+	}
+
+	// 1. Numbered list
+	if matched, _ := regexp.MatchString(`^\d+\.\s`, trimmed); matched {
+		return indent + reNumbered.ReplaceAllString(trimmed, ansi.cyan+"$1"+ansi.reset) + nl
+	}
+
+	return l
+}
+
+func newReasoningRenderer() *reasoningRenderer {
+	return &reasoningRenderer{}
+}
+
+// wrapReasoningLine 按终端显示宽度把超长推理行软换行 (中英文按显示宽度计)。
+// 竖线前缀+间隔占 2 列, 续行缩进对齐。
+func wrapReasoningLine(line string) []string {
+	avail := terminalAvail()
+	if avail <= 0 || displayWidth(line) <= avail {
+		return []string{line}
+	}
+	var segs []string
+	var sb strings.Builder
+	w := 0
+	for _, r := range line {
+		rw := runeWidth(r)
+		if w+rw > avail && w > 0 {
+			segs = append(segs, sb.String())
+			sb.Reset()
+			w = 0
+		}
+		sb.WriteRune(r)
+		w += rw
+	}
+	if sb.Len() > 0 {
+		segs = append(segs, sb.String())
+	}
+	return segs
+}
+
+// terminalAvail 返回推理行可用显示宽度 (自适应终端宽度, 非 tty 时用保守默认)。
+func terminalAvail() int {
+	w := getTermWidth()
+	if w <= 20 {
+		return 72
+	}
+	return w - 3
 }
 
 // feed processes a chunk of text and returns ANSI-rendered output.
@@ -207,19 +327,9 @@ func (r *streamRenderer) feed(chunk string) string {
 					r.codeLang = ""
 					continue
 				}
-				// Trailing content on the opening line (```lang code) becomes
-				// the first code line instead of being swallowed by the fence.
-				if r.openingFence {
-					r.openingFence = false
-					if rest := strings.TrimSpace(trimmed); rest != "" {
-						if r.codeLang != "" {
-							out.WriteString(highlightLine(rest, r.codeLang))
-						} else {
-							out.WriteString(ansi.dim + rest + ansi.reset)
-						}
-						continue
-					}
-				}
+				// 首行代码不单独处理: 早期实现走 openingFence 分支, 用 TrimSpace 后的内容
+				// 输出 —— 丢行尾换行(与次行粘连)且丢缩进。下方通用路径用整行 line
+				// (含 \n 与缩进)输出, 行为正确, 故该分支及其状态字段一并移除。
 				// Stream: highlight and output each line immediately.
 				// Don't accumulate (avoid double-render on close).
 				if r.codeLang != "" {
@@ -236,7 +346,6 @@ func (r *streamRenderer) feed(chunk string) string {
 					r.codeLang = strings.TrimPrefix(trimmed, "```")
 					r.codeLang = strings.TrimSpace(r.codeLang)
 					r.codeBuf.Reset()
-					r.openingFence = true
 
 					// Render the opening ``` line with a subtle style
 					out.WriteString(ansi.dim)
@@ -282,86 +391,6 @@ func (r *streamRenderer) flush() string {
 	return out.String()
 }
 
-// renderMarkdownLine renders a single line of markdown text with basic formatting.
-func renderMarkdownLine(line string) string {
-	l := line
-
-	// Bold: **text** or __text__
-	l = reBold.ReplaceAllStringFunc(l, func(m string) string {
-		inner := m
-		if strings.HasPrefix(m, "**") {
-			inner = m[2 : len(m)-2]
-		} else {
-			inner = m[2 : len(m)-2]
-		}
-		return ansi.bold + inner + ansi.reset
-	})
-
-	// Italic: *text* or _text_ (but not inside words like a_b)
-	l = reItalic.ReplaceAllStringFunc(l, func(m string) string {
-		inner := strings.Trim(m, " *_")
-		// Preserve the match's own leading/trailing whitespace instead of forcing
-		// spaces — that would break indented text like "    *note*".
-		prefix, suffix := "", ""
-		if strings.HasPrefix(m, " ") || strings.HasPrefix(m, "\t") {
-			prefix = " "
-		}
-		if strings.HasSuffix(m, " ") || strings.HasSuffix(m, "\t") {
-			suffix = " "
-		}
-		return prefix + ansi.dim + inner + ansi.reset + suffix
-	})
-
-	// Inline code: `code`
-	l = reInlineCode.ReplaceAllStringFunc(l, func(m string) string {
-		inner := m[1 : len(m)-1]
-		return ansi.yellow + inner + ansi.reset
-	})
-
-	// ### Headers
-	if strings.HasPrefix(l, "### ") {
-		return ansi.bold + ansi.cyan + l + ansi.reset
-	}
-	if strings.HasPrefix(l, "## ") {
-		return ansi.bold + ansi.cyan + l + ansi.reset
-	}
-	if strings.HasPrefix(l, "# ") {
-		return ansi.bold + ansi.cyan + l + ansi.reset
-	}
-
-	// > Blockquote
-	if strings.HasPrefix(strings.TrimSpace(l), "> ") {
-		return ansi.dim + "▎ " + l + ansi.reset
-	}
-
-	// - List items
-	trimmed := strings.TrimSpace(l)
-	if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
-		return ansi.cyan + "• " + ansi.reset + strings.TrimPrefix(strings.TrimPrefix(trimmed, "- "), "* ")
-	}
-
-	// 1. Numbered list
-	if matched, _ := regexp.MatchString(`^\d+\.\s`, trimmed); matched {
-		return reNumbered.ReplaceAllString(trimmed, ansi.cyan+"$1"+ansi.reset)
-	}
-
-	return l
-}
-
-// ========================== Streaming Reasoning renderer ==========================
-// 把模型的推理内容渲染为可读的缩进块 (流式, 按行缓冲)。
-// 独立于正文渲染器, 输出到 stderr, 与正文 (stdout) 分离。
-
-type reasoningRenderer struct {
-	opened  bool
-	closed  bool
-	lineBuf strings.Builder
-}
-
-func newReasoningRenderer() *reasoningRenderer {
-	return &reasoningRenderer{}
-}
-
 // feed 增量渲染推理 chunk, 返回 ANSI 文本。
 // 首块时输出起始标题; 按换行拆行, 每行加竖线前缀缩进。
 func (r *reasoningRenderer) feed(chunk string) string {
@@ -391,41 +420,6 @@ func (r *reasoningRenderer) renderLine(line string, out *strings.Builder) {
 	for _, seg := range wrapReasoningLine(line) {
 		out.WriteString(ansi.cyan + "│ " + ansi.reset + ansi.dim + seg + ansi.reset + "\n")
 	}
-}
-
-// wrapReasoningLine 按终端显示宽度把超长推理行软换行 (中英文按显示宽度计)。
-// 竖线前缀+间隔占 2 列, 续行缩进对齐。
-func wrapReasoningLine(line string) []string {
-	avail := terminalAvail()
-	if avail <= 0 || displayWidth(line) <= avail {
-		return []string{line}
-	}
-	var segs []string
-	var sb strings.Builder
-	w := 0
-	for _, r := range line {
-		rw := runeWidth(r)
-		if w+rw > avail && w > 0 {
-			segs = append(segs, sb.String())
-			sb.Reset()
-			w = 0
-		}
-		sb.WriteRune(r)
-		w += rw
-	}
-	if sb.Len() > 0 {
-		segs = append(segs, sb.String())
-	}
-	return segs
-}
-
-// terminalAvail 返回推理行可用显示宽度 (自适应终端宽度, 非 tty 时用保守默认)。
-func terminalAvail() int {
-	w := getTermWidth()
-	if w <= 20 {
-		return 72
-	}
-	return w - 3
 }
 
 // close 输出收尾边框 (若有内容输出过), 并清空缓冲。仅第一次调用生效。

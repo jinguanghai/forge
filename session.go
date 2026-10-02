@@ -179,14 +179,6 @@ func checkpointPath(workDir string) string {
 	return filepath.Join(workDir, ".forge", "checkpoint.json")
 }
 
-// checkpointSessionPath 指定会话的检查点路径 (空 id = legacy 路径)
-func checkpointSessionPath(workDir, id string) string {
-	if id == "" {
-		return filepath.Join(workDir, ".forge", "checkpoint.json")
-	}
-	return filepath.Join(sessionDir(workDir, id), "checkpoint.json")
-}
-
 // stripRecallPrefix 去掉 userContent 开头的 <recalled_memory> 注入块,
 // 用于从检查点历史提取"真实用户输入"作会话标题。
 func stripRecallPrefix(s string) string {

@@ -78,10 +78,10 @@ func TestCheckpointSessionIsolation(t *testing.T) {
 	}
 
 	// 文件落位验证
-	if _, err := os.Stat(checkpointSessionPath(wd, "sA")); err != nil {
+	if _, err := os.Stat(filepath.Join(sessionDir(wd, "sA"), "checkpoint.json")); err != nil {
 		t.Fatalf("sA checkpoint 不存在: %v", err)
 	}
-	if _, err := os.Stat(checkpointSessionPath(wd, "sB")); err != nil {
+	if _, err := os.Stat(filepath.Join(sessionDir(wd, "sB"), "checkpoint.json")); err != nil {
 		t.Fatalf("sB checkpoint 不存在: %v", err)
 	}
 }
@@ -120,7 +120,7 @@ func TestSessionEventField(t *testing.T) {
 	setEventSession("")
 	logEvent(EvToolCalled, "legacy-gate", nil)
 
-	evs := lastEvents(10)
+	evs := readEventsForTest(10)
 	if len(evs) < 2 {
 		t.Fatalf("事件数不足: %d", len(evs))
 	}

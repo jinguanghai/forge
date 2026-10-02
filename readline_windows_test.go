@@ -328,3 +328,38 @@ func TestEmptyEnter(t *testing.T) {
 		t.Fatalf("空提交: got=%q", got)
 	}
 }
+
+// ── 滚轮回归哨兵 (20260923) ───────────────────────────────────────────────
+//
+// 背景: 铸剑炉在 Windows Terminal 下鼠标滚轮完全无响应。
+// 逐位受控实验(同一进程、同一注入方式、每次只改一个模式位)定位到唯一变量:
+// orig 0x1F7(滚轮 OK) → 清 QUICK_EDIT 得 0x1B7(滚轮 diff=0) → 清其他位均 OK。
+// 机理: ConPTY 下清掉 ENABLE_QUICK_EDIT_MODE 会同步给 WT, WT 判定『应用接管鼠标』,
+// 把滚轮事件转发进本进程 stdin, 而 os.Stdin.Read 按 ReadFile 语义直接丢弃鼠标记录
+// → 滚轮既不滚屏也不产生输入 = 彻底静默。
+// 本测试把『QUICK_EDIT 必须保留』固化为死程序判定, 防止被顺手改回。
+func TestRawConsoleMode_KeepsQuickEdit(t *testing.T) {
+	const realDefault = uint32(0x1F7) // 实测: 铸剑炉所在 WT 控制台的默认输入模式
+	got := rawConsoleMode(realDefault)
+	if got&enableQuickEditMode == 0 {
+		t.Fatalf("raw 模式清掉了 ENABLE_QUICK_EDIT_MODE(0x%02X): orig=0x%X got=0x%X\n"+
+			"→ Windows Terminal 下鼠标滚轮会完全失效(既不滚屏也无输入)。", enableQuickEditMode, realDefault, got)
+	}
+	if got&enableLineInput != 0 {
+		t.Errorf("应清 ENABLE_LINE_INPUT, got=0x%X", got)
+	}
+	if got&enableEchoInput != 0 {
+		t.Errorf("应清 ENABLE_ECHO_INPUT, got=0x%X", got)
+	}
+	if got&enableVirtualTerminalInput == 0 {
+		t.Errorf("应置 ENABLE_VIRTUAL_TERMINAL_INPUT, got=0x%X", got)
+	}
+	// 不主动置位: 原模式无 QUICK_EDIT(非交互启动)时不得凭空加上
+	if plain := rawConsoleMode(realDefault &^ enableQuickEditMode); plain&enableQuickEditMode != 0 {
+		t.Errorf("不应主动置位 QUICK_EDIT: got=0x%X", plain)
+	}
+	// 幂等: 对已 raw 的模式再算一次结果不变
+	if again := rawConsoleMode(got); again != got {
+		t.Errorf("rawConsoleMode 不幂等: 0x%X -> 0x%X", got, again)
+	}
+}

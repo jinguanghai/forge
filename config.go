@@ -199,25 +199,7 @@ func LoadConfig() (*Config, error) {
 		return nil, ErrInvalidModel
 	}
 
-	// Numeric overrides from environment
-	cfg.MaxTokens = getEnvInt("LLM_MAX_TOKENS", cfg.MaxTokens)
-	cfg.Temperature = getEnvFloat("LLM_TEMPERATURE", cfg.Temperature)
-	cfg.TopP = getEnvFloat("LLM_TOP_P", cfg.TopP)
-	cfg.RequestTimeout = getEnvDuration("LLM_REQUEST_TIMEOUT", cfg.RequestTimeout)
-	cfg.StreamTimeout = getEnvDuration("LLM_STREAM_TIMEOUT", cfg.StreamTimeout)
-	cfg.ToolTimeout = getEnvDuration("FORGE_TOOL_TIMEOUT", cfg.ToolTimeout)
-	cfg.MaxConsecutiveFails = getEnvInt("AGENT_MAX_CONSECUTIVE_FAILS", cfg.MaxConsecutiveFails)
-	cfg.MaxLoopStrikes = getEnvInt("AGENT_MAX_LOOP_STRIKES", cfg.MaxLoopStrikes)
-	cfg.MaxHistoryMessages = getEnvInt("AGENT_MAX_HISTORY", cfg.MaxHistoryMessages)
-	cfg.CompactEnabled = getEnvInt("AGENT_COMPACT_ENABLED", 1) == 1
-	cfg.CompactTokenThreshold = getEnvInt("AGENT_COMPACT_TOKEN_THRESHOLD", cfg.CompactTokenThreshold)
-	cfg.CompactMinTurns = getEnvInt("AGENT_COMPACT_MIN_TURNS", cfg.CompactMinTurns)
-	cfg.MaxConcurrent = getEnvInt("FORGE_MAX_CONCURRENT", cfg.MaxConcurrent)
-	cfg.CacheMaxSize = getEnvInt("FORGE_CACHE_SIZE", cfg.CacheMaxSize)
-	cfg.MaxCodeSize = getEnvInt("FORGE_MAX_CODE_SIZE", cfg.MaxCodeSize)
-	cfg.MaxOutputLength = getEnvInt("FORGE_MAX_OUTPUT", cfg.MaxOutputLength)
-	cfg.RetryMax = getEnvInt("FORGE_RETRY_MAX", cfg.RetryMax)
-	cfg.RetryBackoff = getEnvDuration("FORGE_RETRY_BACKOFF", cfg.RetryBackoff)
+	applyEnvNumberOverrides(cfg)
 
 	// Cache persistence
 	cfg.CachePersistFile = getEnv("FORGE_CACHE_PERSIST_FILE", cfg.CachePersistFile)
@@ -269,6 +251,29 @@ func LoadConfig() (*Config, error) {
 	cfg.TopP = clampFloat(cfg.TopP, 0, 1.0)
 
 	return cfg, nil
+}
+
+// applyEnvNumberOverrides 从环境变量应用数值/时长类覆盖。
+// 未设置的键保留 DefaultConfig 的默认值 (getEnvX 的 fallback 语义)。
+func applyEnvNumberOverrides(cfg *Config) {
+	cfg.MaxTokens = getEnvInt("LLM_MAX_TOKENS", cfg.MaxTokens)
+	cfg.Temperature = getEnvFloat("LLM_TEMPERATURE", cfg.Temperature)
+	cfg.TopP = getEnvFloat("LLM_TOP_P", cfg.TopP)
+	cfg.RequestTimeout = getEnvDuration("LLM_REQUEST_TIMEOUT", cfg.RequestTimeout)
+	cfg.StreamTimeout = getEnvDuration("LLM_STREAM_TIMEOUT", cfg.StreamTimeout)
+	cfg.ToolTimeout = getEnvDuration("FORGE_TOOL_TIMEOUT", cfg.ToolTimeout)
+	cfg.MaxConsecutiveFails = getEnvInt("AGENT_MAX_CONSECUTIVE_FAILS", cfg.MaxConsecutiveFails)
+	cfg.MaxLoopStrikes = getEnvInt("AGENT_MAX_LOOP_STRIKES", cfg.MaxLoopStrikes)
+	cfg.MaxHistoryMessages = getEnvInt("AGENT_MAX_HISTORY", cfg.MaxHistoryMessages)
+	cfg.CompactEnabled = getEnvInt("AGENT_COMPACT_ENABLED", 1) == 1
+	cfg.CompactTokenThreshold = getEnvInt("AGENT_COMPACT_TOKEN_THRESHOLD", cfg.CompactTokenThreshold)
+	cfg.CompactMinTurns = getEnvInt("AGENT_COMPACT_MIN_TURNS", cfg.CompactMinTurns)
+	cfg.MaxConcurrent = getEnvInt("FORGE_MAX_CONCURRENT", cfg.MaxConcurrent)
+	cfg.CacheMaxSize = getEnvInt("FORGE_CACHE_SIZE", cfg.CacheMaxSize)
+	cfg.MaxCodeSize = getEnvInt("FORGE_MAX_CODE_SIZE", cfg.MaxCodeSize)
+	cfg.MaxOutputLength = getEnvInt("FORGE_MAX_OUTPUT", cfg.MaxOutputLength)
+	cfg.RetryMax = getEnvInt("FORGE_RETRY_MAX", cfg.RetryMax)
+	cfg.RetryBackoff = getEnvDuration("FORGE_RETRY_BACKOFF", cfg.RetryBackoff)
 }
 
 // ─── Environment helpers ────────────────────────────────────

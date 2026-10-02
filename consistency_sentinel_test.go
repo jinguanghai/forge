@@ -64,24 +64,17 @@ func TestAuditLineConcurrentAppend(t *testing.T) {
 
 // ── 1b) 审计写入路径唯一: 不得有旁路 OpenFile ─────────────────────
 func TestAuditSingleWritePath(t *testing.T) {
-	fg, err := os.ReadFile("forge.go")
-	if err != nil {
-		t.Fatal(err)
+	// 包级扫描: 审计写入路径会随重构换文件, 写死文件名会让断言在搬家后恒真
+	// (实测踩到: auditGate 随拆分搬到 forge_audit.go 后, 本断言全数失效)
+	all := prodGoSources(t)
+	if !strings.Contains(all, "appendAuditJSONL(auditFilePath(f.workDir), entry)") {
+		t.Error("auditGate 未走唯一写入路径 appendAuditJSONL")
 	}
-	ag, err := os.ReadFile("agent.go")
-	if err != nil {
-		t.Fatal(err)
+	if !strings.Contains(all, "appendAuditJSONL(auditFilePath(dir), entry)") {
+		t.Error("appendAuditLine 未走唯一写入路径 appendAuditJSONL")
 	}
-	if !strings.Contains(string(fg), "appendAuditJSONL(auditFilePath(f.workDir), entry)") {
-		t.Error("forge.go auditGate 未走唯一写入路径 appendAuditJSONL")
-	}
-	if !strings.Contains(string(ag), "appendAuditJSONL(auditFilePath(dir), entry)") {
-		t.Error("agent.go appendAuditLine 未走唯一写入路径 appendAuditJSONL")
-	}
-	for _, s := range []string{string(fg), string(ag)} {
-		if strings.Contains(s, "os.OpenFile(auditFilePath(") {
-			t.Error("发现审计文件旁路写入 (绕过 appendAuditJSONL) — 锁与路径规则会脱节")
-		}
+	if strings.Contains(all, "os.OpenFile(auditFilePath(") {
+		t.Error("发现审计文件旁路写入 (绕过 appendAuditJSONL) — 锁与路径规则会脱节")
 	}
 }
 
@@ -108,19 +101,15 @@ func TestDetectImagesReadFailureReturnsError(t *testing.T) {
 
 // ── 3) agent 侧必须把识图错误透出给用户 ─────────────────────────
 func TestAgentSurfacesImageError(t *testing.T) {
-	src, err := os.ReadFile("agent.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(src)
+	s := prodGoSources(t)
 	if strings.Contains(s, "images, _ := detectImages(") {
-		t.Error("agent.go 丢弃 detectImages 的 error — 用户以为已发图, 实际静默降级纯文本")
+		t.Error("丢弃 detectImages 的 error — 用户以为已发图, 实际静默降级纯文本")
 	}
 	if !strings.Contains(s, "images, imgErr := detectImages(") {
-		t.Error("agent.go 未接住 detectImages 的 error")
+		t.Error("未接住 detectImages 的 error")
 	}
 	if !strings.Contains(s, "图片读取失败") {
-		t.Error("agent.go 未向用户提示图片读取失败")
+		t.Error("未向用户提示图片读取失败")
 	}
 }
 
@@ -131,9 +120,6 @@ func TestGateTimeoutSingleSource(t *testing.T) {
 	}
 	if deadBoundaryTimeout != 20*time.Second {
 		t.Errorf("deadBoundaryTimeout = %v, 期望 20s", deadBoundaryTimeout)
-	}
-	if shGateTimeout != 15*time.Second {
-		t.Errorf("shGateTimeout = %v, 期望 15s", shGateTimeout)
 	}
 	src, err := os.ReadFile("forge.go")
 	if err != nil {
@@ -154,11 +140,8 @@ func TestGateTimeoutSingleSource(t *testing.T) {
 
 // ── 5) check/lint/exec 三段同构: 判据不得缺一 ────────────────────
 func TestGateArgExpansionConsistency(t *testing.T) {
-	src, err := os.ReadFile("forge.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(src)
+	// 全包扫描: expandArgs 调用点随拆分分布在 forge_gate_file.go 等文件
+	s := prodGoSources(t)
 	for _, name := range []string{"compiler.Check", "compiler.Lint", "compiler.Exec"} {
 		if strings.Contains(s, ", _ := expandArgs("+name) {
 			t.Errorf("%s 调用点丢弃 hasFilePlaceholder — 三段同构代码判据不一致", name)

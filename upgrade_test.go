@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,6 +54,72 @@ func TestBuildRestartScript(t *testing.T) {
 		t.Errorf("致命失败路径缺少 exit 1")
 	}
 }
+
+// TestRestartScriptPath 钉住重启脚本落点归属(2S 定置: 自动生成物必须有专属容器)。
+// 根目录再出现 restart_self.ps1 = 归位失效; .forge-temp/ = 与启动清空机制(⑤)冲突。
+func TestRestartScriptPath(t *testing.T) {
+	work := `D:\forge`
+	got := restartScriptPath(work)
+	want := filepath.Join(work, ".forge", "restart_self.ps1")
+	if got != want {
+		t.Fatalf("restartScriptPath = %q, 期望 %q", got, want)
+	}
+	// 反向断言 1: 不得落在根目录(工作区)
+	if filepath.Dir(got) == work {
+		t.Errorf("重启脚本落在根目录(工作区): %q", got)
+	}
+	// 反向断言 2: 不得落在 .forge-temp(启动即清空)
+	if strings.Contains(filepath.ToSlash(got), ".forge-temp") {
+		t.Errorf("重启脚本落在 .forge-temp(启动即清空): %q", got)
+	}
+	// 单一来源: 产生点必须调本函数, 且不得残留写死根目录的路径拼接
+	src := readRepoFile(t, "upgrade.go")
+	if !strings.Contains(src, "scriptPath := restartScriptPath(workDir)") {
+		t.Errorf("产生点未使用 restartScriptPath 单一来源")
+	}
+	if strings.Contains(src, `filepath.Join(workDir, "restart_self.ps1")`) {
+		t.Errorf("upgrade.go 仍有写死根目录的路径拼接")
+	}
+	// 父目录必须能被 MkdirAll 建出(atomicWrite 不建父目录, 见 memory_store.go)
+	if filepath.Base(filepath.Dir(got)) != ".forge" {
+		t.Errorf("脚本父目录应为 .forge, 实得 %q", filepath.Base(filepath.Dir(got)))
+	}
+	// 接线钉住: MkdirAll 保护不得被删。此刻主进程已置 exitRequested, 脚本写不进去 =
+	// 程序退出且不回来(用户看不到原因)。注: 这是静态断言 —— 无法在单测里真实触发升级流程,
+	// 强度弱于运行验证, 故另配 TestRestartScriptPathWritable 动态验证该链路可行。
+	if !strings.Contains(src, "os.MkdirAll(filepath.Dir(scriptPath)") {
+		t.Errorf("upgrade.go 缺少 MkdirAll 保护(atomicWrite 不建父目录 → 脚本写入失败)")
+	}
+	// 重启链的日志产物必须在 .gitignore 内, 否则每次升级后 git status 变脏
+	if !strings.Contains(readRepoFile(t, ".gitignore"), ".forge/upgrade_restart.log") {
+		t.Errorf(".gitignore 缺少 .forge/upgrade_restart.log")
+	}
+}
+
+// TestRestartScriptPathWritable 动态验证落点链路可行: 空 workDir(.forge/ 不存在)
+// → MkdirAll → atomicWrite → 读回。防的是「落点改到新目录」与「atomicWrite 不建父目录」
+// 组合出的静默失败。
+func TestRestartScriptPathWritable(t *testing.T) {
+	work := t.TempDir() // 空目录, 无 .forge/
+	sp := restartScriptPath(work)
+	if _, err := os.Stat(filepath.Dir(sp)); err == nil {
+		t.Fatalf("前置条件不成立: %s 已存在", filepath.Dir(sp))
+	}
+	if err := os.MkdirAll(filepath.Dir(sp), 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := atomicWrite(sp, []byte("probe")); err != nil {
+		t.Fatalf("atomicWrite: %v", err)
+	}
+	got, err := os.ReadFile(sp)
+	if err != nil || string(got) != "probe" {
+		t.Fatalf("读回失败: err=%v got=%q", err, got)
+	}
+	if _, err := os.Stat(sp + ".tmp"); err == nil {
+		t.Errorf("原子替换应无 .tmp 残留")
+	}
+}
+
 func TestUpgradeTailLines(t *testing.T) {
 	got := upgradeTailLines("a\nb\n\n\nc\nd\ne\nf\ng", 3)
 	if len(got) != 3 || got[0] != "e" || got[2] != "g" {
@@ -92,7 +161,8 @@ func TestCreateCheckpoint(t *testing.T) {
 	os.WriteFile(filepath.Join(work, "main.go"), []byte("package main"), 0644)
 	os.WriteFile(filepath.Join(work, "memory.json"), []byte("{}"), 0644)
 	os.WriteFile(filepath.Join(work, ".forge", "forge-tools", "tcm_gate.go"), []byte("package main"), 0644)
-	os.WriteFile(filepath.Join(work, "forge.exe"), []byte("MZ..."), 0644)
+	exeContent := []byte("MZ...fake-exe-payload")
+	os.WriteFile(filepath.Join(work, "forge.exe"), exeContent, 0644)
 
 	if err := createCheckpoint(work, "20260812_120000", "test checkpoint"); err != nil {
 		t.Fatalf("createCheckpoint: %v", err)
@@ -103,10 +173,38 @@ func TestCreateCheckpoint(t *testing.T) {
 		t.Fatalf("应创建1个快照目录, got %d", len(entries))
 	}
 	dst := filepath.Join(ckDir, entries[0].Name())
-	for _, want := range []string{"main.go", "memory.json", "gate_tcm_gate.go", "forge.exe"} {
+	// 源码/记忆: 落盘
+	for _, want := range []string{"main.go", "memory.json", "gate_tcm_gate.go"} {
 		if _, err := os.Stat(filepath.Join(dst, want)); err != nil {
 			t.Errorf("快照缺少: %s", want)
 		}
+	}
+	// 二进制: 不落盘。旧断言把 "forge.exe 落盘" 当契约, 但那正是 33.96MB 冗余的根因
+	// (11.32MB/份 x keep=3); 消费点实测 0 处, 回滚走 forge.exe.bak_* 与 git。
+	if _, err := os.Stat(filepath.Join(dst, "forge.exe")); err == nil {
+		t.Errorf("快照不应落盘 forge.exe (冗余 11MB/份) —— 指纹应记进 checkpoint.json")
+	}
+	// 但指纹必须留下, 否则"自改前跑的是哪个版本"永久丢失。
+	mb, err := os.ReadFile(filepath.Join(dst, "checkpoint.json"))
+	if err != nil {
+		t.Fatalf("快照缺少 checkpoint.json: %v", err)
+	}
+	var meta checkpointMeta
+	if err := json.Unmarshal(mb, &meta); err != nil {
+		t.Fatalf("checkpoint.json 解析失败: %v", err)
+	}
+	if meta.Binary == nil {
+		t.Fatal("checkpoint.json 缺 binary 指纹")
+	}
+	wantSum := sha256.Sum256(exeContent)
+	if meta.Binary.SHA256 != hex.EncodeToString(wantSum[:]) {
+		t.Errorf("指纹不符: got %s", meta.Binary.SHA256)
+	}
+	if meta.Binary.Size != int64(len(exeContent)) {
+		t.Errorf("体积不符: got %d want %d", meta.Binary.Size, len(exeContent))
+	}
+	if meta.Ts != "20260812_120000" || meta.Reason != "test checkpoint" {
+		t.Errorf("元数据不符: %+v", meta)
 	}
 }
 

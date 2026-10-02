@@ -108,7 +108,7 @@ func memHealthReport(workDir string) string {
 		}
 	}
 
-	// ⑤ gates 字段一致性: 应含当前 12 面
+	// ⑤ gates 字段一致性: 应含当前全部 gate 面 (清单来自 铸剑炉_GATES)
 	if g, ok := m["gates"].(string); ok {
 		cur := 铸剑炉_GATES
 		for _, c := range cur {

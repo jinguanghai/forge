@@ -34,14 +34,40 @@ type CacheStat struct {
 
 var (
 	cacheStatMu   sync.Mutex
-	cacheStatPath = "cache_stats.jsonl"
+	cacheStatPath = defaultCacheStatName
 )
+
+// defaultCacheStatName 未显式设置工作目录时的默认文件名。
+const defaultCacheStatName = "cache_stats.jsonl"
 
 // setCacheStatPath 由 main 启动时用 cfg.WorkDir 设置。
 func setCacheStatPath(wd string) {
 	cacheStatMu.Lock()
 	defer cacheStatMu.Unlock()
-	cacheStatPath = filepath.Join(wd, "cache_stats.jsonl")
+	cacheStatPath = filepath.Join(wd, defaultCacheStatName)
+}
+
+// cacheStatPathForWrite 返回缓存统计的写入路径 (调用方须持有 cacheStatMu)。
+//
+// 优先级: 已显式设置 (非默认名) → 用它; 否则回退 FORGE_CACHE_STATS_PATH。
+//
+// 回退分支是给测试用的隔离出口, 与 auditFilePath 同构。背景 (实测 20260923):
+// 测试直接调 parseSSE/doStream 时 recordCacheStat 走默认相对路径, 写入仓库根,
+// 实测 cache_stats.jsonl 混入 1666 行假模型记录 (test-model 1645 / m 14 /
+// shape-model 7), 而 cacheHitRate 只取最近 n 条算命中率 —— 污染行落在窗口内
+// 会直接扭曲状态栏与 /cache 的命中率。setTempCacheStat 只覆盖显式调用它的测试,
+// 覆盖不到 parseSSE/doStream 内部路径, 故必须有进程级出口。
+func cacheStatPathForWrite() string {
+	if cacheStatPath != "" && cacheStatPath != defaultCacheStatName {
+		return cacheStatPath
+	}
+	if p := os.Getenv("FORGE_CACHE_STATS_PATH"); p != "" {
+		return p
+	}
+	if cacheStatPath == "" {
+		return defaultCacheStatName
+	}
+	return cacheStatPath
 }
 
 // recordCacheStat 追加一条请求级缓存统计 (幂等, 失败静默)。
@@ -64,7 +90,7 @@ func recordCacheStat(model string, hit, miss int, sysHash string, sysChanged boo
 	cacheStatMu.Lock()
 	defer cacheStatMu.Unlock()
 	// Windows: 立即 Close, 避免句柄占用阻塞后续 rename
-	f, err := os.OpenFile(cacheStatPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(cacheStatPathForWrite(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return
 	}

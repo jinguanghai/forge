@@ -56,17 +56,29 @@ func TestFreshnessOf(t *testing.T) {
 	yesterday := timeNowStr(1)
 	old := timeNowStr(40)
 	far := timeNowStr(90)
-	if st, _ := freshnessOf("落地(" + yesterday + ")"); st != "fresh" {
+	// 兼容路径: ts 为空 → 回退到正文内日期
+	if st, _ := freshnessOf("", "落地("+yesterday+")"); st != "fresh" {
 		t.Fatalf("1天前应 fresh, got %s", st)
 	}
-	if st, _ := freshnessOf("落地(" + old + ")"); st != "stale" {
+	if st, _ := freshnessOf("", "落地("+old+")"); st != "stale" {
 		t.Fatalf("40天前应 stale, got %s", st)
 	}
-	if st, _ := freshnessOf("落地(" + far + ")"); st != "stale" {
+	if st, _ := freshnessOf("", "落地("+far+")"); st != "stale" {
 		t.Fatalf("90天前应 stale, got %s", st)
 	}
-	if st, _ := freshnessOf("无日期内容"); st != "current" {
-		t.Fatalf("无日期应 current, got %s", st)
+	// fail-closed: 无 ts 且正文无日期 → stale(降权), 不再静默 current
+	if st, _ := freshnessOf("", "无日期内容"); st != "stale" {
+		t.Fatalf("无时间锚点应 stale(fail-closed), got %s", st)
+	}
+	// 显式锚点优先于正文日期
+	if st, _ := freshnessOf("static", "旧日期(20200101)"); st != "current" {
+		t.Fatalf("static 应 current, got %s", st)
+	}
+	if st, d := freshnessOf(old, "static 字样(20200101)"); st != "stale" || d < 30 {
+		t.Fatalf("显式 ts 应优先于正文日期: state=%s days=%d", st, d)
+	}
+	if st, _ := freshnessOf("2026-09-20", "文本"); st != "stale" {
+		t.Fatalf("非法 ts 格式应 stale(fail-closed), got %s", st)
 	}
 	if w := freshnessWeight("fresh"); w != 1.0 {
 		t.Fatalf("fresh weight=%v", w)
@@ -81,7 +93,7 @@ func TestLoadKeyFindingsMixed(t *testing.T) {
 	dir := t.TempDir()
 	mem := map[string]interface{}{
 		"key_findings": []interface{}{
-			map[string]interface{}{"title": "T1", "content": "第一条内容"},
+			map[string]interface{}{"title": "T1", "content": "第一条内容", "ts": "static"},
 			"旧格式纯字符串内容很长很长很长很长很长",
 			map[string]interface{}{"title": "", "content": "无标题内容"},
 		},
@@ -97,8 +109,11 @@ func TestLoadKeyFindingsMixed(t *testing.T) {
 	if len(kfs) != 3 {
 		t.Fatalf("len=%d want 3", len(kfs))
 	}
-	if kfs[0].Title != "T1" || kfs[0].Content != "第一条内容" {
+	if kfs[0].Title != "T1" || kfs[0].Content != "第一条内容" || kfs[0].TS != "static" {
 		t.Fatalf("dict条目解析错误: %+v", kfs[0])
+	}
+	if kfs[1].TS != "" {
+		t.Fatalf("旧格式纯字符串应无 ts: %+v", kfs[1])
 	}
 	if kfs[1].Title == "" || kfs[1].Content == "" {
 		t.Fatalf("字符串条目应自动包装: %+v", kfs[1])

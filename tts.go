@@ -17,24 +17,13 @@ import (
 	"unsafe"
 )
 
+const maxSpeechRunes = 480
+
 var voiceMu sync.Mutex
+
 var voiceEnabled bool = voiceDefaultEnabled()
+
 var voiceName string = voiceDefaultName()
-
-func voiceDefaultEnabled() bool {
-	v := strings.TrimSpace(os.Getenv("FORGE_VOICE"))
-	if v == "0" || strings.EqualFold(v, "off") || strings.EqualFold(v, "false") || strings.EqualFold(v, "no") {
-		return false
-	}
-	return true
-}
-
-func voiceDefaultName() string {
-	if v := strings.TrimSpace(os.Getenv("FORGE_VOICE_NAME")); v != "" {
-		return v
-	}
-	return "zh-CN-XiaoxiaoNeural"
-}
 
 var knownVoices = []string{
 	"zh-CN-XiaoxiaoNeural",
@@ -54,16 +43,45 @@ var knownVoices = []string{
 }
 
 var spAnsiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
 var spCodeBlockRe = regexp.MustCompile("(?s)```.*?```")
+
 var spInlineCodeRe = regexp.MustCompile("`[^`]*`")
+
 var spBoldRe = regexp.MustCompile(`(\*\*|__)(.*?)(\*\*|__)`)
+
 var spHeadRe = regexp.MustCompile("(?m)^\\s*#{1,6}\\s*")
+
 var spListRe = regexp.MustCompile("(?m)^\\s*[-*+]\\s+")
+
 var spQuoteRe = regexp.MustCompile("(?m)^\\s*>\\s?")
+
 var spTableRe = regexp.MustCompile("(?m)^\\s*\\|[^\\n]*\\|\\s*$")
+
 var spUrlRe = regexp.MustCompile(`https?:\/\/\S+`)
+
 var spMultiSpaceRe = regexp.MustCompile(`[ \t]{2,}`)
+
 var spMultiNewlineRe = regexp.MustCompile(`\n{3,}`)
+
+var winmm = syscall.NewLazyDLL("winmm.dll")
+
+var procMci = winmm.NewProc("mciSendStringW")
+
+func voiceDefaultEnabled() bool {
+	v := strings.TrimSpace(os.Getenv("FORGE_VOICE"))
+	if v == "0" || strings.EqualFold(v, "off") || strings.EqualFold(v, "false") || strings.EqualFold(v, "no") {
+		return false
+	}
+	return true
+}
+
+func voiceDefaultName() string {
+	if v := strings.TrimSpace(os.Getenv("FORGE_VOICE_NAME")); v != "" {
+		return v
+	}
+	return "zh-CN-XiaoxiaoNeural"
+}
 
 func sanitizeForSpeech(s string) string {
 	s = spAnsiRe.ReplaceAllString(s, "")
@@ -79,9 +97,6 @@ func sanitizeForSpeech(s string) string {
 	s = spMultiNewlineRe.ReplaceAllString(s, "\n\n")
 	return strings.TrimSpace(s)
 }
-
-var winmm = syscall.NewLazyDLL("winmm.dll")
-var procMci = winmm.NewProc("mciSendStringW")
 
 func mciCmd(cmd string) error {
 	p, err := syscall.UTF16PtrFromString(cmd)
@@ -144,8 +159,6 @@ asyncio.run(main())
 	}
 	return nil
 }
-
-const maxSpeechRunes = 480
 
 func voiceSpeak(text string) error {
 	voiceMu.Lock()

@@ -92,3 +92,37 @@ func TestAnchorAuditWritesFile(t *testing.T) {
 		t.Fatalf("摘要应含总数: %s", sum)
 	}
 }
+
+// TestAnchorAuditRecordsWhenGuardOff: 关闭护栏仍必须留痕, 且不占当日配额。
+// 回归 20260925: anchorGuardAudit 首行即 return → 关护栏=审计静默(失效不留痕)。
+func TestAnchorAuditRecordsWhenGuardOff(t *testing.T) {
+	wd := t.TempDir()
+	t.Setenv("FORGE_ANCHOR_GUARD", "0")
+	if err := SaveMemory(wd, testMainMemory()); err != nil {
+		t.Fatalf("关护栏写入应成功: %v", err)
+	}
+	data, err := os.ReadFile(anchorAuditPath(wd))
+	if err != nil {
+		t.Fatalf("关护栏写入必须留痕(原缺陷=审计静默): %v", err)
+	}
+	if !strings.Contains(string(data), `"guard_off":true`) {
+		t.Fatalf("审计条目应带 guard_off 标记: %s", string(data))
+	}
+	if c, _ := anchorAuditTodayCount(wd); c != 0 {
+		t.Fatalf("关护栏写入不应占配额, count=%d", c)
+	}
+
+	// 关护栏写入不占配额 → 开护栏后第 1 次写入仍应放行 (配额语义不变)
+	t.Setenv("FORGE_ANCHOR_GUARD", "1")
+	m := map[string]interface{}{}
+	_ = json.Unmarshal(testMainMemory(), &m)
+	m["axioms"] = "公理一: 注意力稀缺(改)"
+	nd, _ := json.Marshal(m)
+	if err := SaveMemory(wd, nd); err != nil {
+		t.Fatalf("关护栏写入不应占用配额, 开护栏后首次写入应放行: %v", err)
+	}
+	// 第 2 次仍必须被拦 (护栏主功能未被削弱)
+	if err := SaveMemory(wd, nd); err == nil {
+		t.Fatal("开护栏后同日第 2 次锚点写入应被拦")
+	}
+}
