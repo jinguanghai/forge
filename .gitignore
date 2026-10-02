@@ -79,7 +79,6 @@ forge_cache.gob
 defense_system/*.log
 defense_system/logs/
 defense_system/reports/
-defense_system/forge_baseline*.json
 defense_system/trace_demo_report.json
 
 # --- 20260802 建仓后清理：编译产物与运行时数据 ---
@@ -117,6 +116,7 @@ defense_system/test_secret_scan/fake_leak.py
 # 守卫事件日志 (运行时文件, 取证档案在本机即可)
 # --- 20260914 质量告警层 (forge_watchdog) 运行时产物, 不入库 ---
 .forge/alerts.jsonl
+.forge/hygiene_red_cards.jsonl
 .forge/hourly_log.txt
 .forge/watchdog_state.json
 .forge/guard_log.jsonl
@@ -131,6 +131,7 @@ cache_stats.jsonl
 .forge/events.jsonl.*
 .forge/health_watermark
 .forge/updates/
+.forge/upgrade_restart.log
 
 # --- 观感/工程化补强: 个人工作区草稿与运行时产物一律不入库 ---
 # 开发过程计划/笔记/草稿
@@ -254,3 +255,16 @@ forge.exe.*
 
 # 分形守卫运行时状态 (可再生, 非源码)
 .forge/fractal_state.json
+cache_stats*.jsonl
+.forge/cache_guard_state.json
+
+# --- 20261001 媒体 gate 产物与留痕 (运行时数据, 非源码) ---
+.forge/media/
+.forge/media_cost.jsonl
+.forge/deploy_pending.json
+
+# --- 20261002 运行时产物退出入库: 委托档审批取证全文 + 自改前源码备份 ---
+# 动因: gitSnapshot 用 `git add -u` 会把已跟踪的 index.jsonl 变更持续带入 auto 提交;
+#       取证全文逐次追加且体积大, 属运行时数据非源码。只忽略入库, 绝不删除内容。
+.forge/approvals/
+.forge/backups/
