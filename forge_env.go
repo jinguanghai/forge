@@ -238,7 +238,7 @@ func (f *Forge) newCmd(ctx context.Context, name string, args ...string) *exec.C
 	cmd := exec.Command(name, args...)
 	// 工作目录绑定: 自托管 gate (relation/tcm 等) 靠相对路径读源码与数据文件。
 	// 若子进程继承"启动目录", 从别处启动 forge.exe 就会扫错根、找不到数据
-	// (20260925 实测: 从 C:\Users\jin 启动 -> relation 报"生产符号 0"、tcm 报"方剂库未找到";
+	// (20260925 实测: 从 C:\\Users\\<user> 启动 -> relation 报"生产符号 0"、tcm 报"方剂库未找到";
 	//  而全量测试全绿, 因测试里 WorkDir 恰好 == 进程 cwd, 错位场景构造不出来)。
 	// 全部 gate 子进程都经 newCmd 这一个入口创建, 故在此单点绑定。
 	if f.workDir != "" {

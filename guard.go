@@ -263,7 +263,7 @@ func summarizeCode(code string) string {
 // 为什么扫描而不手写: 手写清单会腐化且无人发现。2026-09 审计实测手写版只覆盖
 // 19/53 个 .go —— nosword.go / cache_stats.go / memory_fold.go / memory_recall.go /
 // main_commands.go / session.go 等核心文件全部裸奔, 且含 3 条磁盘上已不存在的
-// 幽灵路径(gh_token.txt / id_ed25519_vultr / forge_baseline.json)。
+// 幽灵路径(旧 token 文件 / SSH 密钥名 / 基线文件)。
 // 改为「扫描 dir 下全部 *.go + 显式非源码资产」→ 腐化在结构上不可能。
 func protectedTargets(dir string) []string {
 	protectedMu.Lock()

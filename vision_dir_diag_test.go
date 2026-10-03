@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ func TestVisionDirDiag(t *testing.T) {
 	if os.Getenv("FORGE_E2E") != "1" {
 		t.Skip("FORGE_E2E!=1: 跳过真实 vision 目录 API")
 	}
-	dir := `C:\Users\jin\Pictures\Screenshots`
+	dir := filepath.Join(os.Getenv("USERPROFILE"), "Pictures", "Screenshots")
 	parts, err := discoverImagesInDir(dir)
 	if err != nil {
 		t.Fatal(err)

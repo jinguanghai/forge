@@ -2,7 +2,7 @@ package main
 
 // workdir_binding_test.go — 子进程工作目录绑定哨兵 (20260925)
 //
-// 由来: 从 C:\Users\jin 启动 forge.exe 时, 自托管 gate (relation/tcm) 继承"启动目录",
+// 由来: 从 C:\\Users\\<user> 启动 forge.exe 时, 自托管 gate (relation/tcm) 继承"启动目录",
 // 于是 relation_gate.py 扫不到任何 .go (报"生产符号 0"), tcm 找不到 formula_db.json
 // (报"未找到") —— 而全量 657 用例全绿。根因: 既有测试里 WorkDir = os.Getwd(),
 // "工作目录"与"进程当前目录"恒等, 错位场景在结构上无法被构造。
