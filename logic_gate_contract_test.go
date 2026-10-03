@@ -139,6 +139,10 @@ func TestLogicGateAcceptsZ3PyForms(t *testing.T) {
 		{"证明", "prove", "claim = x + 1 > x", "proved"},
 		{"等价", "equivalence", "a = x + y\nb = y + x", "equivalent"},
 		{"type 省略默认 sat", "", "x > 0", "sat"},
+		// 量词: z3 内建名(ForAll/Exists)绝不能被当自由变量声明, 否则
+		// `ForAll = Int('ForAll')` 覆盖内建 → 'ArithRef' object is not callable
+		{"量词 ForAll", "sat", "ForAll(x, x*x >= 0)", "sat"},
+		{"量词 Exists", "sat", "Exists(x, x > 0)", "sat"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

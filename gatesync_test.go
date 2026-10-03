@@ -224,10 +224,10 @@ func TestGatesync_ContainsIssue(t *testing.T) {
 	}
 }
 
-func TestGatesync_CurrentGatesHas13Unique(t *testing.T) {
+func TestGatesync_CurrentGatesHas14Unique(t *testing.T) {
 	got := currentGates
-	if len(got) != 13 {
-		t.Fatalf("gate 面数 = %d 期望 13 (sh 已于 20261001 退役)", len(got))
+	if len(got) != 14 {
+		t.Fatalf("gate 面数 = %d 期望 14 (sh 已于 20261001 退役; 20261002 加 task)", len(got))
 	}
 	seen := map[string]bool{}
 	for _, g := range got {

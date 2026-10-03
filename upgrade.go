@@ -160,7 +160,7 @@ func SelfUpgrade(cfg *Config) error {
 // 为何不放 .forge-temp/: 该目录启动即被清空(见 cleanupWorkTempDir)。实测 PowerShell 5.1
 // 下小脚本会被整体读入内存, 3/3 语句在「执行中途删脚本」后仍续跑 —— 但那是未文档化的
 // 实现细节, 不是契约。脚本执行到 Start-Process 拉起新进程时, 清空恰好可能发生;
-// 把安全押在「读得比删得快」上 = 依赖实现细节(公理四: 确定性须由死程序保证)。
+// 把安全押在「读得比删得快」上 = 依赖实现细节(公理二: 确定性须由死程序保证)。
 // 选零风险: 放一个不会被清空的目录。
 func restartScriptPath(workDir string) string {
 	return filepath.Join(workDir, ".forge", "restart_self.ps1")

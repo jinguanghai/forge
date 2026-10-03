@@ -60,7 +60,7 @@ func TestCacheStatIsolation_WriteDoesNotReachRepoRoot(t *testing.T) {
 	const marker = "isolation-probe-model-9f3a1c"
 	old := cacheStatPath
 	cacheStatPath = defaultCacheStatName // 模拟测试进程的默认状态
-	recordCacheStat(marker, 111, 222, "", false)
+	recordCacheStat(marker, 111, 222, 0, "", false)
 	cacheStatPath = old
 
 	if b, err := os.ReadFile(prod); err == nil && strings.Contains(string(b), marker) {

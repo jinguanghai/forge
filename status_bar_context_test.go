@@ -215,7 +215,7 @@ func TestContextBudgetUsed_MatchesTriggerBoundary(t *testing.T) {
 
 // ── 10. 同源(接线): maybeCompact 必须调用 contextBudgetUsed ──
 //
-// 接线只能由死程序判定 (公理七): 注释/文档里写"同源"不算证据。
+// 接线只能由死程序判定 (公理三): 注释/文档里写"同源"不算证据。
 // AST 扫描天然剥离注释与字符串, 故注释里提及旧函数名不会造成假阳性。
 // 变异验证: 把触发改回 est := estimateTokens(a.history) 并删掉 contextBudgetUsed
 // 调用 → 本用例转红。

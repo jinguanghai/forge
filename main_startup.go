@@ -14,6 +14,33 @@ import (
 	"time"
 )
 
+// 自替换后的「重启」做成可注入变量 (20261003):
+//
+// Windows 的进程名在启动那一刻定格 —— 把 forge_new.exe 改名就位成 forge.exe 之后,
+// 进程名仍然是 forge_new.exe。于是所有「按名字关旧炉子」的外部脚本(upgrade.cmd /
+// restart.cmd / rollback.cmd / 各 .bat)全部失明: 升级脚本关不掉旧进程, 却继续往下
+// 走 → 同时起两个实例抢写 memory.json / 缓存 / 审计流, 而存活检查看到新实例又报
+// 「升级成功」= 假成功。修法就是就位后自己重启, 让进程名与文件名永远一致。
+//
+// 之所以做成变量: 真实 spawn 出去就收不回来(会多起一个进程), 测试无法观察, 只能靠
+// 注入断言参数; 退出同理 —— 测试进程不能被真退出。
+var (
+	spawnSelfProcess = func(exePath, workDir string) error {
+		cmd := exec.Command(exePath)
+		cmd.Dir = workDir
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		// 故意不 Wait: 子进程要独立于父进程活下去(父进程随后 selfReplaceExit)。
+		// Windows 上父进程退出不会连带杀死子进程, 控制台仍被子进程附着。
+		return nil
+	}
+	selfReplaceExit = func(code int) { os.Exit(code) }
+)
+
 // runSelfReplace 自替换: 以 forge_new.exe 名字启动时, 把它就位为 forge.exe。
 //
 // 说明: self gate 现在自己完成「冒烟→就位」(见 forge.go deploySelfExe),
@@ -68,7 +95,19 @@ func runSelfReplace() {
 		return
 	}
 	pruneExeBackups(exeDir, backupKeepCount)
-	appendSelfReplaceEvent(exeDir, map[string]string{"result": "ok", "backup": backup})
+	// 就位后必须重启 —— 理由见 spawnSelfProcess 的注释(进程名定格)。
+	ev := map[string]string{"result": "ok", "backup": backup}
+	if serr := spawnSelfProcess(oldExe, exeDir); serr != nil {
+		ev["restart"] = "failed"
+		ev["err"] = serr.Error()
+		appendSelfReplaceEvent(exeDir, ev)
+		fmt.Fprintf(os.Stderr, "%s 已就位为 forge.exe, 但自动重启失败: %v\n", color(ansi.yellow, "⚠"), serr)
+		fmt.Fprintf(os.Stderr, "   请手动关闭本窗口, 再双击 %s\n", oldExe)
+		return
+	}
+	ev["restart"] = "spawned"
+	appendSelfReplaceEvent(exeDir, ev)
+	selfReplaceExit(0)
 }
 
 // appendSelfReplaceEvent 启动序早期的最小留痕: 直接 append 到 <workDir>/.forge/events.jsonl。

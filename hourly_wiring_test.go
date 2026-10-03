@@ -49,6 +49,9 @@ var wantHourlyTasks = map[string][]string{
 	"bench":    {"bench_report_check.py"},
 	"version":  {"version_check.py"},
 	"webgw":    {"web_gateway_check.py"},
+	// semantics (20261003): gate 语义基准 —— 判据表带脚本名即钉住接线;
+	// 它跑的是 go test (非 .py), 因此调度臂是 .py 包装 (TestHourlyScriptsExist 才能覆盖)。
+	"semantics": {"bench_semantics_check.py"},
 }
 
 // parseHourlyTasks 解析 defense_system/hourly.py 的 TASKS 表。

@@ -43,7 +43,7 @@ type turnFinalizer struct {
 func (f *turnFinalizer) finalize(asst, reasoning, source string) bool {
 	// ── 无剑求值感知 (FORGE_NOSWORD=1): 死程序嗅探 asst 中的求值锚点,
 	// 命中则把稳定反馈作为 user 消息注入, continue 让 LLM 看到反馈后
-	// 修正继续生成 (公理五: 判据由死程序把守, LLM 据此自然调整)。──
+	// 修正继续生成 (公理二: 判据由死程序把守, LLM 据此自然调整)。──
 	if fb := f.nswIntervene(asst); fb != "" {
 		*f.messages = append(*f.messages,
 			ChatMessage{Role: "assistant", Content: asst, ReasoningContent: reasoning},

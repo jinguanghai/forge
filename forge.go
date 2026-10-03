@@ -326,6 +326,22 @@ func (f *Forge) Build(code, lang, input string) (string, *ForgeGateResult, error
 		return fmt.Sprintf("--- ⛔ sh gate 已退役 [retired] ---\n%s\n--- 结束 ---", shGateRetiredText), &result, nil
 	}
 
+	// ─── 重模式拒绝权 (P0-3, 20261002) ───
+	// agent_memory.go 的建议类约束实测无效(214 次超时, 白耗 6486s), 故升级为
+	// gate 层前置拒绝: 命中即当场拒绝 + 附替代写法(lang="task" 长任务通道)。
+	// 拒绝可判定且当场截断, 猜测要烧一整轮重试。lang=task 本身是通道, 不拦。
+	if lang != "task" && heavyGuardEnabled() {
+		if hitName, ev, heavy := checkHeavyTask(code); heavy {
+			result = ForgeGateResult{
+				OK: false, Lang: lang, Stage: "rejected",
+				Error: fmt.Sprintf("重活被拒 [%s]: %s", hitName, ev),
+			}
+			logGuardEvent(f.workDir, "info", "重活", hitName, "deny", "重活拒绝: "+ev, code)
+			return fmt.Sprintf("--- ⛔ 重活被拒 [rejected] ---\n命中「%s」: %s\n\n%s\n--- 结束 ---",
+				hitName, ev, heavyTaskText), &result, nil
+		}
+	}
+
 	if f.retryMax > 1 {
 		result = f.retryGate(code, lang, input)
 	} else {
@@ -349,12 +365,11 @@ func (f *Forge) Build(code, lang, input string) (string, *ForgeGateResult, error
 		if result.Stderr != "" {
 			errMsg = result.Stderr
 		}
-		errOutput := fmt.Sprintf("--- %s 失败 [%s] ---\n错误: %s\n标准错误:\n%s\n--- 结束 ---",
-			lang, result.Stage, result.Error, result.Stderr)
-		if result.Diagnostics != "" {
-			errOutput += "\n--- diagnostics ---\n" + result.Diagnostics
-		}
-		return errOutput, &result, fmt.Errorf("%s 门失败: %s", lang, errMsg)
+		// 失败路径统一走 formatResult: 旧实现只拼 Error+Stderr, 把超时前的部分输出
+		// (Stdout)、Lint、截断提示、captureNote 全部丢弃 —— 模型看不到卡在哪一步,
+		// 只能盲猜重写(实测超时后反复重写, 单日 95 次超时)。formatResult 已含
+		// Stdout/Stderr/Error/Lint/Diagnostics/截断/summary 全套渲染, 无需重复实现。
+		return f.formatResult(result), &result, fmt.Errorf("%s 门失败: %s", lang, errMsg)
 	}
 	return f.formatResult(result), &result, nil
 }

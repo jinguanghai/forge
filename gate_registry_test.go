@@ -96,8 +96,8 @@ func TestSystemPromptDynamicGates(t *testing.T) {
 // TestTrimmedGateRegistry 验收: gate 注册表 8 个, 不含已删 gate
 func TestTrimmedGateRegistry(t *testing.T) {
 	names := gateNames()
-	if len(names) != 10 {
-		t.Fatalf("gate 注册表应为 10 个, got %d: %v", len(names), names)
+	if len(names) != 11 {
+		t.Fatalf("gate 注册表应为 11 个 (20261002 加 task), got %d: %v", len(names), names)
 	}
 	for _, gone := range []string{"eprover", "repair", "system"} {
 		for _, n := range names {
@@ -109,8 +109,8 @@ func TestTrimmedGateRegistry(t *testing.T) {
 	// describeGates 输出 8 条 (立项书验收标准 3)
 	all := describeGates(nil)
 	lines := strings.Count(all, "   - ")
-	if lines != 10 {
-		t.Fatalf("describeGates 应为 10 条, got %d", lines)
+	if lines != 11 {
+		t.Fatalf("describeGates 应为 11 条 (20261002 加 task), got %d", lines)
 	}
 	if strings.Contains(all, "eprover") || strings.Contains(all, "repair") || strings.Contains(all, "system_gate") {
 		t.Fatalf("describeGates 含已删 gate: %s", all)
@@ -119,16 +119,16 @@ func TestTrimmedGateRegistry(t *testing.T) {
 
 // TestTrimmedCompilers 验收: COMPILERS 13 个 (sh 退役后), 不含已删 7 个
 func TestTrimmedCompilers(t *testing.T) {
-	if len(铸剑炉_COMPILERS) != 13 {
-		t.Fatalf("COMPILERS 应为 13 个 (sh 已于 20261001 退役), got %d", len(铸剑炉_COMPILERS))
+	if len(铸剑炉_COMPILERS) != 14 {
+		t.Fatalf("COMPILERS 应为 14 个 (sh 已于 20261001 退役; 20261002 加 task), got %d", len(铸剑炉_COMPILERS))
 	}
 	for _, gone := range []string{"deno", "rust", "tcc", "system", "repair", "eprover"} {
 		if _, ok := 铸剑炉_COMPILERS[gone]; ok {
 			t.Fatalf("已裁剪 %s 仍在 COMPILERS", gone)
 		}
 	}
-	// 保留 13 个核心面 (sh 已于 20261001 退役)
-	for _, keep := range []string{"python", "go", "node", "math", "logic", "regex", "knowledge", "tcm", "browser", "chain", "self", "relation", "media"} {
+	// 保留 14 个核心面 (sh 已于 20261001 退役; 20261002 加 task)
+	for _, keep := range []string{"python", "go", "node", "math", "logic", "regex", "knowledge", "tcm", "browser", "chain", "self", "relation", "media", "task"} {
 		if _, ok := 铸剑炉_COMPILERS[keep]; !ok {
 			t.Fatalf("应保留的 %s 不在 COMPILERS", keep)
 		}

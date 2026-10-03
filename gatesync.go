@@ -29,7 +29,9 @@ var currentGates = 铸剑炉_GATES
 //	browser  : 依赖 playwright, 发布环境通常未装 → 发布也不可用
 //	self     : 自改源码 gate, 公开有风险
 //	relation : Python 实现依赖本地源码扫描, 发布需移植为 JS (待定)
-var pluginUnpublishedGates = []string{"tcm", "browser", "self", "relation", "media"}
+//	task     : 长任务通道依赖本地 Python 脚本与 .forge/tasks 状态目录,
+//	           插件版(JS 沙箱)无对应实现 —— 发布也不可用 (20261002)
+var pluginUnpublishedGates = []string{"tcm", "browser", "self", "relation", "media", "task"}
 
 // hasGateToken 检查 data 中是否出现"独立的" gate 名 (词边界判定)。
 //

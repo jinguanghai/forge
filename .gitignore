@@ -268,6 +268,10 @@ cache_stats*.jsonl
 #       取证全文逐次追加且体积大, 属运行时数据非源码。只忽略入库, 绝不删除内容。
 .forge/approvals/
 .forge/backups/
+.forge/tasks/
+
+# --- 20261003 判据鉴别力探针留痕 (运行时数据, 非源码) ---
+.forge/mutation_probe.jsonl
 
 # --- 20261002 web 网关定性: 源码可入库, 私钥与凭据必须排除 ---
 # 动因: web/.tls/key.pem 是 TLS 私钥、web/*/.auth 是访问凭据, 一旦 git add -A

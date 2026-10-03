@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -119,5 +120,66 @@ func TestP0_DiagnosticsSurvivesStderr(t *testing.T) {
 	})
 	if !strings.Contains(out, "DIAG_MARKER_UNIQUE") {
 		t.Errorf("Diagnostics 被渲染层吞掉:\n%s", out)
+	}
+}
+
+// TestP0_BuildFailureRendersPartialOutput 端到端(生产入口): 真跑一个会超时的
+// python 脚本, 断言 Build() 的失败返回串含超时前已 flush 的部分输出。
+//
+// 动机(20261002 六西格玛实测): 旧实现只拼 Error+Stderr, 把超时前的 Stdout、
+// Lint、截断提示、captureNote 全丢了 —— 诊断区写着「上方共 N 字节输出是超时前
+// 的部分结果」, 正文却一个字没有(自相矛盾), 模型看不到卡在哪一步, 只能盲猜
+// 重写。判据必须打在生产入口 Build, 而非只测 formatResult(后者在生产失败路径
+// 根本没被调用 —— 旧判据因此恒真)。
+func TestP0_BuildFailureRendersPartialOutput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 跳过真实超时执行")
+	}
+	orig, ok := 铸剑炉_COMPILERS["python"]
+	if !ok {
+		t.Fatal("铸剑炉_COMPILERS 缺 python")
+	}
+	mod := orig
+	mod.ExecTimeout = 1200 * time.Millisecond // 只改执行预算, 其余保持真实配置
+	铸剑炉_COMPILERS["python"] = mod
+	defer func() { 铸剑炉_COMPILERS["python"] = orig }()
+
+	f := &Forge{workDir: t.TempDir(), ctx: context.Background(),
+		sem: make(chan struct{}, 1), cache: make(map[string]ForgeGateResult)}
+	// 触发方式必须绕开重活判据 (forge_heavy.go H3): 写 time.sleep(30) 会被 Build
+	// 当场拒绝 (stage=rejected), 超时渲染路径根本走不到 —— 实测该测试因此报红。
+	// 用"无限循环 + 短 sleep"得到真超时, 且不命中任何判据。
+	code := "import time\nprint('PARTIAL_MARKER_XYZ', flush=True)\nwhile True:\n    time.sleep(1)\n"
+	out, r, err := f.Build(code, "python", "")
+	if err == nil {
+		t.Fatalf("超时 Build 必须返回 error, got out=%q r=%+v", out, r)
+	}
+	if r == nil || !r.Timeout {
+		t.Fatalf("Timeout 标记缺失: %+v", r)
+	}
+	if !strings.Contains(out, "PARTIAL_MARKER_XYZ") {
+		t.Errorf("生产 Build 失败返回串丢了超时前部分输出(渲染层回归):\n%s", out)
+	}
+	if !strings.Contains(out, "预算烧完") {
+		t.Errorf("生产 Build 失败返回串丢了超时诊断:\n%s", out)
+	}
+}
+
+// TestAuditGateEmitsTimeout gate 主事件流必须落 timeout 字段。
+// 旧实现只有 gate_attempt 带该字段, 统计超时率须 join 两张表, 主审计流自身量不出。
+func TestAuditGateEmitsTimeout(t *testing.T) {
+	os.Setenv("FORGE_GATE_AUDIT", "1")
+	defer os.Unsetenv("FORGE_GATE_AUDIT")
+	wd := t.TempDir()
+	f := &Forge{workDir: wd}
+	res := ForgeGateResult{OK: false, Lang: "python", Stage: "execute", Timeout: true,
+		Error: "python execution failed: context deadline exceeded"}
+	f.auditGate("python", false, false, time.Now(), 0, 10, 0, "", &res)
+	b, err := os.ReadFile(filepath.Join(wd, "gate_audit.jsonl"))
+	if err != nil {
+		t.Fatalf("读审计: %v", err)
+	}
+	if !strings.Contains(string(b), `"timeout":true`) {
+		t.Errorf("gate 主审计流未落 timeout 字段:\n%s", string(b))
 	}
 }

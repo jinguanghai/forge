@@ -34,8 +34,8 @@ func TestGatesList_MatchesCompilerTable(t *testing.T) {
 			t.Errorf("表里有 %s 但不在 铸剑炉_GATES 清单中 (幽灵 gate)", k)
 		}
 	}
-	if len(铸剑炉_GATES) != 13 {
-		t.Errorf("当前应为 13 面 gate (sh 已于 20261001 退役), 实际 %d", len(铸剑炉_GATES))
+	if len(铸剑炉_GATES) != 14 {
+		t.Errorf("当前应为 14 面 gate (sh 已于 20261001 退役; 20261002 新增 task 长任务通道), 实际 %d", len(铸剑炉_GATES))
 	}
 }
 

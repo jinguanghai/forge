@@ -185,6 +185,10 @@ func TestMathGateAcceptsValidExpressions(t *testing.T) {
 		{"x^2-4", "[-2, 2]", "solve"},
 		{"x^3", "3*x**2", "diff"},
 		{"x^2-1", "(x - 1)*(x + 1)", "factor"},
+		// 求值型表达式: parse 阶段就返回 list 的形态, 必须原样输出而非进符号变换
+		// (旧版 simplify(list) → AttributeError: 'list' object has no attribute 'replace')
+		{"solve(x^2-4, x)", "[-2, 2]", ""},
+		{"solve(x^2-9, x)", "[-3, 3]", ""},
 	}
 	for _, c := range cases {
 		req := map[string]string{"expr": c.expr}

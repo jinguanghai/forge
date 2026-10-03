@@ -64,7 +64,7 @@ func TestCacheStats_RecordAndRead(t *testing.T) {
 	dir := t.TempDir()
 	withCacheStatDir(t, dir)
 
-	recordCacheStat("deepseek-flash", 90, 10, "abc123", false)
+	recordCacheStat("deepseek-flash", 90, 10, 7, "abc123", false)
 
 	data, err := os.ReadFile(filepath.Join(dir, defaultCacheStatName))
 	if err != nil {
@@ -76,6 +76,10 @@ func TestCacheStats_RecordAndRead(t *testing.T) {
 	}
 	if got.Model != "deepseek-flash" || got.Hit != 90 || got.Miss != 10 || got.SysHash != "abc123" {
 		t.Errorf("统计字段不符: %+v", got)
+	}
+	// 输出 token 必须随行落盘 (此前只记输入侧, 输出成本无度量)
+	if got.Out != 7 {
+		t.Errorf("输出 token 应回读 7, 实际 %d (字段 %+v)", got.Out, got)
 	}
 	if got.Time == "" {
 		t.Error("缺时间戳")
@@ -90,14 +94,30 @@ func TestCacheStats_RecordSkipsEmpty(t *testing.T) {
 	withCacheStatDir(t, dir)
 
 	// 零命中零未命中且前缀未变更 → 不落盘(避免窗口内混入空记录)
-	recordCacheStat("m", 0, 0, "", false)
+	recordCacheStat("m", 0, 0, 0, "", false)
 	if _, err := os.Stat(filepath.Join(dir, defaultCacheStatName)); err == nil {
 		t.Error("零值统计不应落盘")
 	}
 	// 前缀变更即使无 token 也必须落盘(六西格玛守卫信号)
-	recordCacheStat("m", 0, 0, "h", true)
+	recordCacheStat("m", 0, 0, 0, "h", true)
 	if _, err := os.Stat(filepath.Join(dir, defaultCacheStatName)); err != nil {
 		t.Error("前缀变更事件必须落盘")
+	}
+
+	// 仅有输出 token 也必须落盘: 输出是真实消耗(4 元/M), 不得因输入侧为 0 被丢弃
+	dir3 := t.TempDir()
+	withCacheStatDir(t, dir3)
+	recordCacheStat("m", 0, 0, 123, "", false)
+	data, err := os.ReadFile(filepath.Join(dir3, defaultCacheStatName))
+	if err != nil {
+		t.Fatalf("仅输出 token 的记录必须落盘: %v", err)
+	}
+	var got CacheStat
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &got); err != nil {
+		t.Fatalf("落盘行不是合法 JSON: %v", err)
+	}
+	if got.Out != 123 {
+		t.Errorf("Out 应回读 123, 实际 %d", got.Out)
 	}
 }
 
@@ -253,5 +273,53 @@ func TestCacheStats_PathForWrite(t *testing.T) {
 	setCacheStatPath(dir)
 	if got := cacheStatPathForWrite(); got != filepath.Join(dir, defaultCacheStatName) {
 		t.Errorf("显式路径应优先, 实际 %q", got)
+	}
+}
+
+// TestCacheStats_CostDimension 钉住成本口径: 量纲(美元/百万 tokens) + 输出侧计价 + 历史行兼容。
+//
+// 防的是"看起来像真的"全假阳性: 价格常量单位是 美元/百万 tokens, 若直接乘 token 数,
+// 结果放大 1e6 倍 —— 实测 24199 行真实数据旧式显示 $157,133,048.22, 真实仅 $11.66。
+// 期望值一律用字面量手算, 不用常量自证(否则常量写错用例照样绿)。
+func TestCacheStats_CostDimension(t *testing.T) {
+	dir := t.TempDir()
+	withCacheStatDir(t, dir)
+	// 各 1 百万 tokens (flash): 命中 0.0028 + 未命中 0.14 + 输出 0.56 = 0.7028 美元
+	writeCacheStatRows(t, dir, []CacheStat{
+		{Model: "deepseek-flash", Hit: 1_000_000, Miss: 1_000_000, Out: 1_000_000},
+	})
+	got := cacheStatsSummary()
+	for _, want := range []string{
+		"输出 tokens: 1000000", // 输出侧计数
+		"输入 $0.1428",         // 1M×0.0028 + 1M×0.14
+		"输出 $0.5600",         // 1M×0.56
+		"= $0.7028",          // 合计
+		"估算节省: $0.1372",      // 无缓存 2M×0.14=0.28 减实际 0.1428
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("成本汇总缺 %q:\n%s", want, got)
+		}
+	}
+	// 量纲反例: 旧实现(未除 1e6)会输出 702800
+	if strings.Contains(got, "702800") || strings.Contains(got, "142800") {
+		t.Errorf("成本被放大 1e6 倍(量纲错误):\n%s", got)
+	}
+
+	// 历史行(无 out 字段)不得被计入输出侧
+	dir2 := t.TempDir()
+	withCacheStatDir(t, dir2)
+	writeCacheStatRows(t, dir2, []CacheStat{{Model: "deepseek-flash", Hit: 1_000_000}})
+	got2 := cacheStatsSummary()
+	if !strings.Contains(got2, "输出 tokens: 0") || !strings.Contains(got2, "输出 $0.0000") {
+		t.Errorf("历史行缺 out 字段应计 0 输出:\n%s", got2)
+	}
+
+	// pro 档输出价 1.89 美元/百万
+	dir3 := t.TempDir()
+	withCacheStatDir(t, dir3)
+	writeCacheStatRows(t, dir3, []CacheStat{{Model: "deepseek-v4-pro", Miss: 1_000_000, Out: 1_000_000}})
+	got3 := cacheStatsSummary()
+	if !strings.Contains(got3, "输出 $1.8900") {
+		t.Errorf("pro 输出价应为 $1.89/百万:\n%s", got3)
 	}
 }

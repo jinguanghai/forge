@@ -5,7 +5,7 @@ package main
 // 背景: anchorFields 白名单需人工维护, 与实际进固定头的字段集合脱节,
 // 实测漏检 6 个锚点字段 (architecture/lessons/user_profile/swordless_roadmap/
 // evolution_consensus/rescue), 且漏检字段连审计都不留痕 → 长期无人发现。
-// 本哨兵把"清单必须覆盖真实字段"固化为死程序判定 (公理四/五)。
+// 本哨兵把"清单必须覆盖真实字段"固化为死程序判定 (公理二/五)。
 
 import (
 	"encoding/json"

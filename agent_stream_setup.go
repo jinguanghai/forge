@@ -86,7 +86,7 @@ func (a *AgentRunner) newRunState(input string, runCtx context.Context) (*runSta
 	if !a.verifyHeadInvariant() {
 		fmt.Fprintf(os.Stderr, "%s 固定头一致性断言失败: headLen=%d, 实际=%d (前缀缓存将断裂, 需修复 buildFixedHead/headLen 同步)\n",
 			color(ansi.red, "💥"), a.headLen, len(a.buildFixedHead()))
-		recordCacheStat(a.cfg.Model, 0, 0, currentSystemHash, true)
+		recordCacheStat(a.cfg.Model, 0, 0, 0, currentSystemHash, true)
 	}
 
 	// Build messages: system + history + current user message

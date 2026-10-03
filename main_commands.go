@@ -110,7 +110,7 @@ func cmdClear(agent *AgentRunner, cfg *Config, parts []string, historyFile strin
 var gateDisplayNames = []string{
 	"python", "go", "node/js",
 	"math", "logic", "regex", "knowledge",
-	"chain", "self", "tcm", "browser", "relation", "media",
+	"chain", "self", "tcm", "browser", "relation", "media", "task",
 }
 
 func cmdTools(agent *AgentRunner, cfg *Config, parts []string, historyFile string, showReasoning *bool, cmd string) {

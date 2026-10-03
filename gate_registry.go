@@ -59,6 +59,12 @@ var gateRegistry = []GateDef{
 		Description: "多 gate 顺序编排 → chain gate (lang=\"chain\", JSON stages 条件执行, 减少 LLM 往返)",
 	},
 	{
+		Name: "task",
+		Description: "长任务通道(重活必走) → lang=\"task\"; 提交秒回拿 task_id, 再轮询。全量 go test / go build / 大目录扫描 / 耗时>20s 的命令一律用它, " +
+			"禁止在 python gate 里手搓 subprocess.run(超时无救)。格式: 裸命令 = 提交; 或 JSON " +
+			"{\"action\":\"submit|status|wait|tail|list|kill\",\"cmd\":\"...\",\"id\":\"...\",\"timeout\":20}; wait 单次上限 20s, 长任务多次 wait/status 直到 state=done",
+	},
+	{
 		Name:        "media",
 		Description: "图片/视频生成 → media gate (MiniMax 云端; {\"action\":\"image|video|status|models\",\"prompt\":\"...\"}; 视频异步=先提交拿 task_id, 下一轮用 status 查询; 默认 draft 低成本档; 成本硬护栏 单次≤5元/日≤50元; 产物落 .forge/media/)",
 	},

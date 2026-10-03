@@ -58,12 +58,12 @@ func TestIsFlashModel(t *testing.T) {
 
 func TestRecordCacheStat_EmptySkipped(t *testing.T) {
 	path := setTempCacheStat(t)
-	recordCacheStat("deepseek-flash", 0, 0, "", false)
+	recordCacheStat("deepseek-flash", 0, 0, 0, "", false)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("全零且非前缀变更的记录不应写文件")
 	}
 	// 仅前缀变更 (hit/miss 为 0) 必须记账, 否则漂移不可见
-	recordCacheStat("deepseek-flash", 0, 0, "abc", true)
+	recordCacheStat("deepseek-flash", 0, 0, 0, "abc", true)
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("前缀变更记录应写入: %v", err)
 	}
@@ -71,9 +71,9 @@ func TestRecordCacheStat_EmptySkipped(t *testing.T) {
 
 func TestRecordCacheStat_AndHitRate(t *testing.T) {
 	path := setTempCacheStat(t)
-	recordCacheStat("deepseek-flash", 80, 20, "h1", false)
-	recordCacheStat("deepseek-flash", 90, 10, "h1", false)
-	recordCacheStat("deepseek-flash", 50, 50, "h1", false)
+	recordCacheStat("deepseek-flash", 80, 20, 0, "h1", false)
+	recordCacheStat("deepseek-flash", 90, 10, 0, "h1", false)
+	recordCacheStat("deepseek-flash", 50, 50, 0, "h1", false)
 
 	rate, n, ok := cacheHitRate(20)
 	if !ok || n != 3 {

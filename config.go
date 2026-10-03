@@ -101,7 +101,7 @@ func DefaultConfig() *Config {
 		ToolTimeout:           60 * time.Second,
 		MaxConsecutiveFails:   5,
 		MaxLoopStrikes:        4,  // 循环拦截 4 次后带进展收尾; 无回合上限, 真正干活可无限跑
-		MaxHistoryMessages:    80, // V4-Flash 1M 上下文: 历史容量 40 → 80（公理三: 记忆仍须梳理，骨架优先）
+		MaxHistoryMessages:    80, // V4-Flash 1M 上下文: 历史容量 40 → 80（公理一: 记忆仍须梳理，骨架优先）
 		CompactEnabled:        getEnvInt("AGENT_COMPACT_ENABLED", 1) == 1,
 		CompactTokenThreshold: getEnvInt("AGENT_COMPACT_TOKEN_THRESHOLD", 20000),
 		CompactMinTurns:       getEnvInt("AGENT_COMPACT_MIN_TURNS", 10),

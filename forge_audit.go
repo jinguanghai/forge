@@ -12,6 +12,17 @@ import (
 	"unicode/utf8"
 )
 
+// auditDiagLimit 审计里诊断字段 (diag) 的字节上限。
+//
+// 动机 (实测 20261003): diagnostics —— 结构化 JSON 或超时诊断文本 —— 此前只进
+// 渲染层回灌给 LLM, 审计侧只有 snipErr(Error, 100) 的通用错误串。实测 862 条失败
+// gate 记录里, 超时类只留下 "python execution failed: context deadline exceeded"
+// (49 字符, 无卡点/无部分输出), 事后无法回答"它当时卡在哪"; 编译错误类靠 snipErr
+// 的尾部保留侥幸留下 SyntaxError, 属偶然非设计。
+// 512 字节 ≈ 5-8 条编译器诊断, 覆盖绝大多数失败; 超出则截断并记 diag_len 留痕,
+// 消费者据此判断 diag 是否完整(截断后不再是合法 JSON, 只作摘要读)。
+const auditDiagLimit = 512
+
 // netEgressPatterns 出站网络特征表。
 //
 // 背景: DSec 论文用 eBPF 给每个沙箱做域名白名单 (pypi 放行 / npm 拒绝), 堵
@@ -100,6 +111,21 @@ func appendAuditJSONL(path string, entry map[string]interface{}) {
 	_, _ = fh.Write(append(data, '\n'))
 }
 
+// appendAuditDiag 把诊断写入审计条目。
+//
+// 抽成单一实现供 auditGate / auditAttempt 共用: 两处各写一份 = 口径必然漂移
+// (此处记 diag_len, 彼处不记), 且字段名会分叉。
+// 空诊断不落字段 —— 否则字段恒真, "多少失败带定位信息"这个量就量不出来。
+func appendAuditDiag(entry map[string]interface{}, diag string) {
+	if diag == "" {
+		return
+	}
+	entry["diag"] = snipErr(diag, auditDiagLimit)
+	if len(diag) > auditDiagLimit {
+		entry["diag_len"] = len(diag)
+	}
+}
+
 // auditGate appends one JSON line per Build call to gate_audit.jsonl.
 // Best-effort only: failures are silent so auditing never blocks the main path.
 // Disable with FORGE_GATE_AUDIT=0.
@@ -130,6 +156,21 @@ func (f *Forge) auditGate(lang string, omitted bool, fallbackUsed bool, start ti
 	if ms := approvalWait.Milliseconds(); ms > 0 {
 		entry["approval_wait_ms"] = ms
 	}
+	// 贴边率领先指标 (P1-4a, 20261002): 净耗时 ≥ 预算 80% 即贴边。
+	//
+	// 为什么需要: 失败率/白耗/P95 全是滞后指标, 贴边是"下一次超时"的前兆 ——
+	// 实测贴边区(20-30s)有 606 条且 100% 成功(全是侥幸), 而贴边率 W36 2.18%
+	// → W40 5.12% 翻倍时, 失败率还没动。预算与执行同源(compilerTimeout),
+	// 不另设阈值 —— 两套阈值必然漂移(审计说贴边而执行说没超)。
+	// 缓存命中不算: 命中不消耗预算, 且 cache_hit 已单独标注。
+	if res == nil || res.CachedAt <= 0 {
+		if net := time.Since(start) - approvalWait; net > 0 {
+			if budget := compilerTimeout(lang); budget > 0 && net*5 >= budget*4 {
+				entry["near_budget"] = true
+				entry["net_ms"] = net.Milliseconds()
+			}
+		}
+	}
 	if res != nil {
 		entry["retries"] = res.Retries
 		// 缓存命中此前在审计里不可见(命中与真跑都是 ok=true), 命中率无从度量。
@@ -152,6 +193,13 @@ func (f *Forge) auditGate(lang string, omitted bool, fallbackUsed bool, start ti
 		if !res.OK {
 			entry["stage"] = res.Stage
 			entry["err_snip"] = snipErr(res.Error, 100)
+			// timeout 必须落在 gate 主事件流: 此前只有 gate_attempt 带该字段, 统计
+			// 超时率须 join 两张表, 主审计流自身量不出超时(近 14 天 435/859 失败是
+			// 超时, 却无法从主事件流直接聚合)。
+			entry["timeout"] = res.Timeout
+			// 诊断留证: err_snip 说"发生了什么", diag 说"错在哪一行" —— 二者并存
+			// 而非替换。超时类 Error 是固定串, 只有 diag 带卡点与部分输出。
+			appendAuditDiag(entry, res.Diagnostics)
 		}
 	}
 	appendAuditJSONL(auditFilePath(f.workDir), entry)
@@ -169,7 +217,7 @@ func (f *Forge) auditAttempt(lang string, n int, r ForgeGateResult) {
 		return
 	}
 	snip := snipErr(r.Error, 120)
-	appendAuditJSONL(auditFilePath(f.workDir), map[string]interface{}{
+	entry := map[string]interface{}{
 		"event":   "gate_attempt",
 		"ts":      time.Now().Format(time.RFC3339Nano),
 		"lang":    lang,
@@ -178,7 +226,11 @@ func (f *Forge) auditAttempt(lang string, n int, r ForgeGateResult) {
 		"stage":   r.Stage,
 		"ms":      r.Duration,
 		"err":     snip,
-	})
+	}
+	// 诊断留证(同 auditGate): 首次失败的诊断只出现在这里 —— 主记录是最终结果,
+	// 分不出"第一次错在哪、改完错在哪"(这正是 gate_attempt 存在的动机)。
+	appendAuditDiag(entry, r.Diagnostics)
+	appendAuditJSONL(auditFilePath(f.workDir), entry)
 }
 
 // snipErr 压缩错误文本, 保留「首行摘要 + 尾部诊断」而非单纯头部截断。

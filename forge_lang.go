@@ -19,6 +19,9 @@ type CompilerDef struct {
 	ExecTimeout    time.Duration
 	InlineCode     bool
 	SelfHosted     bool
+	// NoCache: 结果不可入缓存。task gate 的状态随外部进程推进而变, 缓存 =
+	// 同一个 task_id 轮询永远返回第一次的 running(通道形同废铁)。
+	NoCache bool
 }
 
 // CompilerError represents a parsed compiler diagnostic.
@@ -137,6 +140,17 @@ var 铸剑炉_COMPILERS = map[string]CompilerDef{
 		ExecTimeout:    120 * time.Second,
 		InlineCode:     true,
 		SelfHosted:     true,
+	},
+	"task": {
+		Ext:            "",
+		CompileTimeout: 5 * time.Second,
+		// 25s: 本 gate 只做「提交/查询」, 重活在后台跑; wait 动作硬上限 20s
+		// (task_gate.py HARD_WAIT), 留 5s 余量。禁止调大 —— 调大只是把贴边线
+		// 一起抬高(同 defaultGateTimeout 的教训), submit 秒回才是设计目标。
+		ExecTimeout: 25 * time.Second,
+		InlineCode:  true,
+		SelfHosted:  true,
+		NoCache:     true,
 	},
 }
 

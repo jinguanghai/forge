@@ -268,7 +268,8 @@ func (c *LLMClient) handleSSEChunk(st *sseState, ch chan<- StreamEvent, model st
 			hit = cr.Usage.PromptTokensDetails.CachedTokens
 		}
 		miss := cr.Usage.PromptCacheMissTokens
-		recordCacheStat(model, hit, miss, currentSystemHash, sysChanged)
+		// 输出 token 同批落盘: 此前只记输入侧, 成本口径缺输出(4 元/M, 与命中价差 200x)
+		recordCacheStat(model, hit, miss, cr.Usage.CompletionTokens, currentSystemHash, sysChanged)
 		// 会话级实时命中率: 经事件通道把本次 hit/miss 带回 agent.stats。
 		// 收尾阶段(toolDone)不再发事件, 保持只读收尾契约(与 reasoning/content/delta 一致)。
 		if !st.toolDone {
@@ -276,7 +277,12 @@ func (c *LLMClient) handleSSEChunk(st *sseState, ch chan<- StreamEvent, model st
 		}
 	} else if sysChanged {
 		// 前缀断裂事件即使无 usage 也记录, 供 /cache 汇总
-		recordCacheStat(model, 0, 0, currentSystemHash, sysChanged)
+		// usage 存在时输出 token 仍要带上(否则前缀变更轮次的输出侧凭空消失)
+		out := 0
+		if cr.Usage != nil {
+			out = cr.Usage.CompletionTokens
+		}
+		recordCacheStat(model, 0, 0, out, currentSystemHash, sysChanged)
 	}
 
 	if len(cr.Choices) == 0 {

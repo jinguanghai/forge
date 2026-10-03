@@ -97,6 +97,15 @@ func (f *Forge) forgeGateSelfHosted(code, lang string, compiler CompilerDef, inp
 	case "media":
 		// 媒体生成 (图片/视频): MiniMax 云端 API, 产物落 .forge/media/
 		return f.selfHostedGate("media_gate", code, start)
+	case "task":
+		// 长任务通道 (P0-2): 提交/轮询/等待。裸文本 = 直接当命令提交。
+		// 为什么必须存在: 全量 go test 实测 113.9s, 物理上塞不进 30s 预算,
+		// 近 14 天超时 435 条(占失败 50.6%)。此处让重活改走后台, 前台只做秒回。
+		if !validGateJSON(code) {
+			b, _ := json.Marshal(map[string]string{"action": "submit", "cmd": code})
+			code = string(b)
+		}
+		return f.selfHostedGate("task_gate", code, start)
 	case "self":
 		return f.selfHostedSelf(code, input, start)
 	default:

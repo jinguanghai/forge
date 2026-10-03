@@ -24,6 +24,7 @@ type cachePersistFormat struct {
 var 铸剑炉_GATES = []string{
 	"python", "go", "node", "math", "logic",
 	"regex", "knowledge", "tcm", "browser", "chain", "self", "relation", "media",
+	"task",
 }
 
 // herbPairInputRE 识别 "查药对 X Y" 式中文输入（药对/双药/配伍/同现）
@@ -31,7 +32,7 @@ var herbPairInputRE = regexp.MustCompile(`(?:查药对|药对|双药|同现药�
 
 // mustHaveOutputGates: 纯判定型 gate(按 baseLang 计), 必须有判定输出。
 // 空 stdout 对它们等于「判定缺席」, 不可当成功 —— 否则 gate 二进制异常会被静默吞掉。
-var mustHaveOutputGates = map[string]bool{"math": true, "logic": true, "regex": true, "relation": true, "media": true}
+var mustHaveOutputGates = map[string]bool{"math": true, "logic": true, "regex": true, "relation": true, "media": true, "task": true}
 
 // cacheHitNote 生成缓存命中提示(未命中返回空串)。
 //
@@ -54,6 +55,10 @@ func cacheHitNote(r ForgeGateResult) string {
 }
 
 func (f *Forge) forgeGateSkipCache(code, lang, input string, skipCache bool) ForgeGateResult {
+	// 不可缓存 gate 豁免: 判定必须在读缓存之前 (CompilerDef.NoCache 单一源)。
+	if def, ok := 铸剑炉_COMPILERS[lang]; ok && def.NoCache {
+		skipCache = true
+	}
 	cacheKey := f.cacheKey(code, lang, input)
 	if !skipCache {
 		f.cacheMu.RLock()

@@ -2,7 +2,7 @@ package main
 
 // sh_retired_test.go — sh gate 退役判据 (六西格玛 DMAIC 改善项, 20261001)。
 //
-// 架构即测试(公理七): "把 gate 删掉"本身不是约束, 死程序判据才是。本文件钉住六件事:
+// 架构即测试(公理三): "把 gate 删掉"本身不是约束, 死程序判据才是。本文件钉住六件事:
 //   V1 入口已关  —— gate 清单 / tool schema enum 不得含 sh (防"删了又加回来")
 //   V2 拒绝生效  —— shell 形态 → stage=retired, 且代码确实未执行(探针文件不存在)
 //   V3 自带出路  —— 拒绝文本必须含 subprocess 示例(否则退化成"只报错不指路")
@@ -27,7 +27,7 @@ import (
 func TestShRetired_GateListHasNoSh(t *testing.T) {
 	for _, g := range 铸剑炉_GATES {
 		if g == "sh" {
-			t.Fatalf("gate 清单仍含 sh —— 退役被回退(公理七: 新约束须有判据钉住)")
+			t.Fatalf("gate 清单仍含 sh —— 退役被回退(公理三: 新约束须有判据钉住)")
 		}
 	}
 }

@@ -11,6 +11,7 @@ package main
 // 守卫路径与就位路径因此都能在隔离目录里真实走一遍, 绝不碰生产 forge.exe。
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,13 @@ import (
 )
 
 // selfReplaceChildEnv 子进程标记: 置 1 时子进程只做一件事 —— 调 runSelfReplace。
+
+// selfReplaceSpawnRecordEnv 子进程内接管 spawn 的方式: 值为 selfReplaceSpawnFail
+// 表示模拟启动失败; 其它非空值视为「把 spawn 参数写进这个文件」。
+const selfReplaceSpawnRecordEnv = "FORGE_SELFREPLACE_SPAWN"
+
+// selfReplaceSpawnFail 见 selfReplaceSpawnRecordEnv。
+const selfReplaceSpawnFail = "FAIL"
 const selfReplaceChildEnv = "FORGE_SELFREPLACE_CHILD"
 
 // childHookName 子进程入口的测试名 (父测试用 -test.run 精确指定)。
@@ -26,10 +34,28 @@ const childHookName = "TestSelfReplace_ChildHook"
 
 // TestSelfReplace_ChildHook 子进程入口: 在隔离目录内调用 runSelfReplace。
 // 全量跑时环境变量未设 → Skip (它只作为隔离子进程的落点存在)。
+// TestSelfReplace_ChildHook 子进程入口: 在隔离目录内调用 runSelfReplace。
+// 全量跑时环境变量未设 → Skip (它只作为隔离子进程的落点存在)。
 func TestSelfReplace_ChildHook(t *testing.T) {
 	if os.Getenv(selfReplaceChildEnv) != "1" {
 		t.Skip("仅作为隔离测试的子进程入口")
 	}
+	// 子进程内必须接管两个副作用, 否则会出真事故:
+	//   ① 真 spawn 会把测试二进制的副本当铸剑炉拉起来 —— 它不带 -test.run,
+	//      会跑全套测试, 既递归又污染;
+	//   ② os.Exit 会让 testing 框架来不及输出结果, 父测试只看到空输出。
+	// 产品路径(真 forge.exe)不受影响 —— 那里走默认实现。
+	switch spec := os.Getenv(selfReplaceSpawnRecordEnv); spec {
+	case "":
+		spawnSelfProcess = func(string, string) error { return nil }
+	case selfReplaceSpawnFail:
+		spawnSelfProcess = func(string, string) error { return errors.New("probe: spawn refused") }
+	default:
+		spawnSelfProcess = func(exePath, workDir string) error {
+			return os.WriteFile(spec, []byte(exePath+"\n"+workDir), 0o644)
+		}
+	}
+	selfReplaceExit = func(int) {}
 	runSelfReplace()
 }
 
@@ -87,6 +113,96 @@ func listNames(t *testing.T, dir string) []string {
 		names = append(names, e.Name())
 	}
 	return names
+}
+
+// runSelfReplaceChildRecording 同 runSelfReplaceChild, 但让子进程把 spawn 的参数
+// 写进文件, 供父测试断言「重启了谁」。spawn 是收不回的副作用, 只能这样观察。
+// mode 为 selfReplaceSpawnFail 时模拟启动失败; 其它值视为记录文件路径。
+func runSelfReplaceChildRecording(t *testing.T, probe, dir, mode string) (string, []string) {
+	t.Helper()
+	cmd := exec.Command(probe, "-test.run", "^"+childHookName+"$", "-test.v")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), selfReplaceChildEnv+"=1", selfReplaceSpawnRecordEnv+"="+mode)
+	b, err := cmd.CombinedOutput()
+	out := string(b)
+	if err != nil {
+		t.Fatalf("隔离子进程失败: %v\n%s", err, out)
+	}
+	if mode == selfReplaceSpawnFail {
+		return out, nil
+	}
+	raw, rerr := os.ReadFile(mode)
+	if rerr != nil {
+		return out, nil // 没记录 = 没 spawn
+	}
+	return out, strings.Split(strings.TrimSpace(string(raw)), "\n")
+}
+
+// TestRunSelfReplace_SpawnsReplacement 就位后必须重启, 且目标恰是就位后的 forge.exe。
+// 钉住的根因(20261003): 不重启则进程名与文件名不一致, 外部「按名字关进程」的脚本
+// 全部失明 —— 升级脚本关不掉旧进程, 同时起两个实例, 还报「升级成功」。
+func TestRunSelfReplace_SpawnsReplacement(t *testing.T) {
+	dir, probe := stageSelfReplaceProbe(t, "forge_new.exe", func(d string) {
+		if err := os.WriteFile(filepath.Join(d, "forge.exe"), []byte("OLD-FORGE-EXE"), 0o755); err != nil {
+			t.Fatalf("布景失败: %v", err)
+		}
+	})
+	rec := filepath.Join(dir, "spawn_record.txt")
+	out, args := runSelfReplaceChildRecording(t, probe, dir, rec)
+	if len(args) < 2 {
+		t.Fatalf("就位后未 spawn 替代进程 —— 进程名将与文件名不一致, 外部脚本会失明\n%s", out)
+	}
+	wantExe := filepath.Join(dir, "forge.exe")
+	if !strings.EqualFold(args[0], wantExe) {
+		t.Errorf("spawn 目标 = %q, 期望 %q", args[0], wantExe)
+	}
+	if !strings.EqualFold(args[1], dir) {
+		t.Errorf("spawn 工作目录 = %q, 期望 %q", args[1], dir)
+	}
+	ev, err := os.ReadFile(filepath.Join(dir, ".forge", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("未留痕: %v", err)
+	}
+	if !strings.Contains(string(ev), `"restart":"spawned"`) {
+		t.Errorf("留痕缺 restart=spawned: %s", ev)
+	}
+}
+
+// TestRunSelfReplace_SpawnFailureKeepsDeploy spawn 失败时: 就位成果必须保住
+// (绝不回滚 —— 回滚等于把刚就位的新版丢掉), 但要留痕 restart=failed 并提示手动重启。
+func TestRunSelfReplace_SpawnFailureKeepsDeploy(t *testing.T) {
+	dir, probe := stageSelfReplaceProbe(t, "forge_new.exe", func(d string) {
+		if err := os.WriteFile(filepath.Join(d, "forge.exe"), []byte("OLD-FORGE-EXE"), 0o755); err != nil {
+			t.Fatalf("布景失败: %v", err)
+		}
+	})
+	out, _ := runSelfReplaceChildRecording(t, probe, dir, selfReplaceSpawnFail)
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Skipf("拿不到测试二进制路径: %v", err)
+	}
+	si, err := os.Stat(self)
+	if err != nil {
+		t.Fatalf("stat 测试二进制失败: %v", err)
+	}
+	di, err := os.Stat(filepath.Join(dir, "forge.exe"))
+	if err != nil {
+		t.Fatalf("spawn 失败后 forge.exe 不该消失: %v\n%s", err, out)
+	}
+	if di.Size() != si.Size() {
+		t.Errorf("spawn 失败后 forge.exe 被改动: 大小 %d != %d", di.Size(), si.Size())
+	}
+	ev, _ := os.ReadFile(filepath.Join(dir, ".forge", "events.jsonl"))
+	if !strings.Contains(string(ev), `"restart":"failed"`) {
+		t.Errorf("留痕缺 restart=failed: %s", ev)
+	}
+	if !strings.Contains(string(ev), `"result":"ok"`) {
+		t.Errorf("就位成功这件事必须仍记为 result=ok: %s", ev)
+	}
+	if !strings.Contains(out, "自动重启失败") {
+		t.Errorf("应提示用户手动重启, 实际输出:\n%s", out)
+	}
 }
 
 // 守卫路径: 二进制名不是 forge_new → 立即返回, 不得增删任何文件。

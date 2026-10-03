@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -73,5 +74,65 @@ func TestSnipErrKeepsTailDiagnosis(t *testing.T) {
 	cn := strings.Repeat("中", 100)
 	if g := snipErr(cn, 50); !utf8.ValidString(g) {
 		t.Errorf("UTF-8 被切断: %q", g)
+	}
+}
+
+// lastAuditEntry 读审计文件末行并解析 (判定型断言用)。
+func lastAuditEntry(t *testing.T, dir string) map[string]interface{} {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "gate_audit.jsonl"))
+	if err != nil {
+		t.Fatalf("读审计失败: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	var v map[string]interface{}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &v); err != nil {
+		t.Fatalf("末行非合法 JSON: %v", err)
+	}
+	return v
+}
+
+// TestAuditGateEmitsNearBudget 钉住贴边率领先指标 (P1-4a, 20261002)。
+//
+// 为什么需要领先指标: 失败率/白耗/P95 都是滞后指标。实测贴边区(20-30s)有 606 条
+// 且 100% 成功(全是侥幸), 而贴边率 W36 2.18% → W40 5.12% 翻倍时失败率还没动 ——
+// 等到失败率抬头, 白耗已经付过了。
+// 判据: 净耗时(duration - 审批等待) ≥ 预算 80% 且非缓存命中 → near_budget + net_ms。
+func TestAuditGateEmitsNearBudget(t *testing.T) {
+	root := t.TempDir()
+	_, cfg, _ := newHandleCmdAgent(t)
+	f := NewForge(root, cfg)
+	t.Cleanup(f.Shutdown)
+	done := func() *ForgeGateResult {
+		return &ForgeGateResult{OK: true, Lang: "python", Stage: "done"}
+	}
+
+	// ① 贴边: 伪造 25s 前开始 (python 预算 30s → 贴边线 24s)
+	f.auditGate("python", false, false, time.Now().Add(-25*time.Second), 0, 10, 0, "", done())
+	e := lastAuditEntry(t, root)
+	if e["near_budget"] != true {
+		t.Errorf("25s/30s 应判贴边: %v", e)
+	}
+	if _, ok := e["net_ms"]; !ok {
+		t.Error("贴边记录必须带 net_ms —— 只有布尔看不出贴多紧")
+	}
+
+	// ② 反例: 3s 完成不贴边 (否则字段恒真, 等于没有指标)
+	f.auditGate("python", false, false, time.Now().Add(-3*time.Second), 0, 10, 0, "", done())
+	if e := lastAuditEntry(t, root); e["near_budget"] != nil {
+		t.Errorf("3s/30s 不该判贴边: %v", e)
+	}
+
+	// ③ 反例: 缓存命中不贴边 —— 命中不消耗预算, 且已有 cache_hit 单独标注
+	f.auditGate("python", false, false, time.Now().Add(-25*time.Second), 0, 10, 0, "",
+		&ForgeGateResult{OK: true, Lang: "python", Stage: "done", CachedAt: time.Now().Unix()})
+	if e := lastAuditEntry(t, root); e["near_budget"] != nil {
+		t.Errorf("缓存命中不该判贴边: %v", e)
+	}
+
+	// ④ 审批等待不计入净耗时: 25s 里 20s 是等人按 y → 净 5s, 不贴边
+	f.auditGate("python", false, false, time.Now().Add(-25*time.Second), 20*time.Second, 10, 0, "", done())
+	if e := lastAuditEntry(t, root); e["near_budget"] != nil {
+		t.Errorf("审批等待不该计入净耗时(否则人工慢=炉子慢): %v", e)
 	}
 }
