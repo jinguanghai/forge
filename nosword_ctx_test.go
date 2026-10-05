@@ -53,3 +53,48 @@ func TestNSWDefectN_AssertionStillEvaluated(t *testing.T) {
 		}
 	}
 }
+
+// ── 缺陷T (20261004): 中文标点紧邻的纯分数 = 比例陈述 ──
+//
+// 证据: gate_audit.jsonl 2026-10-04T11:46:57 / 11:47:01 两条 nosword 事件,
+// exprs=["1080/1081=0.99907493062"] fresh=1 —— 原文 "（1080/1081）" 中全角括号
+// 紧邻候选, 而 J5 的 nswHanBefore 只认 unicode.Han -> 比例陈述闸失效 ->
+// 括号里的比例被当除法求值, 错值注入 LLM 上下文 (违反"宁漏勿误")。
+// 修法: 判据由"前置汉字"扩为"前置中文语境(汉字或中文标点)"; 影响面仅限
+// 数字/数字 形态的纯分数 (nswRatioWordBefore 分支不受影响)。
+
+func TestNSWDefectT_CJKPunctIsChineseContext(t *testing.T) {
+	reject := []string{
+		"（1080/1081）", // 实测原文形态
+		"两个端口（1080/1081）都在监听",
+		"占比（3/4）。",
+		"「7/8」",
+		"【1/2】",
+		"（10/4）、（8/3）",
+	}
+	for _, in := range reject {
+		if as := nswEvaluate(in); len(as) != 0 {
+			t.Errorf("中文标点语境下的纯分数不应求值: %q -> %+v", in, as)
+		}
+	}
+}
+
+// TestNSWDefectT_BareAndConcludedUnaffected 修复不得伤及主干:
+// 无中文语境的裸分数照旧求值; 括号闭合后带结论的断言照旧求值 (J5 的"带结论不拒"语义)。
+func TestNSWDefectT_BareAndConcludedUnaffected(t *testing.T) {
+	accept := map[string]string{
+		"10/4":        "2.5",
+		"3/4 = 0.75":  "0.75",
+		"（3/4）= 0.75": "0.75",
+	}
+	for in, want := range accept {
+		as := nswEvaluate(in)
+		if len(as) == 0 {
+			t.Errorf("真断言被误杀: %q (期望 %s)", in, want)
+			continue
+		}
+		if as[0].val != want {
+			t.Errorf("值错: %q -> %s (期望 %s)", in, as[0].val, want)
+		}
+	}
+}

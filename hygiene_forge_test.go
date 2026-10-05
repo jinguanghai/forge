@@ -56,6 +56,10 @@ type forgePattern struct {
 	Kind     string `json:"kind"`
 	Category string `json:"category"`
 	Keep     int    `json:"keep"`
+	// MaxBytes: 单份体积上限 (0 = 不判)。20261002 加 —— 此前该字段只存在于清单
+	// (holidays_*.json 写着 max_bytes=51200), 而本 struct 没有它、判定只读 keep,
+	// 于是「约束只以文档形式存在」: 改了清单也不会有人发现, 超限也不报。
+	MaxBytes int64  `json:"max_bytes"`
 	Note     string `json:"note"`
 }
 
@@ -76,6 +80,8 @@ type forgeManifest struct {
 	AllowEmptyDirs []string       `json:"allow_empty_dirs"`
 	Vectors        []forgeVector  `json:"vectors"`
 	Subdirs        []forgeSubdir  `json:"subdirs"`
+	// MaxBytes 容器体积上限 (0 = 不判); 子清单经 forgeSubdirSpec 折入此处。
+	MaxBytes int64 `json:"max_bytes"`
 }
 
 // forgeSubdir 是 .forge 下某个子目录的内部清单 (20260928 补)。
@@ -93,6 +99,10 @@ type forgeSubdir struct {
 	// 平时为空属正常)。与「路径写错」必须区分 —— 把真实空态误报为悬空,
 	// 会让人干脆关掉整条判据, 那才是真的失去防线。
 	AllowEmptySelf bool `json:"allow_empty_self"`
+	// MaxBytes: 容器总体积上限 (0 = 不判)。20261002 加 —— 份数有界 != 体积有界:
+	// keep 恒定而单份体积随内容增长 (checkpoints 每份是顶层 *.go + gate 源码的
+	// 完整副本), 只有份数判据时, 源码翻倍即体积翻倍而所有哨兵全绿。
+	MaxBytes int64 `json:"max_bytes"`
 }
 
 // forgeItem 是 .forge/ 下的一个一级项。
@@ -100,6 +110,9 @@ type forgeItem struct {
 	Name  string
 	IsDir bool
 	Empty bool
+	// Size: 体积 (目录递归求和)。体积判据的唯一度量 —— 与 Python 侧 item_bytes
+	// 同构, 两侧口径必须一致, 否则同一份清单在哨兵与巡检给出不同判定。
+	Size int64
 }
 
 // forgeCategories 允许的分类 —— 白名单式枚举, 防「随手写个新分类」让判据失去意义。
@@ -175,6 +188,7 @@ func forgeItems(t *testing.T) []forgeItem {
 				it.Empty = len(sub) == 0
 			}
 		}
+		it.Size = forgeDirSize(filepath.Join(".forge", it.Name))
 		out = append(out, it)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -334,7 +348,14 @@ func TestHygieneForgePatternKeep(t *testing.T) {
 	// 子目录必须共用同一实现 (20260930 实测缺口: 原先此处独有一份, 子目录侧根本
 	// 不存在, 于是 .forge/backups 内 forge.exe.* 4 份 > keep=3 时 Go 侧全绿而
 	// Python 侧报红 —— 同一份清单、两套实现, 判据漂移)。
-	for _, v := range forgeKeepViolations(forgeItems(t), loadForgeManifest(t)) {
+	m := loadForgeManifest(t)
+	items := forgeItems(t)
+	for _, v := range forgeKeepViolations(items, m) {
+		t.Error(v)
+	}
+	// 体积上限 (20261002 加): 份数与体积是两条独立的判据, 各自会被对方绕过 ——
+	// 份数够少但单份巨大 (或总量膨胀) 只有体积判据看得见。
+	for _, v := range forgeBytesViolations(items, m) {
 		t.Error(v)
 	}
 }

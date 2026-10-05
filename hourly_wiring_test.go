@@ -45,13 +45,32 @@ var wantHourlyTasks = map[string][]string{
 	"forge":    {"hygiene_forge_check.py"},
 	"temp":     {"forge_temp_check.py", "--apply"},
 	"snapshot": {"hygiene_snapshot_check.py"},
-	"ignored":  {"hygiene_ignored_check.py"},
-	"bench":    {"bench_report_check.py"},
-	"version":  {"version_check.py"},
-	"webgw":    {"web_gateway_check.py"},
+	// snapgen (20261005): 快照【生成臂】—— 判据(snapshot)只读, 生成此前只挂人工按钮;
+	// --apply 缺失 = 退化成 dry-run (与 archive/cleanup/bench 的教训同型: 参数是判据盲区)。
+	"snapgen": {"snapshot_refresh.py", "--apply"},
+	"ignored": {"hygiene_ignored_check.py"},
+	// bench (20261004): 判据 + 处置臂 —— 报告是日频产物, 只读判据贴边后永久报红;
+	// --apply 缺失 = 退化成只报告 (与 archive/cleanup 的教训同型: 参数是判据盲区)。
+	"bench":   {"bench_report_check.py", "--apply"},
+	"version": {"version_check.py"},
+	"webgw":   {"web_gateway_check.py"},
 	// semantics (20261003): gate 语义基准 —— 判据表带脚本名即钉住接线;
 	// 它跑的是 go test (非 .py), 因此调度臂是 .py 包装 (TestHourlyScriptsExist 才能覆盖)。
 	"semantics": {"bench_semantics_check.py"},
+	// secret (20261003): 密钥泄露自检 —— 收窄扫描范围后接入每小时巡检。
+	"secret": {"secret_scan.py"},
+	// vpslogin (20261003): VPS 登录来源硬判据 (反制体系唯一零误报信号);
+	// 网络不可达 rc=2 不判违规, 故判据只需钉住脚本名 (无必需参数)。
+	"vpslogin": {"vps_login_check.py"},
+	// dep (20261004): 外部依赖自检 —— 判据脚本名即钉住接线(无必需参数)。
+	// 与之配对的 Go 哨兵 = deps_sentinel_test.go (go.mod 零第三方 / requirements 钉版本 /
+	// gate 产物与源码一致), 两处同源不同档: .py 进每小时巡检, Go 哨兵进 go test。
+	"dep": {"dep_check.py"},
+	// mutation (20261004): 判据鉴别力探针 —— 已建成但不在调度里 = 只能手动跑。
+	// 必需项 = --apply(否则退化成 dry-run, 只列清单不验证) + --rotate(否则每次跑全量,
+	// 29 条 x 5s 且每次都要临时改生产源码)。步长具体值与覆盖周期上界由
+	// mutation_rotate_sentinel_test.go 解析断言 —— 这里只钉「接线与必需参数存在」。
+	"mutation": {"mutation_probe.py", "--apply", "--rotate"},
 }
 
 // parseHourlyTasks 解析 defense_system/hourly.py 的 TASKS 表。

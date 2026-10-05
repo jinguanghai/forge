@@ -9,11 +9,13 @@ import (
 	"testing"
 )
 
-func writeMem(t *testing.T, dir string, lastUpdated string, lessons string) {
+// writeMem 写一份最小 memory.json。第二个内容参数写 lessons_core (锚点字段, 会进固定头)
+// —— lessons 自 20261004 起归动态字段, 改它不再引起固定头变化, 无法触发尾部追加。
+func writeMem(t *testing.T, dir string, lastUpdated string, core string) {
 	m := map[string]any{
 		"identity":     "测试",
 		"last_updated": lastUpdated,
-		"lessons":      lessons,
+		"lessons_core": core,
 	}
 	b, _ := json.Marshal(m)
 	if err := os.WriteFile(filepath.Join(dir, "memory.json"), b, 0644); err != nil {

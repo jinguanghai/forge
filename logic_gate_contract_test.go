@@ -130,6 +130,9 @@ func TestLogicGateErrorHidesTempPath(t *testing.T) {
 
 // TestLogicGateAcceptsZ3PyForms 保证拒绝权没有误伤正常形式。
 func TestLogicGateAcceptsZ3PyForms(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 跳过 logic gate 真实子进程端到端 (8 个 case 各起一次 z3)")
+	}
 	cases := []struct {
 		name, typ, code, want string
 	}{

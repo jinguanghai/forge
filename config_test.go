@@ -7,7 +7,7 @@ import (
 )
 
 // ─── LoadConfig: 环境变量注入 ────────────────────────────────
-// 注意: godotenv.Load 不覆盖已存在的环境变量, t.Setenv 设的值优先;
+// 注意: loadEnvFile 不覆盖已存在的环境变量, t.Setenv 设的值优先;
 // 空字符串也能压住 .env 中的真实值。
 
 func TestLoadConfig_MissingAPIKey(t *testing.T) {

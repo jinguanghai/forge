@@ -14,6 +14,11 @@ package main
 //      (旁路 = 未过 memHealthLint 体检 + 未留审计, 属护栏盲区)
 //
 // 设计对齐 guard.go / anchorGuardAudit: 只报不改 (只读哨兵), 留痕失败静默不阻断主流程。
+//
+// 20261003 增补: 留痕条目带 src 字段区分写入路径 (save / baseline / manual-exempt)。
+// 手工例外路径 (批准的绕过) 从此可区分、可计数, 不再与正常路径混为一谈 ——
+// 它仍有留痕 (故不判旁路), 但哨兵显式报 🟡 并单列例外条数 (不静默通过)。
+// 该判据的 gate 层前置拒绝权见 memory_guard.go (只报不拦 → 命中即拒)。
 
 import (
 	"encoding/json"
@@ -26,12 +31,20 @@ import (
 
 const memoryWritesFileName = "memory_writes.jsonl"
 
+// 写入路径来源 (留痕条目 src 字段取值)。空值视为 save (历史条目默认, 由 SaveMemory 写入)。
+const (
+	memoryWriteSrcSave   = "save"
+	memoryWriteSrcBase   = "baseline"
+	memoryWriteSrcManual = "manual-exempt"
+)
+
 // MemoryWriteEntry 记忆写入留痕条目 (memory_writes.jsonl 一行一条)。
 type MemoryWriteEntry struct {
 	Time   string `json:"time"`             // RFC3339 本地时间
 	SHA    string `json:"sha"`              // 写入后 memory.json 内容 sha256 前16位
 	Size   int    `json:"size"`             // 内容字节数
 	Anchor bool   `json:"anchor"`           // 是否锚点字段改动 (与 anchor_audit 互补)
+	Src    string `json:"src,omitempty"`    // 写入路径: save / baseline / manual-exempt (空=save)
 	Reason string `json:"reason,omitempty"` // 写入来源 (SaveMemory / baseline)
 }
 
@@ -40,12 +53,13 @@ func memoryWritesPath(workDir string) string {
 }
 
 // recordMemoryWrite 追加一条写入留痕 (失败静默 —— 留痕失败不阻断主流程)。
-func recordMemoryWrite(workDir string, data []byte, anchor bool, reason string) {
+func recordMemoryWrite(workDir string, data []byte, anchor bool, src, reason string) {
 	entry := MemoryWriteEntry{
 		Time:   time.Now().Format(time.RFC3339),
 		SHA:    sysHashPrefix(data),
 		Size:   len(data),
 		Anchor: anchor,
+		Src:    src,
 		Reason: reason,
 	}
 	line, err := json.Marshal(entry)
@@ -60,18 +74,16 @@ func recordMemoryWrite(workDir string, data []byte, anchor bool, reason string) 
 	_ = f.Close()
 }
 
-// loadMemoryWriteSHAs 读取留痕中的 sha 集合。返回 (集合, 有效条目数, 错误)。
-// 文件不存在 = 无留痕 (返回空集合, 不算错误)。
-func loadMemoryWriteSHAs(workDir string) (map[string]bool, int, error) {
+// loadMemoryWriteEntries 读取全部有效留痕条目。文件不存在 = 无留痕 (空切片, 不算错误)。
+func loadMemoryWriteEntries(workDir string) ([]MemoryWriteEntry, error) {
 	data, err := os.ReadFile(memoryWritesPath(workDir))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string]bool{}, 0, nil
+			return nil, nil
 		}
-		return nil, 0, err
+		return nil, err
 	}
-	set := make(map[string]bool)
-	n := 0
+	var out []MemoryWriteEntry
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -81,12 +93,55 @@ func loadMemoryWriteSHAs(workDir string) (map[string]bool, int, error) {
 		if json.Unmarshal([]byte(line), &e) != nil {
 			continue
 		}
-		n++
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// loadMemoryWriteSHAs 读取留痕中的 sha 集合。返回 (集合, 有效条目数, 错误)。
+// 文件不存在 = 无留痕 (返回空集合, 不算错误)。
+func loadMemoryWriteSHAs(workDir string) (map[string]bool, int, error) {
+	entries, err := loadMemoryWriteEntries(workDir)
+	if err != nil {
+		return nil, 0, err
+	}
+	set := make(map[string]bool, len(entries))
+	for _, e := range entries {
 		if e.SHA != "" {
 			set[e.SHA] = true
 		}
 	}
-	return set, n, nil
+	return set, len(entries), nil
+}
+
+// writeEntrySrc 返回指定 sha 的留痕来源 (取最后一条带 src 的条目; 空 = 未标来源, 视为 save)。
+func writeEntrySrc(workDir, sha string) string {
+	entries, err := loadMemoryWriteEntries(workDir)
+	if err != nil {
+		return ""
+	}
+	src := ""
+	for _, e := range entries {
+		if e.SHA == sha && e.Src != "" {
+			src = e.Src
+		}
+	}
+	return src
+}
+
+// countMemoryWriteSrc 统计指定来源的留痕条数 (供哨兵单列"手工例外"量)。
+func countMemoryWriteSrc(workDir, src string) int {
+	entries, err := loadMemoryWriteEntries(workDir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if e.Src == src {
+			n++
+		}
+	}
+	return n
 }
 
 // memoryWriteSentinel 校验 memory.json 当前内容是否有 SaveMemory 写入留痕。
@@ -109,10 +164,18 @@ func memoryWriteSentinel(workDir string) (bool, string) {
 		return true, "ℹ️ 写入路径: 尚无留痕基线 (哨兵自下次 SaveMemory 起生效)"
 	}
 	cur := sysHashPrefix(data)
-	if set[cur] {
-		return true, fmt.Sprintf("✅ 写入路径: 当前版本有 SaveMemory 留痕 (sha=%s, 留痕 %d 条)", cur, n)
+	if !set[cur] {
+		return false, fmt.Sprintf("🔴 写入路径: 当前 memory.json (sha=%s, %d 字节) 无写入留痕 → 疑似旁路写入/外部覆盖 (未过体检、未留审计)", cur, len(data))
 	}
-	return false, fmt.Sprintf("🔴 写入路径: 当前 memory.json (sha=%s, %d 字节) 无 SaveMemory 留痕 → 疑似旁路写入/外部覆盖 (未过体检、未留审计)", cur, len(data))
+	// 有留痕 —— 但手工例外路径不静默通过: 显式报 🟡 并单列例外量 (可见性 = 降噪的反面)。
+	suffix := ""
+	if manual := countMemoryWriteSrc(workDir, memoryWriteSrcManual); manual > 0 {
+		suffix = fmt.Sprintf(" [手工例外 %d/%d 条]", manual, n)
+	}
+	if src := writeEntrySrc(workDir, cur); src == memoryWriteSrcManual {
+		return true, fmt.Sprintf("🟡 写入路径: 当前版本 (sha=%s) 走手工例外路径 —— 有留痕但未经 SaveMemory 体检%s", cur, suffix)
+	}
+	return true, fmt.Sprintf("✅ 写入路径: 当前版本有 SaveMemory 留痕 (sha=%s, 留痕 %d 条)%s", cur, n, suffix)
 }
 
 // ensureMemoryWriteBaseline 建立写入留痕基线 (启动时调用一次, 幂等)。
@@ -127,5 +190,5 @@ func ensureMemoryWriteBaseline(workDir string) {
 	if err != nil {
 		return
 	}
-	recordMemoryWrite(workDir, data, false, "baseline")
+	recordMemoryWrite(workDir, data, false, memoryWriteSrcBase, "baseline")
 }

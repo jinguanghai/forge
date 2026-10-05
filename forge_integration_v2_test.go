@@ -40,6 +40,9 @@ func newTestForgeWithTools(t *testing.T) *Forge {
 
 // TestForgeGate_Go_EndToEnd: 真实 go build + run
 func TestForgeGate_Go_EndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 跳过真实 go build + run 端到端")
+	}
 	f := newTestForge(t)
 	defer f.Shutdown()
 	code := "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"GO_ENDTOEND_OK\") }\n"

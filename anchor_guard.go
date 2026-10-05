@@ -28,9 +28,21 @@ type AnchorAuditEntry struct {
 	SysHash  string   `json:"sys_hash,omitempty"`  // system 前缀指纹 (前16位)
 	Reason   string   `json:"reason,omitempty"`    // 备注 (missing_last_updated 等)
 	GuardOff bool     `json:"guard_off,omitempty"` // true=护栏关闭时写入 (留痕但不计配额)
+	Src      string   `json:"src,omitempty"`       // 写入路径: exempt=事后认领 (内容未变, 不计配额)
 }
 
 const anchorAuditFileName = "anchor_audit.jsonl"
+
+// anchorAuditSrcExempt 审计条目 src 取值: 事后认领 (exempt 不改内容, 故不计配额)。
+// 与 Python 出口工具 (.forge/forge-tools/memory_write.py) 同源, 由 anchor_fields_sentinel_test.go 钉住。
+const anchorAuditSrcExempt = "exempt"
+
+// anchorExemptWarnThreshold 当日豁免次数达到该值即在摘要中告警。
+//
+// 豁免(关护栏 / 事后认领)不计配额是设计, 但"不计配额" != "不产生成本": 每次豁免同样
+// 改锚点、同样重置缓存前缀。阈值让绕行可见 —— 20261003 实测当日 14 次锚点写入全走豁免,
+// 而 anchorAuditTodayCount 返回 0, 摘要只报计配额的那个数 (测量失真: 不可见即不可管理)。
+const anchorExemptWarnThreshold = 3
 
 func anchorAuditPath(workDir string) string {
 	return filepath.Join(workDir, anchorAuditFileName)
@@ -61,6 +73,8 @@ func sysHashPrefix(data []byte) string {
 var dynamicMemoryFields = []string{
 	// 由 RecallMemory 动态召回
 	"key_findings",
+	// 由 RecallMemory 动态召回 (独立配额 lessonsRecallTopK; 常驻硬约束见 lessons_core)
+	"lessons",
 	// 由 compactFoldedIndex 精简注入
 	"folded_memory",
 	// 变化走 syncDynamicTails 尾部 diff
@@ -96,18 +110,20 @@ func isAnchorChange(fields []string) bool {
 	return false
 }
 
-// anchorAuditTodayCount 统计今天的锚点写入次数 (按审计文件 time 字段, 仅锚点改动计数)。
-// GuardOff 条目 (护栏关闭时写入) 不计入 —— 关护栏=不占配额, 语义与修正前一致。
-func anchorAuditTodayCount(workDir string) (int, error) {
+// anchorAuditTodayStats 统计今日锚点条目: total=今日全部锚点改动, counted=其中计配额者;
+// total-counted = 今日豁免数 (guard_off 关护栏写入 / src=exempt 事后认领)。
+//
+// 拦截只看 counted (语义与修正前逐字节一致); total 专供度量与告警 —— 二者同源同遍历,
+// 不另写一份判据, 避免拦截与度量各读一遍文件后漂移。
+func anchorAuditTodayStats(workDir string) (total, counted int, err error) {
 	data, err := os.ReadFile(anchorAuditPath(workDir))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil // 无审计文件 = 从未写过
+			return 0, 0, nil // 无审计文件 = 从未写过
 		}
-		return 0, err
+		return 0, 0, err
 	}
 	today := time.Now().Format("2006-01-02")
-	count := 0
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -117,14 +133,26 @@ func anchorAuditTodayCount(workDir string) (int, error) {
 		if json.Unmarshal([]byte(line), &e) != nil {
 			continue
 		}
-		if e.GuardOff {
+		if !strings.HasPrefix(e.Time, today) {
 			continue
 		}
-		if strings.HasPrefix(e.Time, today) {
-			count++
+		total++
+		if !e.GuardOff && e.Src != anchorAuditSrcExempt {
+			counted++
 		}
 	}
-	return count, nil
+	return total, counted, nil
+}
+
+// anchorAuditTodayCount 今日计配额次数 (护栏拦截判据)。豁免语义见 anchorAuditTodayStats:
+//   - GuardOff (护栏关闭时写入) —— 关护栏=不占配额, 语义与修正前一致;
+//   - Src=exempt (事后认领) —— 内容未变, 补留痕不该挤占当日改动额度。
+//
+// 20261003 背景: Python 出口工具曾把 GuardOff 硬编码 true, 于是走该工具的写入全部
+// 落进上面第一条豁免 → 配额计数恒 0, 护栏被合规工具绕过 (名实不符: 审计还显 [护栏关闭])。
+func anchorAuditTodayCount(workDir string) (int, error) {
+	_, counted, err := anchorAuditTodayStats(workDir)
+	return counted, err
 }
 
 // anchorGuardCheck 频率拦截: 同一天第 2 次写锚点 → 返回错误。
@@ -133,12 +161,15 @@ func anchorGuardCheck(workDir string) error {
 	if !anchorGuardEnabled() {
 		return nil
 	}
-	count, err := anchorAuditTodayCount(workDir)
+	counted, err := anchorAuditTodayCount(workDir)
 	if err != nil {
 		return nil // 审计文件损坏不阻断写入 (宁缺毋滥)
 	}
-	if count >= 1 {
-		return fmt.Errorf("锚点写入护栏: 今日已写 %d 次, 禁止第 %d 次 (缓存将重置, 未命中价是命中价 30 倍)。请合并改动到一次写入, 或设 FORGE_ANCHOR_GUARD=0 关闭护栏", count, count+1)
+	if counted >= 1 {
+		// 提示里的"今日已写"必须是实际改动量: 只报计配额数会让模型低估已付出的缓存成本
+		// (实测某日实际 14 次而计配额 1 次, 拦截文案却称"今日已写 1 次")。
+		total, _, _ := anchorAuditTodayStats(workDir)
+		return fmt.Errorf("锚点写入护栏: 今日锚点改动 %d 次 (其中计配额 %d 次), 禁止第 %d 次 (缓存将重置, 未命中价是命中价 30 倍)。请合并改动到一次写入, 或设 FORGE_ANCHOR_GUARD=0 关闭护栏", total, counted, counted+1)
 	}
 	return nil
 }
@@ -259,6 +290,13 @@ func anchorAuditSummary(workDir string) string {
 		}
 	}
 	sb.WriteString(fmt.Sprintf("  近 7 天: %d 次\n", recent))
+	// 今日单列 + 豁免可见: 拦截只看计配额数, 但绕行同样烧缓存, 必须让主人看见实际改动量。
+	if tTotal, tCounted, terr := anchorAuditTodayStats(workDir); terr == nil && tTotal > 0 {
+		sb.WriteString(fmt.Sprintf("  今日: 锚点改动 %d 次 (计配额 %d / 豁免 %d)\n", tTotal, tCounted, tTotal-tCounted))
+		if tTotal-tCounted >= anchorExemptWarnThreshold {
+			sb.WriteString(fmt.Sprintf("  ⚠ 今日豁免 %d 次 —— 配额被绕行, 缓存重置成本按 %d 次计 (豁免不占配额 != 无成本)\n", tTotal-tCounted, tTotal))
+		}
+	}
 	sb.WriteString("  最近 5 条:\n")
 	start := len(entries) - 5
 	if start < 0 {

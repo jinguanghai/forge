@@ -72,7 +72,11 @@ func snapshotAdd(workDir string, env []string) error {
 // gitSnapshot 自改前 git 快照: 工作区是 git 仓库时
 // `git commit` 形成不可逆历史点, 返回 commit hash。
 // 失败静默返回空串(不阻塞自改 —— .forge\checkpoints 文件快照仍是兜底)。
-// 运行时文件已被 .gitignore 排除(memory.json/events.jsonl/checkpoint 等), 不入库。
+// 运行时文件已被 .gitignore 排除(events.jsonl/checkpoint 等), 不入库。
+// 例外: memory.json 自 20261003 起在【本地】仓库被 force-add 跟踪(私有记忆的版本
+// 安全网), 故会随上面的 git add -u 进入 auto 快照 —— 这是设计, 不是泄漏:
+// 该仓库 remote 的 pushurl 已被禁用, 且 open_source_sync.ps1 的 scope 不含它
+// (三条均由 memory_tracked_sentinel_test.go 钉住)。
 func gitSnapshot(workDir, reason string) string {
 	if _, err := os.Stat(filepath.Join(workDir, ".git")); err != nil {
 		return "" // 非 git 仓库, 跳过

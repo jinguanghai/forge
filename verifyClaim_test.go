@@ -39,6 +39,20 @@ func TestDetectUnverifiedClaim(t *testing.T) {
 			want: false,
 		},
 		{
+			// 20261004 打穿用例: buildStreamMessages 会把 a.history 拼进 messages
+			// (agent_stream_loop.go:157), 历史里旧任务的工具调用会让"本轮零工具
+			// 直接虚报"被判为有证据 -> 漏检。判据必须只看本轮 (最后一条 user 之后)。
+			name: "历史有工具证据 + 本轮新任务纯声称 -> 虚报",
+			asst: "已完成，commit 9f8e7d6 已提交，测试通过",
+			messages: []ChatMessage{
+				{Role: "user", Content: "旧任务: 看一下状态"},
+				{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Function: FunctionCall{Name: ForgeToolName}}}},
+				{Role: "tool", ToolCallID: "1", Content: "ok"},
+				{Role: "user", Content: "新任务: 帮我提交"},
+			},
+			want: true,
+		},
+		{
 			name: "纯思维结论(无操作性词) -> 不误伤",
 			asst: "已完成分析，结论是该方案正确",
 			messages: []ChatMessage{

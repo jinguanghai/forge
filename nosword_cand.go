@@ -227,11 +227,13 @@ func nswCtxReject(text string, c nswCand) bool {
 	// 为什么加"纯分数 + 前置汉字"分支: 紧邻量词枚举必然漏网 (实测 "数学子项 2/3" 的
 	// '项' 曾不在集合里); 而审计 34 个锚点中 19 个是纯分数形式, 且全部是引用比例 ——
 	// 形态比量词更本质。含其他运算符 (3/4+1/4) 或带结论的一律不拒。
-	// 前置"汉字"而非"量词"是为了不误伤裸算式夹具 (如整串 "10/4" / "1/3" —— 无中文
-	// 语境, 不是比例陈述, 照旧求值); 真实文本里的分数必带中文语境。
+	// 前置"中文语境"(汉字或中文标点, 见 nswCJKBefore) 而非"量词"是为了不误伤裸算式
+	// 夹具 (如整串 "10/4" / "1/3" —— 无中文语境, 不是比例陈述, 照旧求值);
+	// 真实文本里的分数必带中文语境。
+	// 缺陷T (20261004): 原判据只认汉字, 全角括号 "（1080/1081）" 漏网 (审计实证误算)。
 	pureFrac := nswPureFractionRe.MatchString(c.expr)
 	if !nswNumFollows(rs, c.end) &&
-		((pureFrac && nswHanBefore(rs, c.start)) || (!pureFrac && nswRatioWordBefore(rs, c.start))) {
+		((pureFrac && nswCJKBefore(rs, c.start)) || (!pureFrac && nswRatioWordBefore(rs, c.start))) {
 		return true
 	}
 	// J8 斜杠带显式正号 (20260913 缺陷S): "+0.45/0.12" 的前导 '+' 被

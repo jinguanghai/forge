@@ -60,7 +60,7 @@ func NewAgentRunner(cfg *Config) (*AgentRunner, error) {
 		stats:          &SessionStats{StartTime: time.Now()},
 		ctx:            ctx,
 		cancel:         cancel,
-		SaveCheckpoint: true,
+		SaveCheckpoint: persistConversation(),
 	}
 	// v3.1: 固定头部 = [system 恒定版] + [记忆锚点] + [折叠索引] (DSH project 机制)
 	// 必须写入 a.history! 否则首轮请求无 system (前缀缺失, 全量 miss)。

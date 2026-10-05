@@ -39,6 +39,12 @@ var wiringRequirements = []struct {
 	// 审批提示的编码块解码 (2026-10 安全测试): 提示只显示乱码 = 主人盲批,
 	// 而「解码了但没接进 confirmDangerous」在功能上等于没做 —— 由哨兵钉住。
 	{"approvalExtraText", wireCall, "forge.go"},
+	// 剥离埋点 (P0 规则下沉, 20261004): 剥离此前既不可见也不可测 ——
+	// 删掉调用点不会报错, 只会让"生成与执行分离"重新退化成不可度量。
+	{"stripAudit", wireCall, "agent_stream_setup.go"},
+	// 度量铁律埋点 (20261004): 只观测不拦截的臂最容易被静默退化 ——
+	// 删掉调用点不报错, 只是"度量铁律"重新变回零判据的纯 prompt。
+	{"metricClaimAudit", wireCall, "agent_stream_final.go"},
 }
 
 func TestWiringSentinels(t *testing.T) {

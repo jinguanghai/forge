@@ -66,6 +66,9 @@ func TestApprovalDelegate_ClosePreservesBytes(t *testing.T) {
 
 // TestApprovalDelegate_Modes 档位语义 — 直通档直接放行, 窗口档可转人工。
 func TestApprovalDelegate_Modes(t *testing.T) {
+	// 窗口档的倒计时长度不是被测语义 —— 注入 1s 窗口, 否则默认 11s 白等。
+	// (FORGE_DELEGATE_WINDOW 是产品既有的可注入点, 无需改动产品代码)
+	t.Setenv("FORGE_DELEGATE_WINDOW", "1")
 	for _, mode := range []string{"1", "all"} {
 		allowed, decided := confirmByDelegate(mode, "删除", "test_fp")
 		if !decided {

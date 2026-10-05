@@ -16,6 +16,10 @@ import (
 // ══════════════════════════════════════════════════════════════════
 // 分形守卫 (Fractal Guard) —— 永久底层结构约束
 //
+// 来源 (20261004 补留痕): 主人原话「整体有序, 局部无序」→ 实际翻译 = 整体同构 + 局部有界。
+//   落地提交 df7f4a3 的提交信息只有标题, 代码头注释只写"结构美感" —— 约束的出处断链,
+//   后人无法判断某条规则是主人要求还是实现者发挥。此三行即补该断链。
+//
 // 分形 = 自相似 + 尺度不变。本守卫把"结构美感"翻译成死程序能判的四条规则:
 //
 //	F1 自相似   顶层结构指纹 ∈ 有限模板集 (复杂指纹 = 上帝文件)
@@ -66,6 +70,9 @@ const (
 	// (F1|wiring_sentinel_test.go shape 8; F2|llm_http_test.go 988 / self_deploy_test.go 629 /
 	// cov_b3_branches_test.go 582), 而注释却宣称"四项债务全部清零"。
 	// 已去掉豁免并拆解这 4 个文件, 今后测试文件与实现文件同受 F1/F2/F3 约束。
+	// 现值 2 的具体身份 (20261004 补留痕, 防"水位从哪来"断链):
+	//   F4|approval_delegate.go + F4|console_guard.go —— 二者同包, 由 cookguard_sentinel_test.go
+	//   集中覆盖 (拆成两个同名 _test 会出现符号重定义)。属结构性不可解项, 非"来不及修"。
 	fractalDebtCeiling = 2 // 20261002 加 cookguard (cookedBaseline/ensureCookedForApproval), 集中覆盖委托模式+控制台守护
 	fractalDumpBegin   = "<<<FRACTAL_JSON_BEGIN>>>"
 	fractalDumpEnd     = "<<<FRACTAL_JSON_END>>>"

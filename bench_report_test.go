@@ -182,3 +182,69 @@ func TestBenchRunsLimitsWired(t *testing.T) {
 	}
 	t.Logf("跑分目录: %d 个题目目录 / %.1f KB", f.Runs.Tasks, float64(f.Runs.Bytes)/1024)
 }
+
+// TestBenchRotationApplyWired 轮转处置臂必须接线 (20261004)。
+//
+// 动机: bench_report_check.py 是**只读判据**, 报红之后没有任何处置动作 ——
+// 报告是日频产物 (每天首跑 +1), 判据上限 14 份, 贴边后**永久报红**
+// (实测 2026-10-04 当天已 15 份, 靠人工每天手移一份顶着)。
+// 红牌常亮 = 告警疲劳, 真告警会被淹没 (与 archive 同型事故: 连续 14 条/小时无人看)。
+// 判据存在 ≠ 被消费 ≠ 被调度, 三处都要钉:
+//
+//	① 判据脚本真的消费处置臂 (源码引用 bench_report_apply)
+//	② 处置臂的沙箱用例真跑通 (TestBenchRotationSim: 造 15 份 -> 轮转 -> 幂等 -> 回滚)
+//	③ 调度带 --apply (由 hourly_wiring_test.go 的判据表钉住, 缺参数即报红)
+func TestBenchRotationApplyWired(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile(benchReportRel)
+	if err != nil {
+		t.Fatalf("读取 %s 失败 (fail-closed): %v", benchReportRel, err)
+	}
+	s := string(src)
+	if !strings.Contains(s, "bench_report_apply") {
+		t.Errorf("%s 未接线处置臂 —— 判据只读 = 贴边后永久报红", benchReportRel)
+	}
+	if !strings.Contains(s, "_apply_rotation(") {
+		t.Errorf("%s 缺处置调用点 (_apply_rotation) —— 判据与处置未闭环", benchReportRel)
+	}
+	if !strings.Contains(s, "--apply") {
+		t.Errorf("%s 缺 --apply 开关 —— 默认只读语义要保留, 但处置入口必须存在", benchReportRel)
+	}
+	if _, err := os.Stat("defense_system/bench_report_apply.py"); err != nil {
+		t.Fatalf("处置臂脚本不存在 (接线指向空气): %v", err)
+	}
+	// 处置臂自身也要有判据向量 (判据自身也要有判据)。
+	arm, err := os.ReadFile("defense_system/bench_report_apply.py")
+	if err != nil {
+		t.Fatalf("读取处置臂失败 (fail-closed): %v", err)
+	}
+	for _, want := range []string{"def selftest()", "def rollback(", "MAX_ITEMS", "--rollback"} {
+		if !strings.Contains(string(arm), want) {
+			t.Errorf("处置臂缺 %q —— 四重护栏 (只移不删/熔断/可回滚/幂等) 不完整", want)
+		}
+	}
+}
+
+// TestBenchRotationSim 沙箱端到端: 造 15 份 -> 判据报红 -> --apply 轮转 ->
+// 幂等 -> rollback 逐字节还原。
+//
+// 为什么必须实跑而非观察: 生产里「份数超限 -> 轮转」要等日频产物攒满才走到,
+// 而它是唯一会移动文件的路径 (报告可能是唯一副本), 出事代价最高。
+// 真实根绝不参与: 沙箱根由 FORGE_BENCH_ROOT 注入, 且跑 --apply 前有 preflight
+// 闸门确认注入生效 (解析失败则 fail-closed 退出)。
+func TestBenchRotationSim(t *testing.T) {
+	t.Parallel()
+	cmd := exec.Command(guardGatePython(), "defense_system/bench_report_apply.py", "--sim")
+	cmd.Env = pythonUTF8Env()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("沙箱用例失败 (fail-closed): %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "失败 0 项") {
+		t.Errorf("沙箱用例未报「失败 0 项」:\n%s", out)
+	}
+	if strings.Contains(string(out), "FAIL") {
+		t.Errorf("沙箱用例有 FAIL 行:\n%s", out)
+	}
+	t.Logf("沙箱输出:\n%s", out)
+}

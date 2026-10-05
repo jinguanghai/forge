@@ -92,7 +92,7 @@ func SaveMemory(workDir string, data []byte) error {
 		changed := anchorChangedFields(oldData, data)
 		anchorGuardAudit(workDir, changed, "")
 		// 写入路径留痕 (全量, 供 memoryWriteSentinel 校验"内容变化必经 SaveMemory")
-		recordMemoryWrite(workDir, data, isAnchorChange(changed), "SaveMemory")
+		recordMemoryWrite(workDir, data, isAnchorChange(changed), memoryWriteSrcSave, "SaveMemory")
 	}
 	return err
 }

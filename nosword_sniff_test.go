@@ -15,7 +15,7 @@ var nswSniffDecls = []string{
 	"nswMultiSegRe", "nswUnaryBare", "nswHugeIntRe", "nswRangeDivRe", "nswLeadZeroRe",
 	"nswParenRangeRe", "nswSlashPlusRe", "nswRatioWords", "nswPureFractionRe", "nswSlashListRe",
 	"nswInCodeFence", "nswEvalMarkLine", "nswInInlineCode", "nswTableRow",
-	"nswRatioWordBefore", "nswHanBefore", "nswNumFollows",
+	"nswRatioWordBefore", "nswCJKBefore", "nswNumFollows",
 }
 
 func TestNSWSniff_Ownership(t *testing.T) {

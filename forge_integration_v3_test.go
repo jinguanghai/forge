@@ -23,6 +23,9 @@ import (
 // TestForgeGate_Concurrent: 多 goroutine 并发调用 forgeGate,验证 Forge 实例的并发安全
 // Windows 默认串行(防病毒软件可能误杀并发子进程);Linux 启用 goroutine 并发
 func TestForgeGate_Concurrent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 跳过真实 python 子进程批量端到端 (Windows 串行 50 次)")
+	}
 	f := newTestForge(t)
 	defer f.Shutdown()
 
@@ -80,6 +83,9 @@ func TestForgeGate_Concurrent(t *testing.T) {
 // TestForgeGate_Concurrent_DistinctInput: 多协程 + 不同 input 验证 cache 隔离
 // Windows 串行 30 次,Linux 启用 goroutine 并发
 func TestForgeGate_Concurrent_DistinctInput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 跳过真实 python 子进程批量端到端 (Windows 串行 30 次)")
+	}
 	f := newTestForge(t)
 	defer f.Shutdown()
 

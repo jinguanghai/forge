@@ -33,7 +33,29 @@ const mutationManifestFile = "defense_system/mutation_manifest.json"
 
 // mutationWatermarkFloor 水位硬下限: 只升不降。
 // 新增鉴别力条目后, 把本常量与 manifest.watermark 一起上调。
-const mutationWatermarkFloor = 10
+// (20261003: 10 -> 12 netroute 红线两条; 12 -> 14 记忆写入护栏两条; 14 -> 15 preflight 入口收拢一条;
+//
+//	15 -> 18 guard_off 名实相符修复三条: 出口工具硬编码回归 / 跨语言动态字段漂移 / 配额豁免面;
+//	18 -> 19 判据 json 监控面收口一条: axiom_carriers.json 未纳入 watchlist;
+//	19 -> 20 自愈臂「删除也是演进」闸门一条: selfheal 对已提交的删除从不问 git
+//	(同批修掉 snapshot_too_old 对丢失文件抛 FileNotFoundError 打断整个自愈循环);
+//	20 -> 21 快照生成臂一条: 生成动作只挂人工按钮 -> 快照库必然腐坏
+//	(判据看得见的「份数/体积」与真正重要的「抗体新鲜度」不是同一件事);
+//	21 -> 23 P3-2 验收单一条 (真值外置: 改成读自产日志必报红) + P4 出口工具 src 标记一条
+//	(cmd_patch 记 save: 合规写入不得与「手工绕过」同标记);
+//	23 -> 24 验收单语言盲区一条: schtasks 结果解析只认英文标签 -> 该项恒 skip
+//	(「永远跳过的检查项」等于没有检查项, 20261005 在 task gate 下实测);
+//	24 -> 26 埋点消费者两条 (20261004): Consumer 声明被清空 / 报告不再消费某类事件
+//	(埋点 → 消费者 → 度量可见 只做第一层 = 「可测但没人测」, 实测上线当天报告里零数字);
+//	26 -> 27 规则↔载体清单腐烂一条 (20261004): prompt 加规则而清单没跟上
+//	(清单是「哪些规则已下沉」的唯一答案, 它腐烂 = 漏项重新变成不可见);
+//	27 -> 29 llm_sanitize 双缺陷两条 (20261004): 两侧 id 各自随机 -> 真实工具结果被
+//	换成占位符(静默数据丢失); 无 index 端点的 arguments 续片被 continue 丢弃
+//	(旧用例全绿而两处分支零覆盖 —— 行覆盖了、形态没覆盖))
+//	29 -> 30 变异探针轮转算法漂移一条 (20261004): Go 侧复刻退化成 +1 步进 ->
+//	哨兵会一直绿着验证一个不存在的实现 (轮转覆盖面判据随之失去意义);
+//	同批把探针从「手动可跑」接进 hourly (--apply --rotate 1) + 还原终检判据。
+const mutationWatermarkFloor = 30
 
 type mutationTarget struct {
 	ID            string   `json:"id"`
@@ -133,6 +155,16 @@ func mutationManifestProblem(m mutationManifest, files map[string]string) string
 		for _, want := range tg.SentinelTests {
 			if !mutationHasStr(names, want) {
 				bad = append(bad, tag+": run 指向不存在的测试 "+want)
+			}
+		}
+		// ⑦ 双向覆盖 (20261003 补): 哨兵文件里的每个用例都必须在 run 里。
+		// 只查单向(清单 ⊆ 文件)抓不到"新加了用例却没登记" —— 实测教训: netroute_test.go
+		// 的 3 个端到端用例从未进 run, 于是"把红线拒绝分支打穿"的变异被判为仍绿(FAIL),
+		// 而清单哨兵全绿。覆盖面漏登记 = 那条臂根本没被测到。
+		for _, name := range names {
+			if !mutationHasStr(tg.SentinelTests, name) {
+				bad = append(bad, fmt.Sprintf("%s: 哨兵 %s 的用例 %s 未列入 run (覆盖面漏登记)",
+					tag, tg.Sentinel, name))
 			}
 		}
 	}

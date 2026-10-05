@@ -127,13 +127,24 @@ func nswRatioWordBefore(rs []rune, start int) bool {
 	return i >= 0 && nswRatioWords[rs[i]]
 }
 
-// nswHanBefore 候选之前 (跳空格) 是否紧邻汉字 —— 中文语境下的纯分数即比例陈述 (J5)
-func nswHanBefore(rs []rune, start int) bool {
+// nswCJKBefore 候选之前 (跳空格) 是否紧邻中文语境 (汉字或中文标点) —— J5
+//
+// 原名 nswHanBefore 只认汉字: 全角括号不算汉字, 于是 "（1080/1081）" 漏网。
+// 审计实证: gate_audit.jsonl 2026-10-04T11:46:57 / 11:47:01 两条 nosword 事件,
+// exprs=["1080/1081=0.99907493062"] fresh=1 —— 比例陈述被当除法求值。
+// 只用于 J5 的"纯分数 + 前置中文语境"分支, 故影响面限于 数字/数字 形态。
+// 标点集不含半角冒号 ':' (会误伤 "如下: 3 * 7" 这类真断言); 全角 '：' 紧邻已由 J2 覆盖。
+// 用 ContainsRune 而非包级 map: 分形守卫 F1 限顶层结构指纹 <= 6, 新增一个包级声明即越界。
+func nswCJKBefore(rs []rune, start int) bool {
 	i := start - 1
 	for i >= 0 && (rs[i] == ' ' || rs[i] == '\t') {
 		i--
 	}
-	return i >= 0 && unicode.Is(unicode.Han, rs[i])
+	if i < 0 {
+		return false
+	}
+	return unicode.Is(unicode.Han, rs[i]) ||
+		strings.ContainsRune("，。、；！？（）〔〕【】「」『』《》〈〉…·“”‘’\u3000", rs[i])
 }
 
 // nswNumFollows 候选之后 (可跳空格与一个连接符 = : ： →) 是否紧跟数值
@@ -141,6 +152,15 @@ func nswNumFollows(rs []rune, end int) bool {
 	j := end
 	for j < len(rs) && (rs[j] == ' ' || rs[j] == '\t') {
 		j++
+	}
+	// 全角右括号闭合 (缺陷T 20261004): "（3/4）= 0.75" 的结论被 '）' 隔开, 不跳过则
+	// J5 的"带结论不拒"语义失效 -> 真纠错的错值抓不到。只跳一层, 与半角括号被吸进
+	// 候选 (opSet 含 '(' ')') 的现状对称。
+	if j < len(rs) && rs[j] == '）' {
+		j++
+		for j < len(rs) && (rs[j] == ' ' || rs[j] == '\t') {
+			j++
+		}
 	}
 	if j < len(rs) && (rs[j] == '=' || rs[j] == ':' || rs[j] == '：' || rs[j] == '→') {
 		j++

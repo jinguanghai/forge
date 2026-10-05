@@ -342,6 +342,12 @@ func (f *Forge) Build(code, lang, input string) (string, *ForgeGateResult, error
 		}
 	}
 
+	// ─── 前置拒绝权 (20261003): GitHub 红线 + 记忆写入 ───
+	// 只报不拦 = 软约束; 判据/执行臂/回执见 preflight.go (抽出以守住主路径行数预算)。
+	if out, res, denied := f.preflightDeny(code, lang); denied {
+		return out, res, nil
+	}
+
 	if f.retryMax > 1 {
 		result = f.retryGate(code, lang, input)
 	} else {

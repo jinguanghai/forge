@@ -6,6 +6,8 @@ package main
 // 缓存命中提示丢失 = 用户以为代码真跑了(实际未执行)。
 
 import (
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -166,5 +168,116 @@ func TestFormatResult_NonZeroExitE2E(t *testing.T) {
 	}
 	if !strings.Contains(out2, "ERR_LINE") {
 		t.Errorf("stderr 正文丢失: %q", out2)
+	}
+}
+
+// ── self gate 免 code 动作 (20261004) ──────────────────────────────
+//
+// 缺陷: forgeGateSkipCache 的空 code 检查位于 self 分支之前, 把「只重编译/只部署」
+// 这类无源码文本的动作一并拒掉 —— 语义上无 code 可传, 却必须塞占位文本才能调用。
+// 修法: 空检查放行 self 的免 code 动作, 其余语言/动作维持 fail-closed(例外不泛化)。
+
+func TestSelfActionNeedsCode_TruthTable(t *testing.T) {
+	cases := []struct {
+		action string
+		want   bool
+	}{
+		{"", true},                 // 默认动作 = append, 需要 code
+		{"append", true},           // 显式 append
+		{"build", false},           // 只编译
+		{"deploy", false},          // 只编译 + 部署
+		{"restart", false},         // 已废弃动作, 直接返回
+		{"replace:old:new", false}, // 改动内容在 input 里
+		{"replace:onlyone", false}, // 格式错留给 selfApplyReplace 报专属错误, 不该用"代码为空"挡
+		{"deployx", true},          // 未知动作按 append 处理 -> 需要 code
+		{" deploy ", true},         // 与 selfHostedSelf 的 switch 同判据: 不做 TrimSpace
+	}
+	for _, c := range cases {
+		if got := selfActionNeedsCode(c.action); got != c.want {
+			t.Errorf("selfActionNeedsCode(%q) = %v, want %v", c.action, got, c.want)
+		}
+	}
+}
+
+func TestGateAllowsEmptyCode_TruthTable(t *testing.T) {
+	cases := []struct {
+		lang, input string
+		want        bool
+	}{
+		{"self", "deploy", true},
+		{"self", "build", true},
+		{"self", "restart", true},
+		{"self", "replace:a:b", true},
+		{"self", "", false},
+		{"self", "append", false},
+		{"python", "deploy", false}, // 例外不得泛化到其他 gate
+		{"go", "", false},
+		{"math", "", false},
+	}
+	for _, c := range cases {
+		if got := gateAllowsEmptyCode(c.lang, c.input); got != c.want {
+			t.Errorf("gateAllowsEmptyCode(%q,%q) = %v, want %v", c.lang, c.input, got, c.want)
+		}
+	}
+}
+
+// 入口集成: self + restart 空 code 必须放行。
+// 选 restart 是因为它在 selfHostedSelf 里于任何 IO 之前直接返回(不碰源码/不编译),
+// 是唯一可安全端到端跑的 self 动作。
+func TestForgeGate_SelfRestart_EmptyCodeAllowed(t *testing.T) {
+	f := newTestForge(t)
+	defer f.Shutdown()
+	r := f.forgeGateSkipCache("", "self", "restart", true)
+	if !r.OK {
+		t.Fatalf("self+restart 空 code 应放行, 实得: %s", r.Error)
+	}
+	if r.Stage != "restart" {
+		t.Errorf("Stage = %q, want restart", r.Stage)
+	}
+}
+
+// 反向判据: 例外只覆盖 self 免 code 动作, 其余仍 fail-closed。
+func TestForgeGate_EmptyCodeStillRejected(t *testing.T) {
+	f := newTestForge(t)
+	defer f.Shutdown()
+	cases := []struct{ lang, input string }{
+		{"python", ""},
+		{"go", ""},
+		{"math", ""},
+		{"self", ""},       // 默认 append
+		{"self", "append"}, // 显式 append
+	}
+	for _, c := range cases {
+		r := f.forgeGateSkipCache("  \n ", c.lang, c.input, true)
+		if r.OK {
+			t.Errorf("lang=%s input=%q 空 code 应被拒, 实得 OK", c.lang, c.input)
+			continue
+		}
+		if !strings.Contains(r.Error, "代码为空") {
+			t.Errorf("lang=%s input=%q Error=%q, want 含 代码为空", c.lang, c.input, r.Error)
+		}
+	}
+}
+
+// 结构哨兵: selfHostedSelf 里出现的每个 action 字面量都必须是"免 code"动作。
+//
+// 防的漂移: 将来给 self 新增一个免 code 动作却忘了同步 selfActionNeedsCode,
+// 入口会重新把它拦成"代码为空" —— 而这正是本次要修的缺陷形态。
+func TestSelfActionLiteralsAreAllCodeFree(t *testing.T) {
+	src, err := os.ReadFile("forge_self.go")
+	if err != nil {
+		t.Fatalf("读 forge_self.go: %v", err)
+	}
+	ms := regexp.MustCompile(`action == "([^"]+)"`).FindAllStringSubmatch(string(src), -1)
+	if len(ms) == 0 {
+		t.Fatal("未在 forge_self.go 找到 action == \"...\" 字面量 —— 哨兵本身失效(选择器写错?)")
+	}
+	for _, m := range ms {
+		if m[1] == "append" {
+			continue // append 是默认动作, 本就需 code
+		}
+		if selfActionNeedsCode(m[1]) {
+			t.Errorf("selfHostedSelf 支持动作 %q 被判为需 code —— 入口会拦住它", m[1])
+		}
 	}
 }

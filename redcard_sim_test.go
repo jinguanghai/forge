@@ -119,6 +119,9 @@ func redcardFactsOf(t *testing.T) redcardFacts {
 
 // TestRedcardSimRealRun 跑真实模拟器: 11 场景 + 真实工作区对账必须全通过。
 func TestRedcardSimRealRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 跳过真实 python 模拟器端到端 (11 场景 + 真实工作区对账)")
+	}
 	t.Parallel()
 	cmd := exec.Command(guardGatePython(), redcardSimRel)
 	cmd.Env = pythonUTF8Env()

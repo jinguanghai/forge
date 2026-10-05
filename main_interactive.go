@@ -297,8 +297,10 @@ func guardInteractiveInput(cfg *Config, agent *AgentRunner, input string) bool {
 // runInteractiveTurn 执行一轮对话: 记历史 → RunStream → 语音播报 → 状态栏结算。
 // sigCount 在任务结束后重置: 下次任务首个 Ctrl+C 仍是取消而非退出。
 func runInteractiveTurn(agent *AgentRunner, input, historyFile string) {
-	// Save to history
-	appendHistory(historyFile, input)
+	// Save to history (隐私优先: 默认不落盘用户原文, 见 privacy.go)
+	if persistConversation() {
+		appendHistory(historyFile, input)
+	}
 
 	// Run
 	agentBusy.Store(true)

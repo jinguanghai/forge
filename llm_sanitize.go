@@ -1,11 +1,8 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"strings"
-	"time"
 )
 
 // ─── Message sanitization ──────────────────────────────────
@@ -28,6 +25,8 @@ func deepCopyMessages(messages []ChatMessage) []ChatMessage {
 		return nil
 	}
 	out := make([]ChatMessage, len(messages))
+	// claimed[k] = 第 k 条 assistant 消息里已被 tool 响应认领的 tool_calls 下标
+	claimed := make(map[int]map[int]bool)
 	for i, msg := range messages {
 		out[i] = msg
 		// v3.0: 不再生成消息级随机 id —— 请求体必须字节级确定性 (前缀缓存铁律)。
@@ -43,9 +42,8 @@ func deepCopyMessages(messages []ChatMessage) []ChatMessage {
 					out[i].ToolCalls[j].Type = "function"
 				}
 				if out[i].ToolCalls[j].ID == "" {
-					b2 := make([]byte, 8)
-					rand.Read(b2)
-					out[i].ToolCalls[j].ID = "call_" + hex.EncodeToString(b2)
+					// 确定性补全 (禁 rand): 同输入恒得同一 id → 前缀缓存稳定
+					out[i].ToolCalls[j].ID = autoToolCallID(i, j)
 				}
 			}
 		} else {
@@ -58,17 +56,86 @@ func deepCopyMessages(messages []ChatMessage) []ChatMessage {
 			out[i].Images = append([]ImagePart(nil), msg.Images...)
 		}
 
-		// For tool role messages, ensure tool_call_id is present
+		// For tool role messages, ensure tool_call_id is present.
+		// 关键: 绝不能独立随机生成 —— assistant 侧 tool_calls[j].id 与 tool 侧
+		// tool_call_id 必须相等 (API 硬契约)。两侧各自随机 → dropOrphanToolMessages
+		// 判为孤儿 → 真实工具结果被换成占位符 (静默数据丢失, 实测 20261004)。
+		// 这里回填到「紧邻前序 assistant(tool_calls) 块内尚未被认领的调用」,
+		// 与块内 id 同源 (同一条 out[bi].ToolCalls[bj].ID)。
 		if out[i].Role == "tool" {
-			if out[i].ToolCallID == "" {
-				b3 := make([]byte, 8)
-				rand.Read(b3)
-				out[i].ToolCallID = "call_" + hex.EncodeToString(b3)
+			bi := nearestToolCallBlock(out, i)
+			if bi >= 0 {
+				if out[i].ToolCallID == "" {
+					bj := firstUnclaimedToolCall(out[bi].ToolCalls, claimed[bi])
+					if bj >= 0 {
+						out[i].ToolCallID = out[bi].ToolCalls[bj].ID
+						markClaimed(claimed, bi, bj)
+					} else {
+						// 块内调用都已有响应 → 多余 tool 消息, 补确定性 id 后交给
+						// dropOrphanToolMessages 处理 (无匹配 id 必被删)
+						out[i].ToolCallID = autoToolCallID(i, 0)
+					}
+				} else {
+					for j := range out[bi].ToolCalls {
+						if out[bi].ToolCalls[j].ID == out[i].ToolCallID {
+							markClaimed(claimed, bi, j)
+						}
+					}
+				}
+			} else if out[i].ToolCallID == "" {
+				// 真孤儿 (无前置块): 补确定性 id 保 API 形状, 随后被 drop 掉
+				out[i].ToolCallID = autoToolCallID(i, 0)
 			}
 		}
 	}
 
 	return out
+}
+
+// autoToolCallID 生成确定性的工具调用 id。
+//
+// 铁律 (llm_types.go): 请求体必须字节级确定性 —— DeepSeek 前缀缓存按 token
+// 前缀匹配, 任何随机字段都可能是断裂点 (未命中价是命中价 30 倍)。故此处禁用
+// crypto/rand: 同一输入恒得同一 id。msgIdx < 0 表示流式合并场景 (无消息下标)。
+func autoToolCallID(msgIdx, callIdx int) string {
+	if msgIdx < 0 {
+		return fmt.Sprintf("call_auto_idx_%d", callIdx)
+	}
+	return fmt.Sprintf("call_auto_%d_%d", msgIdx, callIdx)
+}
+
+// nearestToolCallBlock 返回第 i 条 tool 消息所属 assistant(tool_calls) 块的下标。
+// 块定义与 dropOrphanToolMessages 一致: 中间只允许 tool 消息; 否则返回 -1。
+func nearestToolCallBlock(out []ChatMessage, i int) int {
+	for k := i - 1; k >= 0; k-- {
+		if out[k].Role == "assistant" && len(out[k].ToolCalls) > 0 {
+			return k
+		}
+		if out[k].Role != "tool" {
+			return -1
+		}
+	}
+	return -1
+}
+
+// firstUnclaimedToolCall 返回块内第一个尚未被 tool 响应认领的调用下标 (-1 = 无)。
+func firstUnclaimedToolCall(tcs []ToolCall, used map[int]bool) int {
+	for j := range tcs {
+		if !used[j] {
+			return j
+		}
+	}
+	return -1
+}
+
+// markClaimed 标记块 bi 内第 j 个调用已被认领。
+func markClaimed(claimed map[int]map[int]bool, bi, j int) {
+	m := claimed[bi]
+	if m == nil {
+		m = make(map[int]bool)
+		claimed[bi] = m
+	}
+	m[j] = true
 }
 
 func dropOrphanToolMessages(out []ChatMessage) []ChatMessage {
@@ -205,15 +272,26 @@ func mergeToolCalls(deltas []ToolCall) []ToolCall {
 	if allIndexZero && len(distinctIDs) > 1 {
 		byID := make(map[string]*acc)
 		order := make([]string, 0, len(distinctIDs))
+		var last *acc
 		for _, tc := range deltas {
+			var a *acc
 			if tc.ID == "" {
-				continue // ID-less fragment cannot be grouped — skip
-			}
-			a, ok := byID[tc.ID]
-			if !ok {
-				a = &acc{id: tc.ID, index: tc.Index}
-				byID[tc.ID] = a
-				order = append(order, tc.ID)
+				// 真实流式协议里续片只带 index + arguments (不带 id) —— 归属
+				// 「最近一个已建 acc」; 只有首个分片就无 id 且无 acc 时才丢弃
+				// (无归属线索, 建不出调用)。
+				if last == nil {
+					continue
+				}
+				a = last
+			} else {
+				cur, ok := byID[tc.ID]
+				if !ok {
+					cur = &acc{id: tc.ID, index: tc.Index}
+					byID[tc.ID] = cur
+					order = append(order, tc.ID)
+				}
+				a = cur
+				last = cur
 			}
 			if tc.Type != "" {
 				a.typ = tc.Type
@@ -285,13 +363,8 @@ func mergeToolCalls(deltas []ToolCall) []ToolCall {
 		}
 		id := a.id
 		if id == "" {
-			// Generate fallback ID — DeepSeek API requires id on every tool call
-			b := make([]byte, 8)
-			if _, err := rand.Read(b); err != nil {
-				id = fmt.Sprintf("call_%d", time.Now().UnixNano())
-			} else {
-				id = "call_" + hex.EncodeToString(b)
-			}
+			// 确定性补全 (API 强制要求 id; 禁 rand 保前缀缓存稳定)
+			id = autoToolCallID(-1, a.index)
 		}
 		result = append(result, ToolCall{
 			Index: a.index,

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 构造一份最小完整主记忆 (含锚点字段, 通过 memHealthLint 软检查)
@@ -124,5 +125,81 @@ func TestAnchorAuditRecordsWhenGuardOff(t *testing.T) {
 	// 第 2 次仍必须被拦 (护栏主功能未被削弱)
 	if err := SaveMemory(wd, nd); err == nil {
 		t.Fatal("开护栏后同日第 2 次锚点写入应被拦")
+	}
+}
+
+// TestAnchorAuditCountSkipsExemptOnly: 配额计数只豁免 exempt (事后认领) 与 guard_off,
+// 其余条目一律计数 —— 反例钉住豁免不得扩散 (豁免分支单独打标, 宽口子=静默放行)。
+func TestAnchorAuditCountSkipsExemptOnly(t *testing.T) {
+	wd := t.TempDir()
+	today := time.Now().Format(time.RFC3339)
+	lines := []string{
+		`{"time":"` + today + `","file":"memory.json","fields":["identity"],"src":"exempt"}`,
+		`{"time":"` + today + `","file":"memory.json","fields":["identity"],"guard_off":true}`,
+		`{"time":"` + today + `","file":"memory.json","fields":["lessons"],"src":"save"}`,
+		`{"time":"` + today + `","file":"memory.json","fields":["architecture"]}`,
+	}
+	if err := os.WriteFile(anchorAuditPath(wd), []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := anchorAuditTodayCount(wd); c != 2 {
+		t.Fatalf("只应计 2 条 (exempt 与 guard_off 各豁免一条, 另两条必须计数), count=%d", c)
+	}
+}
+
+// TestAnchorAuditTodayStatsCountsExempt: 豁免必须计入 total, 只从 counted 剔除。
+//
+// 回归 20261003: 当日 14 次锚点写入全走豁免(手工路径 / 关护栏), 而 anchorAuditTodayCount
+// 返回 0 —— 拦截与度量共用一个计数, 于是绕行不可见 (测量失真比没有测量更危险: 会让人
+// 误以为"今天没怎么改")。豁免不计配额是设计, 但必须可计量。
+func TestAnchorAuditTodayStatsCountsExempt(t *testing.T) {
+	wd := t.TempDir()
+	today := time.Now().Format(time.RFC3339)
+	lines := []string{
+		`{"time":"` + today + `","file":"memory.json","fields":["axioms"]}`,                   // 计配额
+		`{"time":"` + today + `","file":"memory.json","fields":["lessons"],"guard_off":true}`, // 豁免: 关护栏
+		`{"time":"` + today + `","file":"memory.json","fields":["defense"],"src":"exempt"}`,   // 豁免: 事后认领
+		`{"time":"` + today + `","file":"memory.json","fields":["gates"]}`,                    // 计配额
+	}
+	if err := os.WriteFile(anchorAuditPath(wd), []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	total, counted, err := anchorAuditTodayStats(wd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 4 || counted != 2 {
+		t.Fatalf("应 total=4/counted=2 (豁免 2 条计入 total), got total=%d/counted=%d", total, counted)
+	}
+	// 拦截计数必须与 stats.counted 同源 (否则度量与拦截各算一份, 迟早漂移)
+	if c, _ := anchorAuditTodayCount(wd); c != counted {
+		t.Fatalf("anchorAuditTodayCount 与 stats.counted 漂移: %d vs %d", c, counted)
+	}
+	sum := anchorAuditSummary(wd)
+	if !strings.Contains(sum, "今日: 锚点改动 4 次 (计配额 2 / 豁免 2)") {
+		t.Fatalf("摘要应显示今日实际改动量与豁免数, got:\n%s", sum)
+	}
+}
+
+// TestAnchorAuditSummaryWarnsOnExemptFlood: 豁免达阈值必须告警 (绕行可见才算闭环)。
+// 阈值自身也要有判据: 阈值下方必须不告警, 否则告警常驻 = 告警贬值。
+func TestAnchorAuditSummaryWarnsOnExemptFlood(t *testing.T) {
+	build := func(n int) string {
+		wd := t.TempDir()
+		today := time.Now().Format(time.RFC3339)
+		var lines []string
+		for i := 0; i < n; i++ {
+			lines = append(lines, `{"time":"`+today+`","file":"memory.json","fields":["lessons"],"guard_off":true}`)
+		}
+		if err := os.WriteFile(anchorAuditPath(wd), []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return anchorAuditSummary(wd)
+	}
+	if s := build(anchorExemptWarnThreshold - 1); strings.Contains(s, "⚠") {
+		t.Fatalf("豁免 %d 次 (阈值 %d 下方) 不该告警:\n%s", anchorExemptWarnThreshold-1, anchorExemptWarnThreshold, s)
+	}
+	if s := build(anchorExemptWarnThreshold); !strings.Contains(s, "⚠") {
+		t.Fatalf("豁免 %d 次 (达阈值) 必须告警:\n%s", anchorExemptWarnThreshold, s)
 	}
 }

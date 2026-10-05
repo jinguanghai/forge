@@ -173,6 +173,9 @@ open(r"` + marker2 + `","w").write("x")`,
 // 并保护两处功能回归: ^ 归一化为 ** (旧版在 Go 侧做过, v2 一度漏掉 → 2^10 算成 8),
 // 以及 latex 落地(旧版 Python 算完被 Go 丢弃 = 白算)。
 func TestMathGateAcceptsValidExpressions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 跳过 math gate 真实子进程端到端 (13 个 case 各起一次 sympy)")
+	}
 	cases := []struct{ expr, want, action string }{
 		{"1+1", "2", ""},
 		{"2^10", "1024", ""},

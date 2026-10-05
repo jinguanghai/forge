@@ -116,9 +116,8 @@ func TestMemoryTailDiff_AddedChangedRemoved(t *testing.T) {
 	}
 }
 
-// promptMapBudgetRunes 认知地图的长度预算 (字符数)。超预算即注意力稀释 —— 关键纪律
-// 被淹没的症状是"钱变多 + 模型开始飘", 不是报错, 所以必须由死程序钉住。
-const promptMapBudgetRunes = 4200
+// promptMapBudgetRunes 的定义已移到 agent_memory.go (20261004) —— 预算描述的是
+// 生产常量 systemPrompt, 定义留在测试里会让 axiom_carriers.json 的描述数字无处可校。
 
 // promptMapIssues 检查认知地图的完整性, 返回问题清单 (空 = 合格)。
 // 抽成纯函数是为了让判据本身可被变异用例直接喂入 —— 判据自身也要有判据。

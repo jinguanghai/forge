@@ -85,6 +85,9 @@ func TestNewCmdEnvNoOverride(t *testing.T) {
 // TestRelationGateProductionPathFromForeignCwd: 真·错位复现。
 // 进程 cwd 换成空目录, WorkDir 仍指 D:\forge -> 骨架必须扫到源码。
 func TestRelationGateProductionPathFromForeignCwd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 跳过 relation gate 生产路径端到端 (起真实子进程)")
+	}
 	foreign := t.TempDir()
 	chdirTemp(t, foreign)
 	f := NewForge(`D:\forge`, testCfg())

@@ -38,6 +38,7 @@ type semCase struct {
 	want     []string // 输出必须全部包含 (精确到 JSON 字段值)
 	wantNone []string // 输出不得包含
 	slow     bool     // 网络类, -short 跳过
+	net      bool     // 依赖真实外网(走代理): 网络层失败降级为跳过, 不判 FAIL
 	xfail    bool     // 已知缺陷: 期望当前行为是「不合契约」的
 	note     string
 }
@@ -92,8 +93,14 @@ func semCases() []semCase {
 			want: []string{"正则非法"},
 			note: "非法 pattern 属输入形态错误: rejected + 非零退出 (20261003 修复: 旧版返回 ok:true + verdict:error)"},
 		{gate: "regex", name: "等价判定同口径", code: `{"type":"equivalent","pattern":"a|b","pattern2":"b|a"}`,
-			kind: "ok", want: []string{`"verdict":"likely_equivalent"`},
-			note: "等价判定两侧必须同口径 (20261003 修复: 旧版 pattern 用 fullmatch / pattern2 用 search)"},
+			kind: "ok", want: []string{`"verdict":"equivalent"`, `"engine":"greenery"`},
+			note: "等价判定两侧必须同口径 (20261003 修复: 旧版 pattern 用 fullmatch / pattern2 用 search)。" +
+				"20261004: greenery 已装 → 形式化判定(engine=greenery); 穷举降级路径仍受判据覆盖 " +
+				"(regex_engine_degraded_test.go, 用 RG_FORCE_BRUTEFORCE 强制), 不因装上而变死代码"},
+		{gate: "regex", name: "等价判定可证伪", code: `{"type":"equivalent","pattern":"a+","pattern2":"a{1,3}"}`,
+			kind: "ok", want: []string{`"verdict":"not_equivalent"`, `"engine":"greenery"`},
+			note: "20261004: greenery 已装 → 形式化判定, 不产出 counterexample(反例仅穷举路径有); " +
+				"旧假阳性案例 a+ vs a{1,7} 曾报 likely_equivalent, 现为真判定 not_equivalent"},
 
 		// ── tcm gate (势态诊断) ──
 		{gate: "tcm", name: "文本诊断控势", code: "市场与营销部门过度亢奋，承诺过多。核心研发部门动力不足。阳热亢进，阴寒不足，上下失交。",
@@ -145,7 +152,7 @@ func semCases() []semCase {
 		{gate: "knowledge", name: "SPARQL 查询", code: "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 2",
 			kind: "ok", want: []string{`"ok":true`}, slow: true},
 		{gate: "browser", name: "抓取 example.com", code: "https://example.com",
-			kind: "ok", want: []string{"Example Domain"}, slow: true},
+			kind: "ok", want: []string{"Example Domain"}, slow: true, net: true},
 	}
 }
 
@@ -243,6 +250,13 @@ func TestBenchSemantics(t *testing.T) {
 				note = "已知缺陷(xfail): " + c.note + " | 实测: " + note
 			}
 		}
+		// 网络抖动降级 (20261003): 显式声明 net:true 的用例依赖真实外网(走代理),
+		// 网络层失败与代码质量无关 —— 实测同一份代码 13:44 PASS / 13:57 FAIL,
+		// 唯一差异是 net::ERR_CONNECTION_CLOSED。
+		// 只对 net:true 生效(宽口子会把真缺陷一起降级掉), 且降级必须留痕。
+		// 判定逻辑抽在 applyNetFlake (net_flake_test.go), 那边有分支判据 ——
+		// 写在循环里的分支不可单测, 等于「有处置臂但无人验证」。
+		ok, note = applyNetFlake(c, ok, note, out)
 		results = append(results, semResult{gate: c.gate, name: c.name, kind: c.kind, ok: ok, ms: ms, note: note})
 		if !ok {
 			t.Errorf("[%s/%s] %s", c.gate, c.name, note)
@@ -281,7 +295,7 @@ func TestBenchSemantics(t *testing.T) {
 
 // semReport 生成 markdown 报告
 func semReport(results []semResult, gates []string) string {
-	pass, xfailN := 0, 0
+	pass, xfailN, netSkipN := 0, 0, 0
 	for _, r := range results {
 		if r.ok {
 			pass++
@@ -289,16 +303,24 @@ func semReport(results []semResult, gates []string) string {
 		if strings.Contains(r.note, "xfail") {
 			xfailN++
 		}
+		if strings.Contains(r.note, "网络不可用") {
+			netSkipN++
+		}
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "# 铸剑炉 gate 语义基准 %s\n\n", time.Now().Format("2006-01-02"))
-	fmt.Fprintf(&sb, "**通过: %d/%d (%.0f%%)** | gate 注册表: %d 个 | 已知缺陷(xfail): %d\n\n",
-		pass, len(results), float64(pass)*100/float64(len(results)), len(gates), xfailN)
+	fmt.Fprintf(&sb, "**通过: %d/%d (%.0f%%)** | gate 注册表: %d 个 | 已知缺陷(xfail): %d | 网络降级: %d\n\n",
+		pass, len(results), float64(pass)*100/float64(len(results)), len(gates), xfailN, netSkipN)
+	if netSkipN > 0 {
+		fmt.Fprintf(&sb, "> ⚠️ %d 项因网络层不可用被降级(不计 FAIL)。降级不等于通过: 核对网络/代理后再看结论。\n\n", netSkipN)
+	}
 	sb.WriteString("| gate | 用例 | 期望 | 结果 | 耗时(ms) | 备注 |\n|---|---|---|---|---|---|\n")
 	for _, r := range results {
 		mark := "✅"
 		if !r.ok {
 			mark = "❌"
+		} else if strings.Contains(r.note, "网络不可用") {
+			mark = "⚠️"
 		}
 		fmt.Fprintf(&sb, "| %s | %s | %s | %s | %d | %s |\n", r.gate, r.name, r.kind, mark, r.ms, r.note)
 	}

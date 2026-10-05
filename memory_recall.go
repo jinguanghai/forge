@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"math"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 )
@@ -84,6 +83,25 @@ func loadKeyFindings(workDir string) ([]KeyFinding, error) {
 		}
 	}
 	return out, nil
+}
+
+// keyFindingsMissingTS 返回缺时间锚点的条目描述 (空切片 = 全部合格)。
+//
+// 为什么需要 (swordless_roadmap P2, 20261004): freshnessOf 对"ts 空且正文无日期"
+// 是 fail-closed 判 stale(权重 0.5) —— 条目还在, 只是再也召不回来。
+// 这类**静默降权**比报错难发现得多: 没有症状, 只有"经验好像没被用上"的模糊感觉。
+// 把"写入时必须带时间锚点"从纪律变成判据(公理三), 让缺失在提交时就报红。
+//
+// 只报红, **不自动补默认值** —— 自动补 today 会把"没有时间锚点"伪装成"新鲜",
+// 那比 stale 更危险: stale 是保守降权, 假新鲜是误导。
+func keyFindingsMissingTS(items []KeyFinding) []string {
+	var out []string
+	for i, it := range items {
+		if strings.TrimSpace(it.TS) == "" {
+			out = append(out, fmt.Sprintf("#%d %s", i+1, it.Title))
+		}
+	}
+	return out
 }
 
 // cnStopChars 中文高频虚字停用表(仅用于查询端去噪, 文档端保留全量保真)。
@@ -228,54 +246,32 @@ func RecallMemory(workDir, input string, topK int) (block string, hitCount int) 
 		topK = 5
 	}
 	kfs, err := loadKeyFindings(workDir)
-	if err != nil || len(kfs) == 0 {
+	if err != nil {
 		return "", 0
 	}
+	// lessons 是经验教训池 (独立配额); 读取失败不阻断 key_findings 召回。
+	lessons, _ := loadLessons(workDir)
 	// 会话隔离 —— 当前会话非空时, 只召回"全局经验 + 当前会话经验";
 	// 旧条目无 session 字段 = 全局经验, 全部保留 (向后兼容)。
-	if sid := currentSession(); sid != "" {
-		filtered := kfs[:0]
-		for _, kf := range kfs {
-			if kf.Session == "" || kf.Session == sid {
-				filtered = append(filtered, kf)
-			}
-		}
-		kfs = filtered
-		if len(kfs) == 0 {
-			return "", 0
-		}
-	}
-	docs := make([][]string, len(kfs))
-	for i, kf := range kfs {
-		docs[i] = tokenizeCN(kf.Title + " " + kf.Content)
+	kfs = filterBySession(kfs)
+	lessons = filterBySession(lessons)
+	if len(kfs) == 0 && len(lessons) == 0 {
+		return "", 0
 	}
 	query := tokenizeCN(input)
 	if len(query) == 0 {
 		return "", 0
 	}
-	scores := bm25Score(docs, query, 1.2, 0.75)
-
-	type scored struct {
-		kf  KeyFinding
-		s   float64
-		st  string
-		age int
-	}
-	items := make([]scored, 0, len(kfs))
-	for i := range kfs {
-		st, age := freshnessOf(kfs[i].TS, kfs[i].Content)
-		items = append(items, scored{kfs[i], scores[i] * freshnessWeight(st), st, age})
-	}
-	sort.SliceStable(items, func(i, j int) bool { return items[i].s > items[j].s })
+	// 分区召回: 两池各自 BM25 排名 + 各自配额 (互不挤占)
+	items := append(
+		takeTop(rankRecall(kfs, query, false), topK),
+		takeTop(rankRecall(lessons, query, true), lessonsRecallTopK)...)
 
 	var sb strings.Builder
 	n := 0
 	for _, it := range items {
 		if it.s <= 0 {
 			continue
-		}
-		if n >= topK {
-			break
 		}
 		n++
 		content := it.kf.Content
@@ -298,6 +294,9 @@ func RecallMemory(workDir, input string, topK int) (block string, hitCount int) 
 			} else {
 				stMark = "🔴stale(无时间锚点)"
 			}
+		}
+		if it.isLesson {
+			stMark += "·教训"
 		}
 		sb.WriteString(fmt.Sprintf("• [%s] %s\n   %s\n", stMark, it.kf.Title, content))
 	}

@@ -166,3 +166,42 @@ func TestRecallMemoryEndToEnd(t *testing.T) {
 func timeNowStr(daysAgo int) string {
 	return time.Now().AddDate(0, 0, -daysAgo).Format("20060102")
 }
+
+// ── 时间锚点覆盖 (swordless_roadmap P2) ──
+
+// TestKeyFindingsAllHaveTS 真 memory.json 的每条 key_findings 必须带时间锚点。
+// 缺 ts 且正文无日期会被 fail-closed 判 stale 降权 —— 静默变哑, 无任何症状。
+func TestKeyFindingsAllHaveTS(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kfs, err := loadKeyFindings(wd)
+	if err != nil || len(kfs) == 0 {
+		t.Skipf("无 key_findings (%v, n=%d) —— 非主仓库环境", err, len(kfs))
+	}
+	if miss := keyFindingsMissingTS(kfs); len(miss) > 0 {
+		t.Errorf("%d/%d 条 key_findings 缺时间锚点 (将被判 stale 降权, 静默变哑): %v",
+			len(miss), len(kfs), miss)
+	}
+	t.Logf("key_findings %d 条全部带时间锚点", len(kfs))
+}
+
+// TestKeyFindingsMissingTS_MutationSelfCheck 判据自身的鉴别力:
+// 喂构造数据必须能抓到缺锚点条目 (不依赖真文件状态)。
+func TestKeyFindingsMissingTS_MutationSelfCheck(t *testing.T) {
+	ok := []KeyFinding{{Title: "a", TS: "static"}, {Title: "b", TS: "20261004"}}
+	if got := keyFindingsMissingTS(ok); len(got) != 0 {
+		t.Errorf("全带 ts 应零命中: %v", got)
+	}
+	bad := []KeyFinding{
+		{Title: "a", TS: "static"},
+		{Title: "缺锚点条目"},
+		{Title: "空白锚点", TS: "  "},
+	}
+	got := keyFindingsMissingTS(bad)
+	if len(got) != 2 {
+		t.Fatalf("应抓到 2 条缺 ts, 实得 %d: %v", len(got), got)
+	}
+	t.Logf("变异自检: 抓到 %v", got)
+}

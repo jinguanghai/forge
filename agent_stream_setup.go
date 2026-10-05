@@ -73,7 +73,7 @@ func (a *AgentRunner) newRunState(input string, runCtx context.Context) (*runSta
 	}
 
 	turnStart := time.Now()
-	logEvent(EvTurnStarted, input, nil)
+	logEvent(EvTurnStarted, turnDetail(input), nil)
 	// 躯壳自检: 每轮增量扫描错误事件, 新问题超阈值才 1 句话提示
 	maybePrintHealthHint(a.cfg.WorkDir)
 
@@ -277,6 +277,14 @@ func (rs *runState) runTurns() error {
 		// Add assistant message with tool calls (text stripped — 生成与执行分离原则)
 		// Per axiom 2: LLM text alongside tool calls is premature analysis that crowds out
 		// the tool call itself. Strip it. The LLM will analyze AFTER seeing the result.
+		//
+		// 剥离回执 + 埋点 (20261004): 剥离此前既不可见也不可测 —— 主人看到的文字
+		// 与模型历史不一致却零提示(会被误读为"模型说过这话"), 剥离次数/字符数也
+		// 零留痕。stripAudit 一次完成两件事: 落审计 + 返回被剥离字符数(判与显同源)。
+		if n := stripAudit(a, st.assistantContent.String(), len(toolCallAccum), turn); n > 0 {
+			fmt.Fprintf(os.Stderr, "  %s %s\n", dim("✂"),
+				dim(fmt.Sprintf("已剥离工具轮文字 %d 字 (仅你可见, 模型下一轮看不到)", n)))
+		}
 		rs.messages = append(rs.messages, ChatMessage{
 			Role:             "assistant",
 			Content:          "",

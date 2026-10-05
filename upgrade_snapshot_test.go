@@ -85,7 +85,11 @@ func TestGitSnapshotCommits(t *testing.T) {
 }
 
 func TestGitSnapshotIgnoresRuntime(t *testing.T) {
-	// .gitignore 应排除 memory.json / events.jsonl —— git add -A 后 commit 不包含它们
+	// .gitignore 排除 memory.json / events.jsonl —— 本用例验证的是【未跟踪】场景:
+	// 全新工作区里这两个运行时文件不该被 git add -A 带入库。
+	// 注: 主仓库的 memory.json 自 20261003 起已被 force-add 跟踪(见
+	// memory_tracked_sentinel_test.go), 故此处必须用 t.TempDir() 隔离;
+	// 若改对真实仓库断言, 判据将与事实相反。
 	wd := t.TempDir()
 	gitCmd(t, wd, "init", "-b", "main")
 	gitCmd(t, wd, "config", "core.autocrlf", "false")

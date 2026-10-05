@@ -50,6 +50,9 @@ func TestLooksLikeFullGoProgram(t *testing.T) {
 // 旧判据 strings.Contains → 跳过包装 → 裸写 main.go → 编译期
 // "main.go:1:1: expected 'package', found 'import'"。
 func TestSelfHostedGoWrapRegression(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 跳过真实 go 编译 (3 次 go build + run)")
+	}
 	f := &Forge{ctx: context.Background(), workDir: t.TempDir()}
 	code := "import \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"package main\")\n}"
 	res := f.selfHostedGo(code, 铸剑炉_COMPILERS["go"], time.Now())

@@ -99,6 +99,9 @@ func TestRelationGateScriptE2E(t *testing.T) {
 // TestRelationGateProductionPath 真·接线验证: 走生产入口 forgeGate 调 relation gate。
 // (脚本放错目录 / 分派缺失 / 超时配置缺失 都会在此暴露 —— 只有走生产入口才算接通)
 func TestRelationGateProductionPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 跳过 relation gate 生产路径端到端 (起真实子进程)")
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)

@@ -18,6 +18,18 @@ import (
 
 // ─── System prompt ──────────────────────────────────────────
 
+// promptMapBudgetRunes 认知地图的长度预算 (字符数)。超预算即注意力稀释 —— 关键纪律
+// 被淹没的症状是"钱变多 + 模型开始飘", 不是报错, 所以必须由死程序钉住。
+//
+// 20261004 由 4200 收紧至 4000: 规则6(生成与执行分离)已下沉为代码强制(剥离+审计+
+// 回执), prompt 侧只剩一句"已由程序强制"。省下的预算必须由水位钉住 ——
+// 否则会被无声填回, "下沉"就只是搬家而不是腾出注意力。
+//
+// 同日从 agent_memory_test.go 搬来这里: 预算描述的是**生产常量 systemPrompt**,
+// 住在测试文件里让 axiom_carriers.json 的"4000 字符预算"无处可校
+// (描述真实性判据要求该数字在载体文件内可复现, 见 axiom_carrier_test.go)。
+const promptMapBudgetRunes = 4000
+
 const systemPrompt = `你是 铸剑炉，LLM 驱动的多语言编译器沙箱。你拥有一个多语言编译器沙箱（铸剑炉），可以写代码、编译执行、销毁。通过它你能完成数字世界的一切任务——编码、系统管理、文件处理、数据分析、网络操作、自动化等。
 
 <sword_furnace>
@@ -54,7 +66,7 @@ TRIZ 五工具挂五境: 正境-功能分析(剥离预设方案, 定主体/客�
 
 5. 涉及数学计算、数值验证、等式推导、公式化简的问题，禁止直接输出结果。必须通过 forge 写代码计算验证后才能输出。用 lang="math" 或 lang="python" 执行实际计算，代码输出作为答案依据。
 
-6. 🔥 生成与执行分离——这是硬规则，不是建议。当你需要调用 forge 工具时，禁止在同一个响应中附带任何文字解释、分析、序言或结语。工具调用响应必须只有工具调用，零文字。分析、总结、解释一律放在工具结果返回后的下一个响应中。违反此规则会直接导致系统运行异常——附带的文字会被丢弃。
+6. 🔥 生成与执行分离(已由程序强制, 不靠自觉): 工具调用轮零文字——附带的解释会被程序当场剥离丢弃, 模型下一轮也看不到。分析一律放在工具结果返回之后。
 7. 🔄 专家路由——按任务类型强制召唤专家，禁止"凭记忆口算/编造"（三期 I3: gate 完整规则由 FORGE_GATES_ENABLED 配置动态生成, 见下方 <gates_enabled> 段）：
    - 算数/统计/价格/比例/数值比较 → 必须 forge 实际计算（lang="math" 或 "python"），禁止直接给数字
    - 文件操作(整理/改名/移动/分类/搜索/统计) → 必须 python 写代码实际执行
@@ -104,7 +116,7 @@ TRIZ 五工具挂五境: 正境-功能分析(剥离预设方案, 定主体/客�
 var memStableOrder = []string{
 	"identity", "role", "language", "working_dir", "architecture", "gates",
 	"environment", "hardcoded_paths", "defense", "user_principle", "self_governance",
-	"axioms", "last_updated", "active_task",
+	"axioms", "lessons_core", "last_updated", "active_task",
 }
 
 // reorderMemoryJSON 按 memStableOrder 重排顶层字段并重新序列化 (紧凑+确定性);
@@ -186,7 +198,9 @@ func buildSystemPromptStable(workDir string, enabledGates []string) string {
 }
 
 // buildMemoryTailText 返回记忆锚点文本 (剔除动态区与易变字段):
-//   - key_findings/folded_memory: 由 RecallMemory 动态召回 / compactFoldedIndex 精简注入
+//   - key_findings/lessons: 由 RecallMemory 动态召回 (lessons 走独立配额 lessonsRecallTopK;
+//     常驻硬约束另存 lessons_core, 属锚点字段留在固定头)
+//   - folded_memory: compactFoldedIndex 精简注入
 //   - active_task: 任务状态, 变化走 syncDynamicTails diff 追加, 不进锚点主体
 //
 // 剩余全部为稳定锚点字段 (reorderMemoryJSON 确定性序) → 内容不变则跨会话前缀恒定。

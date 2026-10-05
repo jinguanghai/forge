@@ -113,7 +113,11 @@ func (f *Forge) forgeGateSkipCache(code, lang, input string, skipCache bool) For
 			return result
 		}
 	}
-	if strings.TrimSpace(code) == "" {
+	// 空 code 拒绝 —— 但 self gate 的「免 code 动作」除外 (20261004)。
+	// 缺陷: 本检查位于 self 分支之前, 把 build/deploy/restart/replace:* 一并拒掉,
+	// 而它们的改动内容写在 input 里、根本无 code 可传 —— 语义被入口挡住, 只能塞占位文本。
+	// 修法: 判据收敛到 gateAllowsEmptyCode(纯函数, 见下), 其余语言/动作维持 fail-closed。
+	if strings.TrimSpace(code) == "" && !gateAllowsEmptyCode(lang, input) {
 		result := ForgeGateResult{
 			OK: false, Lang: lang, Stage: "compile",
 			Error: "代码为空", Duration: time.Since(start).Milliseconds(),
@@ -156,6 +160,33 @@ func (f *Forge) forgeGateSkipCache(code, lang, input string, skipCache bool) For
 		f.cacheResult(cacheKey, result)
 	}
 	return result
+}
+
+// selfActionNeedsCode 判定 self gate 的某个动作是否需要 code 文本。
+//
+// 需要 code 的只有 append(默认动作) —— code 就是插入源码的内容;
+// build/deploy/restart 与 replace:* 的改动信息都在 input 字段里, code 无内容可传。
+//
+// 判据必须与 selfHostedSelf 的 switch 同源: 两边都直接比较 input 原文(不 TrimSpace),
+// 故 " deploy " 这类带空格的输入在两边同样落到 append 分支(需 code)。漂移由
+// TestSelfActionLiteralsAreAllCodeFree 钉住(新增免 code 动作却漏更新本函数即报红)。
+func selfActionNeedsCode(action string) bool {
+	switch {
+	case action == "build", action == "deploy", action == "restart":
+		return false
+	case strings.HasPrefix(action, "replace:"):
+		return false
+	default:
+		return true
+	}
+}
+
+// gateAllowsEmptyCode 判定「空 code 是否应放行到 gate 内部」。
+//
+// 只有 self gate 的免 code 动作适用(语义: 只重编译/只部署, 无源码文本可传)。
+// 其余语言与动作一律维持原有 fail-closed 行为 —— 例外不得泛化。
+func gateAllowsEmptyCode(lang, input string) bool {
+	return lang == "self" && !selfActionNeedsCode(input)
 }
 
 func (f *Forge) forgeGate(code, lang, input string) ForgeGateResult {

@@ -61,6 +61,9 @@ __pycache__/
 
 # 铸剑炉守门人补充 (2026-08-01)
 # Runtime state (may contain memory/context)
+# memory.json: force-added in the LOCAL repo (private runtime state; local git = safety net).
+# Rule kept on purpose so the open-source repo never tracks it; a tracked file is not
+# affected by .gitignore, so the one-time add needs -f only.
 memory.json
 forge_cache.gob
 
@@ -122,7 +125,6 @@ defense_system/test_secret_scan/fake_leak.py
 .forge/guard_log.jsonl
 
 # runtime artifacts (20260808)
-.forge/forge-tools/compilers.json
 cache_stats.jsonl
 .forge/test_out.txt
 
@@ -177,7 +179,6 @@ bench/
 .forge/forge-tools/go-cache/
 # 本机操作脚本/辅助脚本(含本机路径/私有逻辑)
 cache_guard.py
-vision_batch.py
 一键恢复.bat
 替换上线.bat
 # 私有救援手册(双agent互救, 敏感)
@@ -272,6 +273,8 @@ cache_stats*.jsonl
 
 # --- 20261003 判据鉴别力探针留痕 (运行时数据, 非源码) ---
 .forge/mutation_probe.jsonl
+# 20261004 补: --rotate 游标与探针留痕同类(运行时状态); 漏登记时工作区常驻 "?? .forge/mutation_rotate.json"
+.forge/mutation_rotate.json
 
 # --- 20261002 web 网关定性: 源码可入库, 私钥与凭据必须排除 ---
 # 动因: web/.tls/key.pem 是 TLS 私钥、web/*/.auth 是访问凭据, 一旦 git add -A
@@ -285,3 +288,13 @@ web/**/.tls/
 # 仓库里只剩 go 源码, 无法还原可用网关(实跑 dry-run 发现仅 13/23 文件会入库)。
 # (原 !web/static/*.html 一条随冗余副本归档而撤销)
 !web/gateway/static/*.html
+
+# --- 20261003: VPS 登录来源判据的告警去重水位 (运行时状态, 与 fractal/cache_guard 同类) ---
+.forge/vps_login_state.json
+
+
+# --- 20261004 代理环境变量「变更前旧值」备份 (运行时状态, 非源码) ---
+# 动因: proxy_guard.py 每轮幂等校正 NO_PROXY 前会留存旧值; 内容是本机环境变量快照,
+#       含机器特定值, 与 fractal_state.json / cache_guard_state.json 同类, 不入库。
+.forge/no_proxy_backup.json
+.forge/proxy_env_backup.json

@@ -20,8 +20,18 @@ import (
 	"testing"
 )
 
-// 匹配"公理<中文数字>"。定义行形如 "公理三: ...", 引用形如 "(公理三)"。
-var axiomRefRe = regexp.MustCompile(`公理([一二三四五六七八九十])`)
+// 匹配"公理<中文数字>", 含省略式并列(同一处注释里用 / 、 , 三种分隔符连写多个编号)。
+// 定义行形如 "公理三: ...", 引用形如 "(公理三)"。
+//
+// 20261004 修盲区: 旧正则只抓单个编号, 实测漏检 anchor_fields_sentinel_test.go 里的一处
+// 省略式并列引用 —— 其中第二个编号是幽灵编号(公理早已合并为 4 条)而本哨兵全绿。并列式是注释里的
+// 常见写法, 不覆盖即等于该形态无判据 (同批已在 axiom_carrier_test.go 登记映射)。
+var axiomRefRe = regexp.MustCompile(`公理([一二三四五六七八九十]+(?:\s*[/、,，和及]\s*[一二三四五六七八九十]+)*)`)
+
+// axiomNumCharRe 把并列串逐字拆成编号 ("二/五" -> ["二","五"])。
+var axiomNumCharRe = regexp.MustCompile(`[一二三四五六七八九十]`)
+
+func splitAxiomNums(s string) []string { return axiomNumCharRe.FindAllString(s, -1) }
 
 // 定义行: "公理X" 紧跟冒号。只认这种形态, 避免正文里的顺带提及被误当定义。
 var axiomDefRe = regexp.MustCompile(`公理([一二三四五六七八九十])\s*[:：]`)
@@ -69,9 +79,11 @@ func TestAxiomRefSentinel_NoGhostNumbers(t *testing.T) {
 			continue
 		}
 		for _, mm := range axiomRefRe.FindAllStringSubmatch(string(b), -1) {
-			refs++
-			if !legal[mm[1]] {
-				bad = append(bad, e.Name()+" -> 公理"+mm[1])
+			for _, n := range splitAxiomNums(mm[1]) {
+				refs++
+				if !legal[n] {
+					bad = append(bad, e.Name()+" -> 公理"+n)
+				}
 			}
 		}
 	}
@@ -109,6 +121,24 @@ func TestAxiomRefSentinel_RegexSelfCheck(t *testing.T) {
 	}
 	if axiomDefRe.MatchString("公理三 是架构即测试") {
 		t.Fatal("定义正则把无冒号的顺带提及误判为定义")
+	}
+	// 省略式并列必须逐字拆出 —— 20261004 修的盲区, 判据自身也要有判据。
+	// 样本用拼接构造: 字面写"公理+编号"会被本哨兵自身扫到 —— 哨兵扫的是源码文本而非运行值,
+	// 幽灵编号样本反而把哨兵自己判红。判据与被判对象必须解耦。
+	ax := "公理"
+	for s, want := range map[string]string{
+		ax + "二/五":  "二五",
+		ax + "一、二":  "一二",
+		ax + "三, 四": "三四",
+		ax + "一二三":  "一二三",
+	} {
+		mm := axiomRefRe.FindStringSubmatch(s)
+		if mm == nil {
+			t.Fatalf("引用正则漏匹配并列式 %q", s)
+		}
+		if got := strings.Join(splitAxiomNums(mm[1]), ""); got != want {
+			t.Fatalf("并列式 %q 拆分得 %q, 期望 %q", s, got, want)
+		}
 	}
 }
 

@@ -26,6 +26,12 @@ type auditEventSpec struct {
 	Name     string   // event 字段值; gate 主记录为 "gate"
 	Required []string // 必填字段 (ts 由 audit_ts_sentinel_test.go 单独管, 此处不重复)
 	Writer   string   // 唯一写入点 (文件:函数), 供 AST 哨兵核对
+	// Consumer 质量度量消费点 (仓库相对路径)。空 = 没人用。
+	// 动机 (20261004): strip / metric_claim 两个埋点上线当天建成, 而唯一的质量
+	// 消费者 quality_report.py 只读 gate/gate_attempt —— "埋点 → 消费者 → 度量可见"
+	// 只做了第一层, 且无任何判据盯着"埋点有没有人用"。此字段把"谁消费"变成
+	// 可校验的契约 (audit_consumer_test.go): 声明了就必须真的在那个文件里读它。
+	Consumer string
 }
 
 // auditEvents 全部合法审计事件 —— 单一数据源。
@@ -35,21 +41,25 @@ var auditEvents = []auditEventSpec{
 		Name:     "gate",
 		Required: []string{"lang", "ok", "duration_ms", "code_len", "input_len", "retries"},
 		Writer:   "forge_audit.go:auditGate",
+		Consumer: "quality/quality_report.py",
 	},
 	{
 		Name:     "gate_attempt",
 		Required: []string{"lang", "attempt", "ms", "stage"},
 		Writer:   "forge_audit.go:auditAttempt",
+		Consumer: "quality/quality_report.py",
 	},
 	{
 		Name:     "nosword",
 		Required: []string{"anchors", "fresh", "skipped", "corrected", "completed", "exprs"},
 		Writer:   "agent_audit.go:nswAudit",
+		Consumer: "quality/quality_report.py",
 	},
 	{
 		Name:     "nosword_probe",
 		Required: []string{"enabled", "rounds", "anchors", "fresh", "source"},
 		Writer:   "agent_audit.go:nswProbeAudit",
+		Consumer: "quality/quality_report.py",
 	},
 	{
 		Name: "nosword_expr",
@@ -57,16 +67,34 @@ var auditEvents = []auditEventSpec{
 		// 事件诞生起即存在的字段, 否则历史数据会被判违规。
 		Required: []string{"enabled", "marks", "rejected"},
 		Writer:   "nosword_expr.go:nswExprAudit",
+		Consumer: "quality/quality_report.py",
+	},
+	{
+		Name:     "strip",
+		Required: []string{"chars", "tools", "turn"},
+		Writer:   "agent_audit.go:stripAudit",
+		Consumer: "quality/quality_report.py",
+	},
+	{
+		Name: "metric_claim",
+		// hit/weak 是二次修正(20261004)后的核心字段 —— 分子与分母都靠它们;
+		// has_source/sample 为条件字段(仅 hit||weak 时写), 故不入 Required。
+		// 该事件上线当天 0 条历史数据, 字段契约可自由重设而不破坏兼容。
+		Required: []string{"hit", "weak"},
+		Writer:   "agent_audit.go:metricClaimAudit",
+		Consumer: "quality/quality_report.py",
 	},
 	{
 		Name:     "compact",
 		Required: []string{"compressed_msgs", "summary_len", "before_tokens", "after_tokens", "saved_tokens", "saved_pct"},
 		Writer:   "agent_trim.go:compactHistory",
+		Consumer: "quality/quality_report.py",
 	},
 	{
 		Name:     "compact_failed",
 		Required: []string{"err", "est_tokens"},
 		Writer:   "agent_trim.go:compactHistory",
+		Consumer: "quality/quality_report.py",
 	},
 }
 

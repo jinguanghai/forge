@@ -174,6 +174,9 @@ func mathGateRaw(t *testing.T, req map[string]string) (int, string) {
 // TestMathInlineABAgainstSympyGate A/B 层: 内联输出与真 spawn 输出逐字节相等。
 // 这是内联的正当性来源 —— 一旦 sympy 侧语义变化(升级/改动 gate), 本测试立即红。
 func TestMathInlineABAgainstSympyGate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 跳过真 spawn sympy gate 的 A/B 逐字节比对 (14 次子进程)")
+	}
 	// 代表性子集: 覆盖整数/分数/负分数/幂右结合/一元负号/取模/大整数/空格形态
 	pick := []string{"2+2", "10/4", "(2/3)^3", "2^3^2", "-2^2", "-1/3",
 		"-7%3", "7%-3", "2^100", "0^0", "1/3+1/6", "10/3", "2**10", "5"}

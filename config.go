@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/joho/godotenv"
 )
 
 // ─── Config ─────────────────────────────────────────────────
@@ -79,7 +77,7 @@ func DefaultConfig() *Config {
 	}
 	return &Config{
 		BaseURL: "https://api.deepseek.com/v1",
-		// 2026-09-11 金光海: DeepSeek V4.1 更新 —— 官方规范名收敛为 deepseek-flash /
+		// 2026-09-11: DeepSeek V4.1 更新 —— 官方规范名收敛为 deepseek-flash /
 		// deepseek-v4-pro 两个; 旧名 v4-flash / v4-flash-vision-exp 已下线(服务端静默别名到
 		// V4.1-Flash); 图像理解仅 deepseek-flash 支持。
 		// 2026-09-11 复核(官方 quick_start/pricing 脚注2): 官方已改口 —— 2026-09-14 之后
@@ -125,10 +123,18 @@ func LoadConfig() (*Config, error) {
 		exePath = os.Args[0] // 失败回退: 用可执行文件参数
 	}
 	envFile := filepath.Join(filepath.Dir(exePath), ".env")
+	// .env 加载 (20261004 自实现 loadEnvFile, 移除 github.com/joho/godotenv):
+	// 旧版 `_ = godotenv.Load(...)` 把错误整体丢弃 —— .env 读不动/语法坏时症状
+	// 表现为「密钥没设置」, 排查先怀疑自己再怀疑依赖。新版: 文件不存在 = 正常
+	// 静默(不报错); 文件存在但读失败/语法非法 = 显式返回错误。
 	if _, err := os.Stat(envFile); err == nil {
-		_ = godotenv.Load(envFile)
-	} else {
-		_ = godotenv.Load() // fallback to current directory
+		if err := loadEnvFile(envFile); err != nil {
+			return nil, fmt.Errorf("加载 %s 失败: %w", envFile, err)
+		}
+	} else if _, err := os.Stat(".env"); err == nil {
+		if err := loadEnvFile(".env"); err != nil {
+			return nil, fmt.Errorf("加载 .env 失败: %w", err)
+		}
 	}
 
 	cfg := DefaultConfig()

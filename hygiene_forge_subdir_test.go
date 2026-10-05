@@ -30,7 +30,8 @@ import (
 // forgeSubdirSpec 把子清单折成判定规格 —— 直接复用根层的 forgeVerdict。
 // 子清单与根清单字段同名同义 (entries / patterns / allow_empty_dirs)。
 func forgeSubdirSpec(s forgeSubdir) forgeManifest {
-	return forgeManifest{Entries: s.Entries, Patterns: s.Patterns, AllowEmptyDirs: s.AllowEmptyDirs}
+	return forgeManifest{Entries: s.Entries, Patterns: s.Patterns,
+		AllowEmptyDirs: s.AllowEmptyDirs, MaxBytes: s.MaxBytes}
 }
 
 // forgeScanSubdir 扫 .forge/<rel> 的一级项 (按名排序)。与 forgeItems 同构。
@@ -50,6 +51,7 @@ func forgeScanSubdir(t *testing.T, rel string) []forgeItem {
 				it.Empty = len(sub) == 0
 			}
 		}
+		it.Size = forgeDirSize(filepath.Join(d, it.Name))
 		out = append(out, it)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -190,6 +192,11 @@ func TestHygieneForgeSubdirs(t *testing.T) {
 		// 根层 TestHygieneForgePatternKeep 只扫 .forge 一级项 (forgeItems), 不递归。
 		for _, kv := range forgeKeepViolations(items, spec) {
 			t.Errorf(".forge/%s %s\n清单: %s", sd.Path, kv, forgeManifestFile)
+		}
+		// 体积上限 (硬判据, 20261002 加): 与份数判据同处判定 —— 两条独立判据
+		// 各自会被对方绕过 (份数够少但单份巨大 / 总量膨胀)。
+		for _, bv := range forgeBytesViolations(items, spec) {
+			t.Errorf(".forge/%s %s\n清单: %s", sd.Path, bv, forgeManifestFile)
 		}
 		if len(bad) == 0 && len(stale) == 0 {
 			t.Logf(".forge/%s: %d 个一级项, 全部已登记", sd.Path, len(items))

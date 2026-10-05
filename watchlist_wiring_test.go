@@ -158,7 +158,8 @@ func TestWatchlistScope(t *testing.T) {
 			f.HasGuard, f.HasSelfheal, f.HasSelf)
 	}
 	for _, want := range []string{"defense_system/config.json", "defense_system/hygiene_whitelist.json",
-		"defense_system/hygiene_vectors.json", "defense_system/hygiene_forge_manifest.json"} {
+		"defense_system/hygiene_vectors.json", "defense_system/hygiene_forge_manifest.json",
+		"defense_system/axiom_carriers.json"} {
 		found := false
 		for _, g := range f.JSON {
 			if g == want {

@@ -41,6 +41,12 @@ type turnFinalizer struct {
 // reasoning 是本回合的 reasoning_content (原为 st.reasoningBuf.String())。
 // source 只进审计: "plain"(纯文本回复) / "frag"(碎片全无效降级)。
 func (f *turnFinalizer) finalize(asst, reasoning, source string) bool {
+	// 度量铁律埋点 (20261004): 必须早于下面两个"注入反馈后 continue"的分支 ——
+	// 被虚报检测/无剑反馈拦下的那版回复, 恰恰是"声称完成 + 统计结论"最集中的形态,
+	// 放在 return 之后等于把最该看的样本丢掉 (短路盲区)。与 nswProbeAudit 的位置
+	// 差异是有意的: 那个只该记"最终收尾", 故留在原位。
+	metricClaimAudit(f.agent, asst, *f.messages)
+
 	// ── 无剑求值感知 (FORGE_NOSWORD=1): 死程序嗅探 asst 中的求值锚点,
 	// 命中则把稳定反馈作为 user 消息注入, continue 让 LLM 看到反馈后
 	// 修正继续生成 (公理二: 判据由死程序把守, LLM 据此自然调整)。──

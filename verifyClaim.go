@@ -27,9 +27,33 @@ func hasToolEvidence(messages []ChatMessage) bool {
 	return false
 }
 
+// lastUserIndex 返回最后一条 user 消息的下标; 无 user 消息返回 -1。
+func lastUserIndex(messages []ChatMessage) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return i
+		}
+	}
+	return -1
+}
+
+// hasToolEvidenceSinceUser 只统计"最后一条 user 消息之后"的工具证据。
+//
+// 动机 (20261004 实测打穿): buildStreamMessages 会把 a.history (历次任务的
+// assistant/tool 消息) 拼进 messages (agent_stream_loop.go:157-158)。原判据
+// 扫全会话 —— 于是"本轮新任务下模型零工具直接声称已提交", 只因历史里旧任务
+// 用过工具就被判为有证据 -> 静默漏检。实测证据: 旧任务(user + tool_calls +
+// tool) 后接新任务 user, 声称"已提交/测试通过" -> 原实现返回 false (放行)。
+//
+// 收窄到本轮后该场景被捕获; 无 user 消息时退化为全扫 (兼容历史调用方语义)。
+func hasToolEvidenceSinceUser(messages []ChatMessage) bool {
+	return hasToolEvidence(messages[lastUserIndex(messages)+1:])
+}
+
+// detectUnverifiedClaim 判定"完成态声称但本轮无工具证据"(收窄口径见上)。
 func detectUnverifiedClaim(asst string, messages []ChatMessage) bool {
 	if verifiableClaimRe.MatchString(asst) {
-		return !hasToolEvidence(messages)
+		return !hasToolEvidenceSinceUser(messages)
 	}
 	return false
 }
