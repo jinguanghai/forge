@@ -71,6 +71,16 @@ var wantHourlyTasks = map[string][]string{
 	// 29 条 x 5s 且每次都要临时改生产源码)。步长具体值与覆盖周期上界由
 	// mutation_rotate_sentinel_test.go 解析断言 —— 这里只钉「接线与必需参数存在」。
 	"mutation": {"mutation_probe.py", "--apply", "--rotate"},
+	// ledger (20261005, J5): 判据台账新鲜度 —— 新增判据未登记维度即报红。
+	// --check 是必需项: 缺了退化成「重新生成并覆盖」, 过期检测失效 (参数是判据盲区)。
+	"ledger": {"judgement_ledger.py", "--check"},
+	// drift (20261005, J6/J7): 漂移维阈值的元判据 —— 变松/超限幅即报红;
+	// 基线 drift_baseline.json + 限幅+不对称迟滞 (往更松必须过人)。
+	"drift": {"drift_gate.py", "--check"},
+	// ossdrift (20261006, T14): 开源仓同步漂移判据 —— 发布面此前零调度零判据,
+	// 实测 10 个已提交源码文件未进开源仓而四套守卫全绿 (它们都不看发布面)。
+	// --check 是必需项 (缺了退化成默认动作; 与 ledger/drift 同型: 参数是判据盲区)。
+	"ossdrift": {"open_source_drift.py", "--check"},
 }
 
 // parseHourlyTasks 解析 defense_system/hourly.py 的 TASKS 表。

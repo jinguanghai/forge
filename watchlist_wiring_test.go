@@ -64,7 +64,7 @@ print(json.dumps({
     "py": [x for x in sf if x.startswith("defense_system/") and x.endswith(".py")],
     "json": [x for x in sf if x.endswith(".json")],
     "excluded": {k: any(k in x for x in sf)
-                 for k in ["forge_baseline", "__pycache__", "sleep_report",
+                 for k in ["forge_baseline", "__pycache__",
                            "trace_demo_report", ".bak"]},
     "has_guard": "defense_system/forge_guard.py" in sf,
     "has_selfheal": "defense_system/selfheal.py" in sf,

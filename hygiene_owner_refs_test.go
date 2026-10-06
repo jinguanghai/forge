@@ -171,3 +171,131 @@ func TestHygieneOwnerRefsSharp(t *testing.T) {
 		t.Fatalf("无引用形态的 owner 不该报红: %v", got)
 	}
 }
+
+// ---- 20261005 补: owner 里的 (ALL_CAPS) 引用也必须可校验 ----
+//
+// 缺口实测: owner 写作 "go gate (GOCACHE)" 这种自由文本时, 上面的文件名/函数名
+// 判据全部跳过 (正则只认 *.go/*.py/*.ps1 与 foo()) —— 声称的产生点不存在也常年全绿。
+// 实测该 owner 指向的 .forge/forge-tools/go-cache 全仓零引用、零配置指向
+// (go env 实测 GOCACHE=D:\gocache), 却以"活缓存"身份在清单里躺了数月,
+// 直到 20261005 人工排查才发现是 39.8MB 死物。
+//
+// 判据: owner 里 (ALL_CAPS) 形态的引用, 必须在仓库源码(剥注释后)真实出现。
+// 精度边界: 这是"仓库里有没有这个东西"的粗判据, 不是接线证明 ——
+// 严格接线归 relation gate (骨架=符号表+引用图, 剥注释与字符串)。
+
+var ownerEnvTokenRe = regexp.MustCompile(`\(([A-Z][A-Z0-9_]{2,})\)`)
+var envTokenRe = regexp.MustCompile(`\b([A-Z][A-Z0-9_]{2,})\b`)
+
+// hygieneOwnerEnvProblems 校验 owner 里 (ALL_CAPS) 引用在源码中真实存在。
+// srcTokens = 仓库源码(剥注释)里出现过的全大写标识符集合。空返回 = 全部有效。
+func hygieneOwnerEnvProblems(owners map[string]string, srcTokens map[string]bool) []string {
+	var bad []string
+	for name, owner := range owners {
+		for _, m := range ownerEnvTokenRe.FindAllStringSubmatch(owner, -1) {
+			if !srcTokens[m[1]] {
+				bad = append(bad, fmt.Sprintf(
+					"%s: owner 声称的 %s 全仓源码零引用 (产生点不存在)", name, m[1]))
+			}
+		}
+	}
+	sort.Strings(bad)
+	return bad
+}
+
+// scanRepoEnvTokens 扫源码收集"代码上下文里出现过的全大写标识符"。
+// 剥注释: 行首为 // # * 的行整行跳过, 行内 // 与 # 之后截断 ——
+// 注释里提及不算接线 (与 relation gate 同原则: 注释会腐化, 编译器不管注释)。
+func scanRepoEnvTokens(root string) (map[string]bool, error) {
+	toks := map[string]bool{}
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if ownerScanSkipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".go", ".py", ".ps1", ".cmd", ".bat":
+		default:
+			return nil
+		}
+		b, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			l := strings.TrimSpace(line)
+			if l == "" || strings.HasPrefix(l, "//") ||
+				strings.HasPrefix(l, "#") || strings.HasPrefix(l, "*") {
+				continue
+			}
+			if i := strings.Index(l, " //"); i >= 0 {
+				l = l[:i]
+			}
+			if i := strings.Index(l, "#"); i >= 0 {
+				l = l[:i]
+			}
+			for _, m := range envTokenRe.FindAllStringSubmatch(l, -1) {
+				toks[m[1]] = true
+			}
+		}
+		return nil
+	})
+	return toks, err
+}
+
+// TestHygieneOwnerEnvRefsExist 清单 owner 里的 (ALL_CAPS) 引用必须真实存在于源码。
+func TestHygieneOwnerEnvRefsExist(t *testing.T) {
+	owners := manifestOwners(t)
+	if len(owners) < 20 {
+		t.Fatalf("带 owner 的条目仅 %d 条, 清单疑似被削 —— 判据覆盖面不足", len(owners))
+	}
+	toks, err := scanRepoEnvTokens(".")
+	if err != nil {
+		t.Fatalf("扫描仓库失败: %v", err)
+	}
+	// 探针自检: 扫描若退化, 判据会恒绿 —— 先钉住探针自身有效
+	if len(toks) < 100 {
+		t.Fatalf("仅收集到 %d 个大写标识符, 扫描疑似退化 (判据会恒绿)", len(toks))
+	}
+	for _, p := range hygieneOwnerEnvProblems(owners, toks) {
+		t.Error(p)
+	}
+}
+
+// TestHygieneOwnerEnvRefsSharp 判据的判据: 变异必须报红, 健康必须放行。
+func TestHygieneOwnerEnvRefsSharp(t *testing.T) {
+	toks := map[string]bool{"GOCACHE": true}
+	if got := hygieneOwnerEnvProblems(map[string]string{"a": "go gate (GOCACHE)"}, toks); len(got) != 0 {
+		t.Fatalf("健康输入不该报红: %v", got)
+	}
+	if got := hygieneOwnerEnvProblems(map[string]string{"a": "go gate (GHOST_VAR)"}, toks); len(got) != 1 {
+		t.Fatalf("零引用 token 必须报红, got %v", got)
+	}
+	// 小写/混合形态不匹配 (task_gate.py 的 owner 写作 "(lang=task 长任务通道, P0-2)")
+	if got := hygieneOwnerEnvProblems(map[string]string{"a": "task_gate.py (lang=task, P0-2)"}, toks); len(got) != 0 {
+		t.Fatalf("非全大写形态不该匹配: %v", got)
+	}
+	if got := hygieneOwnerEnvProblems(map[string]string{"a": "人工维护"}, toks); len(got) != 0 {
+		t.Fatalf("无引用形态的 owner 不该报红: %v", got)
+	}
+	// 剥注释语义: 只出现在注释里的 token 不算存在
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "x.py"), []byte("# GOCACHE\nREAL = 1\n"), 0o644); err != nil {
+		t.Fatalf("写临时文件失败: %v", err)
+	}
+	got, err := scanRepoEnvTokens(dir)
+	if err != nil {
+		t.Fatalf("扫描临时目录失败: %v", err)
+	}
+	if got["GOCACHE"] {
+		t.Errorf("只出现在注释里的 GOCACHE 不该算存在 (剥注释失效)")
+	}
+	if !got["REAL"] {
+		t.Errorf("代码行里的标识符应被收集, got %v", got)
+	}
+}
