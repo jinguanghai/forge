@@ -1,0 +1,52 @@
+# 行尾策略 (20260928 收口)
+# 背景: core.autocrlf=true (Git for Windows 系统级默认) 会把检出文件转 CRLF,
+#       导致 git add 反复警告 "LF will be replaced by CRLF"。
+#       显式 eol 属性优先于 autocrlf -> 加 eol 即根治, 与 autocrlf 设置无关。
+#
+# --- 跨平台文本: 强制 LF (与 VPS Linux 一致, diff 稳定) ---
+*.go      text eol=lf
+*.mod     text eol=lf
+*.sum     text eol=lf
+*.py      text eol=lf
+*.js      text eol=lf
+*.sh      text eol=lf
+*.h       text eol=lf
+*.def     text eol=lf
+*.md      text eol=lf
+*.txt     text eol=lf
+*.json    text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+*.ini     text eol=lf
+*.toml    text eol=lf
+*.csv     text eol=lf
+*.cfg     text eol=lf
+*.example text eol=lf
+*.code    text eol=lf
+*.jsonl   text eol=lf
+.gitignore     text eol=lf
+.gitattributes text eol=lf
+LICENSE        text eol=lf
+
+# --- Windows 脚本: 强制 CRLF (cmd.exe 对 LF 的 label/goto 解析不可靠) ---
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# --- 二进制: 保持原样 ---
+*.exe binary
+*.dll binary
+*.so binary
+*.onnx binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.db binary
+*.gob binary
+
+# --- 刻意不写规则 (实测依据) ---
+# *.xml: defense_system/ForgeProxyAuto_task.xml 为 UTF-16 LE (BOM FFFE, 含 2074 个 NUL),
+#        强制 text 会损坏 -> 保持无规则 (git 自动识别二进制)
+# *.mvn: ASR 模型文件, 无 NUL 但为二进制数据 -> 保持无规则
