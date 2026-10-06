@@ -71,7 +71,10 @@ const mutationManifestFile = "defense_system/mutation_manifest.json"
 //	-> 新增判据不登记维度也能全绿 (台账自身此前无判据 = 公理三 无判据=愿望);
 //	②漂移维阈值的「变松即报红」被摘掉 -> 抬闸门(最便宜的规避)重新无声通过
 //	(漂移维是唯一可动态的维度, 但「往更松必须过人」此前无判据)。
-const mutationWatermarkFloor = 37
+//	37 -> 38 T14 开源仓漂移一条 (20261006): 判据的「missing 即报红」被摘掉 ->
+//	新增未同步的源码文件重新无声通过。实证: 上线前逐文件 sha256 比对发现 6 个
+//	已提交源码文件未进开源仓, 而四套守卫全绿 —— 它们都不看发布面 (零判据的典型形态)。
+const mutationWatermarkFloor = 38
 
 type mutationTarget struct {
 	ID            string   `json:"id"`
