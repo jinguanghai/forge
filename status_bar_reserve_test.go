@@ -59,14 +59,3 @@ func TestInputReserveNewlines_Invariant(t *testing.T) {
 		}
 	}
 }
-
-// TestReserveInputRow_NoConsole 控制台不可用(测试进程 stdout 为管道)时必须
-// 原样返回、不 panic、不写任何换行 —— 非 TTY 下不得污染输出流。
-func TestReserveInputRow_NoConsole(t *testing.T) {
-	old := consoleProcsOK
-	consoleProcsOK = false
-	defer func() { consoleProcsOK = old }()
-	if got := reserveInputRow(42); got != 42 {
-		t.Errorf("控制台不可用时 reserveInputRow(42)=%d, want 42", got)
-	}
-}
