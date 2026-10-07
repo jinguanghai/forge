@@ -74,7 +74,12 @@ const mutationManifestFile = "defense_system/mutation_manifest.json"
 //	37 -> 38 T14 开源仓漂移一条 (20261006): 判据的「missing 即报红」被摘掉 ->
 //	新增未同步的源码文件重新无声通过。实证: 上线前逐文件 sha256 比对发现 6 个
 //	已提交源码文件未进开源仓, 而四套守卫全绿 —— 它们都不看发布面 (零判据的典型形态)。
-const mutationWatermarkFloor = 38
+//	38 -> 39 T17 写入端判据一条 (20261007): 状态文件写入端缺 newline="\n" 被摘掉 ->
+//	Python text 模式在 Windows 做 os.linesep 转换, 每次 hourly 重造 CRLF 污染仓库文本面;
+//	而当时判据只判「工作区现状」(文件被删/被忽略即静默变绿) —— 生成污染要等现状判据
+//	扫到才报, 晚了。新判据直调写入函数(不经 CLI), 钉住写法本身; 并顺带钉住 CLI 链路
+//	确实调用它 (状态文件必须产出)。
+const mutationWatermarkFloor = 39
 
 type mutationTarget struct {
 	ID            string   `json:"id"`

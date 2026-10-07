@@ -298,3 +298,9 @@ web/**/.tls/
 #       含机器特定值, 与 fractal_state.json / cache_guard_state.json 同类, 不入库。
 .forge/no_proxy_backup.json
 .forge/proxy_env_backup.json
+
+# --- 20261007: 开源仓漂移判据的告警去重水位 (运行时状态, 与 fractal/cache_guard 同类) ---
+# 动因: open_source_drift.py save_state() 每轮写 alerted 去重水位; A1 修复 CRLF 后文件仍在
+#       工作区常驻 "?? .forge/ossdrift_state.json", 且被 fractal 仓库文本卫生判据扫到(未跟踪非忽略)。
+#       写入端判据 = TestOpenSourceDriftStateFileIsLF(直调 save_state), 故忽略它不产生盲区。
+.forge/ossdrift_state.json

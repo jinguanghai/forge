@@ -23,6 +23,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -105,6 +107,16 @@ func ossDriftSandbox(t *testing.T, srcFiles, dstFiles map[string]string) (ossDri
 	if err := json.Unmarshal([]byte(out), &res); err != nil {
 		t.Fatalf("--json 输出不可解析: %v\n%s", err, out)
 	}
+	// 写入端 (T17): 走 CLI 的路径也会写状态文件 —— 顺带钉住「save_state 真被调用」。
+	// 文件存在性 = 接线判据 (emit_alerts 里的调用被删即报红); 行尾检查只在 Windows
+	// 有鉴别力 (Python text 模式做 os.linesep 转换), 非 Windows 上不会误红。
+	if rc != 2 { // rc=2 = 判据不可用, 未走到写入路径
+		if sb, err := os.ReadFile(filepath.Join(dir, "state.json")); err != nil {
+			t.Errorf("判据跑完未产出状态文件 (save_state 未被调用?): %v", err)
+		} else if bytes.ContainsRune(sb, '\r') {
+			t.Errorf("状态文件含 CR (写入端缺 newline=\"\\n\"): %q", sb)
+		}
+	}
 	return res, rc
 }
 
@@ -164,6 +176,61 @@ func TestOpenSourceDriftClean(t *testing.T) {
 	}
 	if !res.OK || res.Gap != 0 {
 		t.Errorf("无漂移判定错误: ok=%v gap=%d", res.OK, res.Gap)
+	}
+}
+
+// TestOpenSourceDriftStateFileIsLF 写入端判据 (T17, 20261007): 实调 save_state() 断言产物无 CR。
+//
+// 病根: 分形守卫报红 .forge/ossdrift_state.json CRLF x2 —— 根因是 save_state() 写状态文件
+// 时缺 newline="\n" (同一文件 242 行的写入点带了该参数 -> 属漏改, 非设计)。当时的判据判的是
+// 「工作区现状」: 文件被删/被忽略 -> 静默变绿, 而写法照旧 -> hourly 跑一次又生成 CRLF。
+// 本用例把「文件当前干净」升级为「写入函数被钉住」—— 直调函数本身, 不经 CLI 链路。
+//
+// 平台前提: Python text 模式的 os.linesep 转换只在 Windows 发生 —— 非 Windows 上缺
+// newline 也写不出 CR, 判据失去鉴别力, 故显式 Skip (不静默变绿)。
+func TestOpenSourceDriftStateFileIsLF(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skipf("写入端行尾判据只在 Windows 有鉴别力 (Python text 模式做 os.linesep 转换)")
+	}
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state.json")
+	pyDir, err := filepath.Abs("defense_system")
+	if err != nil {
+		t.Fatalf("解析脚本目录失败: %v", err)
+	}
+	// 直调写入函数 (不经 CLI): 钉住函数本身, 不依赖 CLI 链路是否还在调它。
+	code := "import sys; sys.path.insert(0, " + strconv.Quote(pyDir) + "); " +
+		"import open_source_drift as m; m.save_state({'probe': '写端', 'n': 1}); " +
+		"print(m.state_path())"
+	cmd := exec.Command(guardGatePython(), "-c", code)
+	cmd.Env = append(pythonUTF8Env(),
+		"FORGE_OSSDRIFT_STATE="+state,
+		"FORGE_ALERTS_PATH="+filepath.Join(dir, "alerts.jsonl"),
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("实调 save_state 失败: %v\n%s", err, stderr.String())
+	}
+	// 环境变量没生效 = 会写到生产 .forge/ossdrift_state.json (测试污染生产)。
+	if got := strings.TrimSpace(stdout.String()); got != state {
+		t.Fatalf("state_path() = %q, want %q (隔离失效, 会写生产文件)", got, state)
+	}
+	b, err := os.ReadFile(state)
+	if err != nil {
+		t.Fatalf("save_state 未产出文件: %v", err)
+	}
+	if bytes.ContainsRune(b, '\r') {
+		t.Errorf("状态文件含 CR —— 写入端缺 newline=\"\\n\" (污染源仍在): %q", b)
+	}
+	if !bytes.ContainsRune(b, '\n') || len(b) < 3 {
+		t.Errorf("状态文件内容异常 (空/无换行): %q", b)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Errorf("状态文件不是合法 JSON: %v (%q)", err, b)
+	} else if back["probe"] != "写端" {
+		t.Errorf("回读不一致 (编码/ensure_ascii?): %v", back)
 	}
 }
 
