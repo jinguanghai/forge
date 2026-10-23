@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -37,10 +38,23 @@ func testCfg() *Config {
 	return &Config{MaxConcurrent: 1, CacheMaxSize: 4, RetryMax: 0}
 }
 
+// testRoot 返回跨平台解析出的仓库根 —— 用 runtime.Caller 定位本文件所在目录,
+// 与进程 cwd 无关 (chdirTemp 会把 cwd 切到临时目录, 用 os.Getwd() 会取错)。
+// 铁律: 绝不用 t.TempDir() 顶替 —— tcm_gate_test 等依赖真实 knowledge/ 药对库,
+// 换成空目录会退化成"永远通过的空测试"(判据自我阉割, T27 已识别)。
+func testRoot(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller 定位仓库根失败")
+	}
+	return filepath.Dir(file)
+}
+
 // TestNewCmdBindsWorkDir: newCmd 是全部 gate 子进程的唯一入口, 必须在此绑定工作目录。
 // 修复前: Dir == "" (继承启动目录) -> 失败。
 func TestNewCmdBindsWorkDir(t *testing.T) {
-	f := NewForge(`D:\forge`, testCfg())
+	f := NewForge(testRoot(t), testCfg())
 	defer f.Shutdown()
 	cmd := f.newCmd(context.Background(), "go", "version")
 	if cmd.Dir != f.workDir {
@@ -59,7 +73,7 @@ func TestNewCmdBindsWorkDir(t *testing.T) {
 func TestNewCmdEnvNoOverride(t *testing.T) {
 	t.Setenv("FORGE_DATA", `X:\custom_data`)
 	t.Setenv("FORGE_WORKDIR", `X:\custom_root`)
-	f := NewForge(`D:\forge`, testCfg())
+	f := NewForge(testRoot(t), testCfg())
 	defer f.Shutdown()
 	cmd := f.newCmd(context.Background(), "go", "version")
 	nData, nRoot := 0, 0
@@ -83,14 +97,14 @@ func TestNewCmdEnvNoOverride(t *testing.T) {
 }
 
 // TestRelationGateProductionPathFromForeignCwd: 真·错位复现。
-// 进程 cwd 换成空目录, WorkDir 仍指 D:\forge -> 骨架必须扫到源码。
+// 进程 cwd 换成空目录, WorkDir 仍指仓库根 -> 骨架必须扫到源码。
 func TestRelationGateProductionPathFromForeignCwd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: 跳过 relation gate 生产路径端到端 (起真实子进程)")
 	}
 	foreign := t.TempDir()
 	chdirTemp(t, foreign)
-	f := NewForge(`D:\forge`, testCfg())
+	f := NewForge(testRoot(t), testCfg())
 	defer f.Shutdown()
 	r := f.forgeGateSkipCache(`{"type":"scan"}`, "relation", "", true)
 	if !r.OK {
@@ -139,7 +153,7 @@ func TestTCMGateHerbPairFromForeignCwd(t *testing.T) {
 	}
 	foreign := t.TempDir()
 	chdirTemp(t, foreign)
-	f := NewForge(`D:\forge`, testCfg())
+	f := NewForge(testRoot(t), testCfg())
 	defer f.Shutdown()
 	r := f.forgeGateSkipCache(`{"type":"herb_pair","herb1":"黄芪","herb2":"当归"}`, "tcm", "", true)
 	if !r.OK {

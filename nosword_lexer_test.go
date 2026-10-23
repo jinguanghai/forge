@@ -112,6 +112,9 @@ func nswTestNoPackageVar(t *testing.T, file string) {
 
 var nswLexerDecls = []string{
 	"nswAnchor", "nswParser", "skip", "tok", "number", "expr", "term", "power", "unary", "factor",
+	// T61 (20261018) factor 按「标识符/括号/数字」拆出的单元: 逐个登记, 防止实现被搬回
+	// 调用方文件 (归属判据) 或被重新合并成上帝函数。
+	"nswIsIdentByte", "identFactor", "callFactor", "nswSqrt", "nswLog10", "roundCall", "parenFactor",
 }
 
 func TestNSWLexer_Ownership(t *testing.T) {

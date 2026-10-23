@@ -196,7 +196,6 @@ func reloadHolidaysForTest(year string) {
 //
 // 判据 = 工作日(周一~周五) 且 9:00-12:00 / 14:00-18:00 (右端开区间)。
 // 周末不涨价 (官方峰谷定价按工作日计), 故周末一律 false。
-// isMiniMaxWindow 复用本判据 —— 单一源, 避免两处时段定义各自漂移。
 func isPeakHourAt(t time.Time) bool {
 	wd := t.Weekday() // Sunday=0 ... Saturday=6
 	if wd == time.Saturday || wd == time.Sunday {
@@ -217,21 +216,19 @@ func isPeakHour() bool { return isPeakHourAt(time.Now()) }
 
 // checkPeakHour 打印 DeepSeek 高峰时段提醒 (北京时间 9-12 / 14-18, 价格×2)。
 // 省钱第一杠杆: 高峰价格翻倍, 影响比缓存命中率更大。
+//
+// 20261011 (T31): 高峰不再自动切 MiniMax —— 实测切换为负收益(MM 单价≈DS 高峰价
+// 且 tokenizer 更费 1.73x)。MiniMax 已配时只在 DeepSeek 请求失败时兜底一次。
 func checkPeakHour(cfg *Config) {
-	// 高峰时段 + MiniMax 已配置 → 自动路由到 MiniMax, 无需用户躲高峰。
-	if cfg != nil && cfg.MiniMaxAPIKey != "" && cfg.MiniMaxBaseURL != "" && cfg.MiniMaxModel != "" && minimaxWindowNow() {
-		fmt.Fprintf(os.Stderr, "%s 高峰时段: 已自动路由到 MiniMax M3 省钱 (无需躲高峰)。\n", color(ansi.green, "✓"))
-		fmt.Fprintf(os.Stderr, "   高峰(工作日9-12/14-18)=MiniMax-M3, 其余/周末=DeepSeek deepseek-flash。\n")
-		return
-	}
 	h := time.Now().Hour()
 	if isPeakHour() {
 		fmt.Fprintf(os.Stderr, "%s DeepSeek 高峰时段 (价格×2): 当前 %02d:00 北京时间\n", color(ansi.yellow, "⚠️"), h)
-		if cfg == nil || cfg.MiniMaxAPIKey == "" {
-			fmt.Fprintf(os.Stderr, "   省钱建议: 非紧急任务请避开 9:00-12:00 / 14:00-18:00。\n")
-		}
+		fmt.Fprintf(os.Stderr, "   省钱建议: 非紧急任务请避开 9:00-12:00 / 14:00-18:00。\n")
 	} else {
 		fmt.Fprintf(os.Stderr, "%s 当前非高峰时段 (价格正常)。\n", color(ansi.green, "✓"))
+	}
+	if cfg != nil && cfg.MiniMaxAPIKey != "" && cfg.MiniMaxBaseURL != "" && cfg.MiniMaxModel != "" {
+		fmt.Fprintf(os.Stderr, "   %s 已配 MiniMax 故障兜底 (仅 DeepSeek 请求失败时启用, 不参与时段路由)。\n", color(ansi.green, "✓"))
 	}
 }
 

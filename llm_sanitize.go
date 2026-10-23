@@ -243,21 +243,57 @@ func fixEmptyAssistantContent(out []ChatMessage) {
 // ─── Tool call merging
 // ─── Tool call merging ─────────────────────────────────────
 
+// toolCallAcc 流式分片累积器 (按 id 或 index 分组共用)。
+type toolCallAcc struct {
+	index int
+	id    string
+	typ   string
+	name  string
+	args  strings.Builder
+}
+
+// absorb 吸收一个分片的类型/函数名/参数续片 (空字段不覆盖, 参数一律追加)。
+func (a *toolCallAcc) absorb(tc ToolCall) {
+	if tc.Type != "" {
+		a.typ = tc.Type
+	}
+	if tc.Function.Name != "" {
+		a.name = tc.Function.Name
+	}
+	if tc.Function.Arguments != "" {
+		a.args.WriteString(tc.Function.Arguments)
+	}
+}
+
+// toToolCall 组装成对外的 ToolCall; typ 缺省补 "function"。
+func (a *toolCallAcc) toToolCall(id string) ToolCall {
+	typ := a.typ
+	if typ == "" {
+		typ = "function"
+	}
+	return ToolCall{
+		Index: a.index,
+		ID:    id,
+		Type:  typ,
+		Function: FunctionCall{
+			Name:      a.name,
+			Arguments: a.args.String(),
+		},
+	}
+}
+
 func mergeToolCalls(deltas []ToolCall) []ToolCall {
 	if len(deltas) == 0 {
 		return nil
 	}
-	type acc struct {
-		index int
-		id    string
-		typ   string
-		name  string
-		args  strings.Builder
+	if res, ok := mergeToolCallsByID(deltas); ok {
+		return res
 	}
-	// Some streaming APIs omit the `index` field entirely — every delta arrives
-	// with Index==0. In that case multiple independent tool calls cannot be told
-	// apart by index and would be merged into one garbage call. Detect that and
-	// group by ID instead.
+	return mergeToolCallsByIndex(deltas)
+}
+
+// toolCallIDScan 扫描分片的 id 集合与「是否全部 Index==0」。
+func toolCallIDScan(deltas []ToolCall) (map[string]struct{}, bool) {
 	distinctIDs := make(map[string]struct{})
 	allIndexZero := true
 	for _, tc := range deltas {
@@ -268,86 +304,71 @@ func mergeToolCalls(deltas []ToolCall) []ToolCall {
 			distinctIDs[tc.ID] = struct{}{}
 		}
 	}
+	return distinctIDs, allIndexZero
+}
 
-	if allIndexZero && len(distinctIDs) > 1 {
-		byID := make(map[string]*acc)
-		order := make([]string, 0, len(distinctIDs))
-		var last *acc
-		for _, tc := range deltas {
-			var a *acc
-			if tc.ID == "" {
-				// 真实流式协议里续片只带 index + arguments (不带 id) —— 归属
-				// 「最近一个已建 acc」; 只有首个分片就无 id 且无 acc 时才丢弃
-				// (无归属线索, 建不出调用)。
-				if last == nil {
-					continue
-				}
-				a = last
-			} else {
-				cur, ok := byID[tc.ID]
-				if !ok {
-					cur = &acc{id: tc.ID, index: tc.Index}
-					byID[tc.ID] = cur
-					order = append(order, tc.ID)
-				}
-				a = cur
-				last = cur
-			}
-			if tc.Type != "" {
-				a.typ = tc.Type
-			}
-			if tc.Function.Name != "" {
-				a.name = tc.Function.Name
-			}
-			if tc.Function.Arguments != "" {
-				a.args.WriteString(tc.Function.Arguments)
-			}
-		}
-		result := make([]ToolCall, 0, len(order))
-		for _, id := range order {
-			a := byID[id]
-			typ := a.typ
-			if typ == "" {
-				typ = "function"
-			}
-			result = append(result, ToolCall{
-				Index: a.index,
-				ID:    a.id,
-				Type:  typ,
-				Function: FunctionCall{
-					Name:      a.name,
-					Arguments: a.args.String(),
-				},
-			})
-		}
-		if len(result) > 0 {
-			return result
-		}
+// mergeToolCallsByID 处理「流式 API 省略 index」的形态: 全部 Index==0 且存在多个
+// 不同 id 时按 id 分组合并。返回 ok=false 表示该路径不适用 (或合并结果为空),
+// 调用方回落到按 index 合并。
+func mergeToolCallsByID(deltas []ToolCall) ([]ToolCall, bool) {
+	distinctIDs, allIndexZero := toolCallIDScan(deltas)
+	if !allIndexZero || len(distinctIDs) <= 1 {
+		return nil, false
 	}
+	byID := make(map[string]*toolCallAcc)
+	order := make([]string, 0, len(distinctIDs))
+	var last *toolCallAcc
+	for _, tc := range deltas {
+		var a *toolCallAcc
+		if tc.ID == "" {
+			// 真实流式协议里续片只带 index + arguments (不带 id) —— 归属
+			// 「最近一个已建 acc」; 只有首个分片就无 id 且无 acc 时才丢弃
+			// (无归属线索, 建不出调用)。
+			if last == nil {
+				continue
+			}
+			a = last
+		} else {
+			cur, ok := byID[tc.ID]
+			if !ok {
+				cur = &toolCallAcc{id: tc.ID, index: tc.Index}
+				byID[tc.ID] = cur
+				order = append(order, tc.ID)
+			}
+			a = cur
+			last = cur
+		}
+		a.absorb(tc)
+	}
+	result := make([]ToolCall, 0, len(order))
+	for _, id := range order {
+		a := byID[id]
+		result = append(result, a.toToolCall(a.id))
+	}
+	if len(result) == 0 {
+		return nil, false
+	}
+	return result, true
+}
 
-	byIndex := make(map[int]*acc)
+// mergeToolCallsByIndex 常规形态: 按 index 分组合并, 缺 id 时确定性补全。
+func mergeToolCallsByIndex(deltas []ToolCall) []ToolCall {
+	byIndex := make(map[int]*toolCallAcc)
 	maxIndex := -1
 	for _, tc := range deltas {
 		idx := tc.Index
 		if idx > maxIndex {
 			maxIndex = idx
 		}
-		if _, ok := byIndex[idx]; !ok {
-			byIndex[idx] = &acc{index: idx}
+		a, ok := byIndex[idx]
+		if !ok {
+			a = &toolCallAcc{index: idx}
+			byIndex[idx] = a
 		}
-		a := byIndex[idx]
 		if tc.ID != "" {
 			a.id = tc.ID
 		}
-		if tc.Type != "" {
-			a.typ = tc.Type
-		}
-		if tc.Function.Name != "" {
-			a.name = tc.Function.Name
-		}
-		if tc.Function.Arguments != "" {
-			a.args.WriteString(tc.Function.Arguments)
-		}
+		a.absorb(tc)
 	}
 
 	result := make([]ToolCall, 0, maxIndex+1)
@@ -357,24 +378,12 @@ func mergeToolCalls(deltas []ToolCall) []ToolCall {
 			// Skip gaps — don't leave zero-value entries that break API validation
 			continue
 		}
-		typ := a.typ
-		if typ == "" {
-			typ = "function"
-		}
 		id := a.id
 		if id == "" {
 			// 确定性补全 (API 强制要求 id; 禁 rand 保前缀缓存稳定)
 			id = autoToolCallID(-1, a.index)
 		}
-		result = append(result, ToolCall{
-			Index: a.index,
-			ID:    id,
-			Type:  typ,
-			Function: FunctionCall{
-				Name:      a.name,
-				Arguments: a.args.String(),
-			},
-		})
+		result = append(result, a.toToolCall(id))
 	}
 	return result
 }

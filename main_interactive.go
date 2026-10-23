@@ -58,126 +58,170 @@ func runNonInteractive(cfg *Config, agent *AgentRunner, query string) {
 
 // runInteractive 交互模式: REPL 主循环。
 func runInteractive(cfg *Config, agent *AgentRunner, showReasoning bool, historyFile string) {
-	// 会话检查点: 检测上次会话, 提示可恢复
-	lastCkpH := printSessionHints(cfg)
-
+	lastCkpH := printSessionHints(cfg) // 会话检查点: 检测上次会话, 提示可恢复
 	lineHistory := readHistory(historyFile, 50)
-	multiLineBuf := strings.Builder{}
-	inMultiLine := false
+	asm := &lineAssembler{}
 
 	for {
-		drawStatusBar(agent, cfg.WorkDir) // 底部状态栏: 每轮刷新
-		prompt := tuiGradient("铸剑炉", tuiPrimePalette())
-		if showReasoning {
-			prompt += color(ansi.yellow, "·R")
-		}
-		if inMultiLine {
-			prompt = color(ansi.dim, " ... ")
-		} else {
-			prompt += " » "
-		}
-
-		line, err := readLine(prompt, lineHistory)
-		pastedMultiLine := strings.Contains(line, "\n")
-		if err != nil {
-			if errors.Is(err, errInterrupt) || errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
-				fmt.Println()
-				break
-			}
-			fmt.Fprintf(os.Stderr, "%s 输入错误: %v\n", color(ansi.red, "✗"), err)
-			continue
-		}
-
-		trimmedLine := strings.TrimSpace(line)
-		if !pastedMultiLine && strings.HasSuffix(trimmedLine, "\\") {
-			core := strings.TrimSuffix(trimmedLine, "\\")
-			if !isPathLike(core) {
-				inMultiLine = true
-				multiLineBuf.WriteString(core)
-				multiLineBuf.WriteString("\n")
-				continue
-			}
-		}
-		if inMultiLine {
-			multiLineBuf.WriteString(line)
-			line = multiLineBuf.String()
-			multiLineBuf.Reset()
-			inMultiLine = false
-		}
-
-		if !pastedMultiLine && !inMultiLine && unbalancedDelimiters(line) {
-			inMultiLine = true
-			multiLineBuf.WriteString(line)
-			multiLineBuf.WriteString("\n")
-			continue
-		}
-
-		input := strings.TrimSpace(line)
-		if input == "" {
-			continue
-		}
-
-		// 折叠展开记忆系统: "展开<任务名>"→半显化摘要; "深入<任务名>"→读全文
-		if handleFoldUnfold(cfg, input) {
-			continue
-		}
-
-		// 会话恢复命令: "恢复" 续接上次检查点
-		if (input == "恢复" || strings.EqualFold(input, "resume")) && lastCkpH != nil {
-			agent.RestoreHistory(lastCkpH)
-			fmt.Printf("%s 已恢复上次会话（%d 轮对话上下文）\n", color(ansi.green, "♻"), len(lastCkpH)/2)
-			lastCkpH = nil
-			continue
-		}
-
-		// 会话命令: /sessions /new /use <id>
-		lowCmd := strings.ToLower(input)
-		if handleSessionCmd(input, lowCmd, cfg, agent, &lastCkpH) {
-			continue
-		}
-
-		// 语音输入: /听 或 /听 <音频文件> → 本地离线ASR → 识别文字作为本轮输入。
-		input, isVoice, vok := resolveVoiceInput(input)
-		if !vok {
-			continue
-		}
-
-		if !isVoice && (strings.HasPrefix(input, "/") || lowCmd == "升级" || lowCmd == "upgrade") {
-			handleCommand(input, agent, cfg, historyFile, &showReasoning)
-			if exitRequested {
-				break
-			}
-			continue
-		}
-
-		if strings.ToLower(input) == "exit" || strings.ToLower(input) == "quit" {
-			fmt.Println(dim("再见。"))
+		input, quit, ready := readInputLine(agent, cfg, showReasoning, lineHistory, asm)
+		if quit {
 			break
 		}
-
-		// 折叠记忆相关性触发: 对话命中折叠项关键词→静默提示一次(24h去重)
-		if rel := FindRelevantFold(cfg.WorkDir, input); rel != nil {
-			fmt.Printf("%s 相关折叠记忆【%s】— %s\n",
-				color(ansi.cyan, "📎"), rel.Name, truncateCN(rel.Summary, 40))
-			fmt.Printf("   输入「展开%s」查看摘要, 「深入%s」查看全文\n", rel.Name, rel.Name)
-			MarkHinted(cfg.WorkDir, rel.ID)
-			fmt.Println()
-		}
-
-		// 输入护栏: 越权/注入指令在交给 LLM 前阻断
-		if guardInteractiveInput(cfg, agent, input) {
+		if !ready {
 			continue
 		}
-
-		runInteractiveTurn(agent, input, historyFile)
+		outcome, next := handleLocalInput(input, cfg, agent, historyFile, &showReasoning, &lastCkpH)
+		if outcome == localQuit {
+			break
+		}
+		if outcome == localHandled {
+			continue
+		}
+		printFoldHint(cfg, next)
+		if guardInteractiveInput(cfg, agent, next) { // 输入护栏: 越权/注入指令在交给 LLM 前阻断
+			continue
+		}
+		runInteractiveTurn(agent, next, historyFile)
 	}
 
-	// Session summary (可视化结算卡)
-	if card := sessionSummaryCard(agent); card != "" {
-		fmt.Println()
-		for _, ln := range strings.Split(strings.TrimSuffix(card, "\n"), "\n") {
-			fmt.Println(ln)
+	printSessionSummary(agent) // Session summary (可视化结算卡)
+}
+
+// lineAssembler 累积跨行输入: 反斜杠续行、未闭合定界符、手动多行。
+type lineAssembler struct {
+	buf  strings.Builder
+	inML bool
+}
+
+// feed 处理一行原始输入, 返回组装后的完整输入与是否可提交。
+// ready=false 表示仍在续行中, 调用方应继续读下一行。
+func (a *lineAssembler) feed(line string) (string, bool) {
+	pasted := strings.Contains(line, "\n")
+	trimmed := strings.TrimSpace(line)
+	if !pasted && strings.HasSuffix(trimmed, "\\") {
+		core := strings.TrimSuffix(trimmed, "\\")
+		if !isPathLike(core) {
+			a.inML = true
+			a.buf.WriteString(core)
+			a.buf.WriteString("\n")
+			return "", false
 		}
+	}
+	if a.inML {
+		a.buf.WriteString(line)
+		line = a.buf.String()
+		a.buf.Reset()
+		a.inML = false
+	}
+	if !pasted && unbalancedDelimiters(line) {
+		a.inML = true
+		a.buf.WriteString(line)
+		a.buf.WriteString("\n")
+		return "", false
+	}
+	return strings.TrimSpace(line), true
+}
+
+// buildPrompt 构造当前轮的输入提示符(含推理标记与多行续行标记)。
+func buildPrompt(showReasoning, inMultiLine bool) string {
+	prompt := tuiGradient("铸剑炉", tuiPrimePalette())
+	if showReasoning {
+		prompt += color(ansi.yellow, "·R")
+	}
+	if inMultiLine {
+		return color(ansi.dim, " ... ")
+	}
+	return prompt + " » "
+}
+
+// readInputLine 刷新状态栏、读一行并组装。
+// quit=true 表示收到中断/EOF; ready=false 表示本行不构成完整输入(续行中/空行/输入错误)。
+func readInputLine(agent *AgentRunner, cfg *Config, showReasoning bool, hist []string, asm *lineAssembler) (input string, quit bool, ready bool) {
+	drawStatusBar(agent, cfg.WorkDir) // 底部状态栏: 每轮刷新
+	line, err := readLine(buildPrompt(showReasoning, asm.inML), hist)
+	if err != nil {
+		if errors.Is(err, errInterrupt) || errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
+			fmt.Println()
+			return "", true, false
+		}
+		fmt.Fprintf(os.Stderr, "%s 输入错误: %v\n", color(ansi.red, "✗"), err)
+		return "", false, false
+	}
+	input, ready = asm.feed(line)
+	if !ready || input == "" {
+		return "", false, false
+	}
+	return input, false, true
+}
+
+// localOutcome 本地命令处理结果。
+type localOutcome int
+
+const (
+	localUnhandled localOutcome = iota // 非本地命令, 交给 LLM
+	localHandled                       // 已处理, 继续下一轮
+	localQuit                          // 请求退出主循环
+)
+
+// handleLocalInput 处理不经过 LLM 的本地输入: 折叠展开、会话恢复、会话命令、语音、斜杠命令、退出。
+// 返回处理结果与(可能被语音替换的)本轮输入。
+func handleLocalInput(input string, cfg *Config, agent *AgentRunner, historyFile string, showReasoning *bool, lastCkpH *[]ChatMessage) (localOutcome, string) {
+	// 折叠展开记忆系统: "展开<任务名>"→半显化摘要; "深入<任务名>"→读全文
+	if handleFoldUnfold(cfg, input) {
+		return localHandled, ""
+	}
+	// 会话恢复命令: "恢复" 续接上次检查点
+	if (input == "恢复" || strings.EqualFold(input, "resume")) && *lastCkpH != nil {
+		agent.RestoreHistory(*lastCkpH)
+		fmt.Printf("%s 已恢复上次会话（%d 轮对话上下文）\n", color(ansi.green, "♻"), len(*lastCkpH)/2)
+		*lastCkpH = nil
+		return localHandled, ""
+	}
+	lowCmd := strings.ToLower(input)
+	if handleSessionCmd(input, lowCmd, cfg, agent, lastCkpH) { // 会话命令: /sessions /new /use <id>
+		return localHandled, ""
+	}
+	// 语音输入: /听 或 /听 <音频文件> → 本地离线ASR → 识别文字作为本轮输入。
+	input, isVoice, vok := resolveVoiceInput(input)
+	if !vok {
+		return localHandled, ""
+	}
+	if !isVoice && (strings.HasPrefix(input, "/") || lowCmd == "升级" || lowCmd == "upgrade") {
+		handleCommand(input, agent, cfg, historyFile, showReasoning)
+		if exitRequested {
+			return localQuit, ""
+		}
+		return localHandled, ""
+	}
+	if strings.ToLower(input) == "exit" || strings.ToLower(input) == "quit" {
+		fmt.Println(dim("再见。"))
+		return localQuit, ""
+	}
+	return localUnhandled, input
+}
+
+// printFoldHint 折叠记忆相关性触发: 对话命中折叠项关键词→静默提示一次(24h去重)。
+func printFoldHint(cfg *Config, input string) {
+	rel := FindRelevantFold(cfg.WorkDir, input)
+	if rel == nil {
+		return
+	}
+	fmt.Printf("%s 相关折叠记忆【%s】— %s\n",
+		color(ansi.cyan, "📎"), rel.Name, truncateCN(rel.Summary, 40))
+	fmt.Printf("   输入「展开%s」查看摘要, 「深入%s」查看全文\n", rel.Name, rel.Name)
+	MarkHinted(cfg.WorkDir, rel.ID)
+	fmt.Println()
+}
+
+// printSessionSummary 会话结束时打印可视化结算卡。
+func printSessionSummary(agent *AgentRunner) {
+	card := sessionSummaryCard(agent)
+	if card == "" {
+		return
+	}
+	fmt.Println()
+	for _, ln := range strings.Split(strings.TrimSuffix(card, "\n"), "\n") {
+		fmt.Println(ln)
 	}
 }
 

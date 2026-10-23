@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -54,12 +53,14 @@ func runSelfReplace() {
 	if err != nil {
 		return
 	}
-	if strings.TrimSuffix(filepath.Base(self), ".exe") != "forge_new" {
+	// 判据用 newExeName() 而非 TrimSuffix+字面量: Windows 得 forge_new.exe, Linux 得
+	// forge_new —— 旧写法在 Linux 上靠 "无 .exe 后缀" 巧合成立, 属隐式平台假设。
+	if filepath.Base(self) != newExeName() {
 		return
 	}
 	exeDir := filepath.Dir(self)
-	oldExe := filepath.Join(exeDir, "forge.exe")
-	newExe := filepath.Join(exeDir, "forge_new.exe")
+	oldExe := filepath.Join(exeDir, mainExeName())
+	newExe := filepath.Join(exeDir, newExeName())
 	if _, serr := os.Stat(newExe); serr != nil {
 		return
 	}
@@ -156,6 +157,11 @@ func parseFlags() (showReasoning bool, nonFlagArgs []string) {
 		case "--version", "-v":
 			fmt.Printf("铸剑炉 %s — 流式智能体 · 编译器沙箱\n", versionString())
 			os.Exit(0)
+		case "--git-autosave":
+			// hourly 兜底调度臂 (defense_system/git_autosave_hourly.py 调用):
+			// 只依赖 git, 不加载配置/不初始化 agent。
+			gitAutosaveCLI()
+			os.Exit(0)
 		default:
 			nonFlagArgs = append(nonFlagArgs, arg)
 		}
@@ -189,7 +195,8 @@ func runStartupConfig(showReasoning bool) (*Config, error) {
 	ensureMemoryWriteBaseline(cfg.WorkDir)
 	senseScript := filepath.Join(cfg.WorkDir, "sense.py")
 	if _, err := os.Stat(senseScript); err == nil {
-		senseCmd := exec.Command("python", senseScript)
+		// T25: Linux 只有 python3, 走探测; senseScript 为绝对路径, 与进程 cwd 无关
+		senseCmd := exec.Command(pythonCommand(), senseScript)
 		senseCmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8", "PYTHONUTF8=1")
 		senseCmd.Run()
 	}

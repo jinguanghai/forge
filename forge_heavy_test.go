@@ -80,7 +80,7 @@ func TestHeavyGuard_RulesWired(t *testing.T) {
 		seen[r.Name] = true
 	}
 	for _, want := range []string{`lang="task"`, `"action"`, "task_id", ".forge/tasks"} {
-		if !strings.Contains(heavyTaskText, want) {
+		if !strings.Contains(heavyTaskText(`D:\forge`), want) {
 			t.Errorf("拒绝文本缺 %q —— 拒绝不带出路就是断路", want)
 		}
 	}

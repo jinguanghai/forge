@@ -96,6 +96,14 @@ var auditEvents = []auditEventSpec{
 		Writer:   "agent_trim.go:compactHistory",
 		Consumer: "quality/quality_report.py",
 	},
+	{
+		// DG-2 (2026-10-11): 压后未达目标线 (compact_target_percent) 的落痕 ——
+		// 此前判据侧空白: 没有任何判据盯「压后是否达标」, 抖动只能事后统计看见。
+		Name:     "compact_undershoot",
+		Required: []string{"conv_after_tokens", "target_tokens", "overshoot_tokens", "compressed_msgs"},
+		Writer:   "agent_trim.go:maybeCompact",
+		Consumer: "quality/quality_report.py",
+	},
 }
 
 // auditEventNames 返回合法 event 名集合 (哨兵与消费者共用)。

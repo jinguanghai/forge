@@ -160,6 +160,9 @@ func TestVersionStringFormat(t *testing.T) {
 
 // TestBuildLdflagsWired 构建事实注入必须两个入口都在 (self gate + upgrade):
 // 只改一处 = 另一条构建路径出来的 exe 报不出「跑的是哪一版」。
+//
+// 20261011 (F3 拆分): self gate 的构建调用点随编译段搬到 forge_self_build.go ——
+// 判据锚点必须跟着搬家 (钉死旧文件名 = 拆完即假红, 且真删掉注入反而不会被发现)。
 func TestBuildLdflagsWired(t *testing.T) {
 	t.Parallel()
 	gs, err := os.ReadFile("git_snapshot.go")
@@ -169,7 +172,7 @@ func TestBuildLdflagsWired(t *testing.T) {
 	if !strings.Contains(string(gs), "func buildLdflags(") {
 		t.Errorf("git_snapshot.go 缺 buildLdflags —— 注入串无单一数据源")
 	}
-	for _, f := range []string{"forge_self.go", "upgrade.go"} {
+	for _, f := range []string{"forge_self_build.go", "upgrade.go"} {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatalf("读取 %s 失败 (fail-closed): %v", f, err)

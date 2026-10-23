@@ -265,14 +265,46 @@ func TestLocateSelfSource_RealRepo(t *testing.T) {
 	if filepath.Base(got2) != "forge_self.go" {
 		t.Errorf("replace 定位 = %s, 期望 forge_self.go(selfHostedSelf 已搬到该文件)", filepath.Base(got2))
 	}
-	// 已搬离 forge.go 的函数: 定位必须跟随到新文件(证明能改到拆分后的文件)
+	// 已搬离 forge.go 的函数: 定位必须跟随到新文件(证明能改到拆分后的文件)。
+	//
+	// 期望值动态求(定义所在文件), 不写死文件名 —— T22 第 3 层把行编辑逻辑层抽成
+	// 跨平台文件后, tabComplete 从 readline_editor_windows.go 迁到 readline_editor.go,
+	// 写死名字就是一个人工同步点: 下次搬家必报红, 且报的是假红(定位逻辑本身没错)。
 	got3, err := f.locateSelfSource("replace:func tabComplete(line string) string:func tabCompleteX(line string) string")
 	if err != nil {
 		t.Fatalf("跨文件 replace 定位失败: %v", err)
 	}
-	if filepath.Base(got3) != "readline_editor_windows.go" {
-		t.Errorf("redraw 定位 = %s, 期望 readline_editor_windows.go", filepath.Base(got3))
+	want3 := fileDefining(t, "func tabComplete(line string) string")
+	if filepath.Base(got3) != want3 {
+		t.Errorf("tabComplete 定位 = %s, 期望 %s(定义所在文件)", filepath.Base(got3), want3)
 	}
+}
+
+// fileDefining 返回根目录下唯一定义了 needle 的生产 .go 文件基名。
+// 用于「定位必须跟随函数搬家」这类断言: 期望值由现场求得, 而不是写死文件名。
+func fileDefining(t *testing.T, needle string) string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hits []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(e.Name())
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(b), needle) {
+			hits = append(hits, e.Name())
+		}
+	}
+	if len(hits) != 1 {
+		t.Fatalf("%q 应恰好被 1 个生产 .go 文件定义, 实际 %v", needle, hits)
+	}
+	return hits[0]
 }
 
 // TestSelfGateWired_LocateCallSite 钉住 self gate 的定位必须走 locateSelfSource,

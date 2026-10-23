@@ -137,6 +137,30 @@ func TestForgeDetectLang_ReturnsOnlyCompilerTableKeys(t *testing.T) {
 		t.Fatalf("解析 forge_lang.go 失败: %v", err)
 	}
 
+	tableKeys := flangTableKeys(f)
+	if len(tableKeys) < 10 {
+		t.Fatalf("编译器表解析异常, 仅取到 %d 个 key", len(tableKeys))
+	}
+
+	for _, fnName := range []string{"forgeDetectLang", "detectSemanticGate"} {
+		lits, vars := flangCollectReturns(f, fnName)
+		if len(lits) == 0 {
+			t.Fatalf("%s 未解析到任何字面量 return —— 解析器失效", fnName)
+		}
+		for _, l := range lits {
+			flangCheckLangLit(t, fnName, l, tableKeys)
+		}
+		for _, v := range vars {
+			if v != "gate" && v != "hint" {
+				t.Errorf("%s 返回未登记变量 %q —— 需人工确认其取值域 ⊆ 编译器表", fnName, v)
+			}
+		}
+		t.Logf("%s: 字面量=%v 变量=%v", fnName, lits, vars)
+	}
+}
+
+// flangTableKeys 从 AST 抽出 铸剑炉_COMPILERS 表的全部 key。
+func flangTableKeys(f *ast.File) map[string]bool {
 	tableKeys := map[string]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		vs, ok := n.(*ast.ValueSpec)
@@ -161,65 +185,54 @@ func TestForgeDetectLang_ReturnsOnlyCompilerTableKeys(t *testing.T) {
 		}
 		return true
 	})
-	if len(tableKeys) < 10 {
-		t.Fatalf("编译器表解析异常, 仅取到 %d 个 key", len(tableKeys))
-	}
+	return tableKeys
+}
 
-	collect := func(fnName string) (lits, vars []string) {
-		ast.Inspect(f, func(n ast.Node) bool {
-			fd, ok := n.(*ast.FuncDecl)
-			if !ok || fd.Name.Name != fnName {
+// flangCollectReturns 收集 fnName 函数体内 return 语句返回的字面量与变量名。
+func flangCollectReturns(f *ast.File, fnName string) (lits, vars []string) {
+	ast.Inspect(f, func(n ast.Node) bool {
+		fd, ok := n.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != fnName {
+			return true
+		}
+		ast.Inspect(fd.Body, func(m ast.Node) bool {
+			rs, ok := m.(*ast.ReturnStmt)
+			if !ok {
 				return true
 			}
-			ast.Inspect(fd.Body, func(m ast.Node) bool {
-				rs, ok := m.(*ast.ReturnStmt)
-				if !ok {
-					return true
+			for _, r := range rs.Results {
+				switch v := r.(type) {
+				case *ast.BasicLit:
+					lits = append(lits, strings.Trim(v.Value, `"`))
+				case *ast.Ident:
+					vars = append(vars, v.Name)
 				}
-				for _, r := range rs.Results {
-					switch v := r.(type) {
-					case *ast.BasicLit:
-						lits = append(lits, strings.Trim(v.Value, `"`))
-					case *ast.Ident:
-						vars = append(vars, v.Name)
-					}
-				}
-				return true
-			})
-			return false
+			}
+			return true
 		})
-		return
-	}
+		return false
+	})
+	return
+}
 
-	for _, fnName := range []string{"forgeDetectLang", "detectSemanticGate"} {
-		lits, vars := collect(fnName)
-		if len(lits) == 0 {
-			t.Fatalf("%s 未解析到任何字面量 return —— 解析器失效", fnName)
+// flangCheckLangLit 单条返回字面量的裁决: 表外语言即报红; 退役哨兵须被 Build 拒绝分支拦住。
+func flangCheckLangLit(t *testing.T, fnName, l string, tableKeys map[string]bool) {
+	t.Helper()
+	if l == "" {
+		return // detectSemanticGate 的 "" = 不路由
+	}
+	if !tableKeys[l] && !retiredLangSentinels[l] {
+		t.Errorf("%s 返回表外语言 %q —— 会让 forge_gate.go 的「不支持的语言」分支从不可达变可达", fnName, l)
+	}
+	if retiredLangSentinels[l] {
+		// 退役哨兵豁免的前提: 它必须真的被 Build 的拒绝分支拦住。
+		// 本断言读 forge.go 源码核对 —— 否则哨兵值会流到「不支持的语言」分支。
+		forgeSrc, rerr := os.ReadFile("forge.go")
+		if rerr != nil {
+			t.Fatalf("读 forge.go: %v", rerr)
 		}
-		for _, l := range lits {
-			if l == "" {
-				continue // detectSemanticGate 的 "" = 不路由
-			}
-			if !tableKeys[l] && !retiredLangSentinels[l] {
-				t.Errorf("%s 返回表外语言 %q —— 会让 forge_gate.go 的「不支持的语言」分支从不可达变可达", fnName, l)
-			}
-			if retiredLangSentinels[l] {
-				// 退役哨兵豁免的前提: 它必须真的被 Build 的拒绝分支拦住。
-				// 本断言读 forge.go 源码核对 —— 否则哨兵值会流到「不支持的语言」分支。
-				forgeSrc, rerr := os.ReadFile("forge.go")
-				if rerr != nil {
-					t.Fatalf("读 forge.go: %v", rerr)
-				}
-				if !strings.Contains(string(forgeSrc), `lang == "`+l+`"`) {
-					t.Errorf("退役哨兵 %q 未在 forge.go 的 Build 里被拦截 —— 豁免前提不成立", l)
-				}
-			}
+		if !strings.Contains(string(forgeSrc), `lang == "`+l+`"`) {
+			t.Errorf("退役哨兵 %q 未在 forge.go 的 Build 里被拦截 —— 豁免前提不成立", l)
 		}
-		for _, v := range vars {
-			if v != "gate" && v != "hint" {
-				t.Errorf("%s 返回未登记变量 %q —— 需人工确认其取值域 ⊆ 编译器表", fnName, v)
-			}
-		}
-		t.Logf("%s: 字面量=%v 变量=%v", fnName, lits, vars)
 	}
 }

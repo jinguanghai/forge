@@ -144,6 +144,18 @@ func (c *LLMClient) ChatCompletionStream(
 
 			// Only retry on transient errors
 			if !isRetryable(err) || attempt == maxRetries-1 {
+				// 故障兜底 (failover): 主路径 DeepSeek 不可用 → MiniMax 兜一次。
+				// 三重前提: ①可重试错误(429/5xx/网络; errPartialStream 与 401/400 已被
+				// isRetryable 排除) ②用户未取消(ctx 已死则重发无意义) ③MiniMax 可用且非识图。
+				// 兜底成功不改变主路径 —— 下次请求仍先走 DeepSeek。
+				if isRetryable(err) && ctx.Err() == nil {
+					if fe, ok := c.failoverEndpoint(useModel, messages); ok {
+						if ferr := c.doStreamTo(ctx, messages, tools, ch, fe.Model, fe); ferr == nil {
+							c.setHealthy(true)
+							return
+						}
+					}
+				}
 				c.setHealthy(false)
 				ch <- StreamEvent{Type: "error", Error: fmt.Errorf("LLM request failed after %d attempts: %w", attempt+1, err)}
 				return
@@ -236,31 +248,40 @@ func (c *LLMClient) setHealthy(h bool) {
 	c.healthy = h
 }
 
-// resolveEndpoint 决定本次请求应到达的提供商端点 (MiniMax 高峰省钱路由)。
-// 规则:
+// resolveEndpoint 决定本次请求的主路径端点 —— 恒为 DeepSeek。
+// 模型取 preferModel (调用方 pickModel / 识图模型), 空则回 cfg.Model。
 //
-//	识图(含图片) → 强制 DeepSeek, 保护识图能力不因路由降级到 MiniMax;
-//	MiniMax 三字段齐备 且 处于 MiniMax 窗口 → MiniMax, 模型锚定 MiniMaxModel;
-//	其余 → DeepSeek, 模型取 preferModel (调用方 pickModel/识图模型), 空则回 cfg.Model。
-func (c *LLMClient) resolveEndpoint(preferModel string, msgs []ChatMessage) Endpoint {
-	// 规则1: 识图强制 DeepSeek
-	for _, m := range msgs {
-		if len(m.Images) > 0 {
-			m := preferModel
-			if m == "" {
-				m = c.cfg.Model
-			}
-			return Endpoint{Provider: EndpointDeepSeek, APIKey: c.cfg.APIKey, BaseURL: c.cfg.BaseURL, Model: m}
-		}
-	}
-	// 规则2: MiniMax 窗口 + 三字段齐备
-	if c.cfg.MiniMaxAPIKey != "" && c.cfg.MiniMaxBaseURL != "" && c.cfg.MiniMaxModel != "" && minimaxWindowNow() {
-		return Endpoint{Provider: EndpointMiniMax, APIKey: c.cfg.MiniMaxAPIKey, BaseURL: c.cfg.MiniMaxBaseURL, Model: c.cfg.MiniMaxModel}
-	}
-	// 规则3: DeepSeek, model 取 preferModel, 空则 cfg.Model
+// 20261011 (T31 成本复核, 主人拍板): 原"高峰时段切 MiniMax 省钱"已撤销 ——
+// MiniMax 单价 ≈ DeepSeek 高峰价且 tokenizer 更费(同文 1.73x), 切换是负收益;
+// 高峰时段的正确应对是错峰或接受价格, 不是换厂商。MiniMax 改作故障兜底, 见 failoverEndpoint。
+func (c *LLMClient) resolveEndpoint(preferModel string, _ []ChatMessage) Endpoint {
 	m := preferModel
 	if m == "" {
 		m = c.cfg.Model
 	}
 	return Endpoint{Provider: EndpointDeepSeek, APIKey: c.cfg.APIKey, BaseURL: c.cfg.BaseURL, Model: m}
+}
+
+// failoverEndpoint 返回 DeepSeek 请求失败后的兜底端点 (MiniMax)。
+// ok=false 的两种情形:
+//
+//	①MiniMax 三字段不齐备 (未配置兜底, 正常态);
+//	②请求含图片 —— MiniMax-M3 不识图, 降级会丢能力, 宁可如实报错。
+//
+// 第三种情形 (已输出半截内容) 由调用方判定: errPartialStream 不可重试, 自然不兜底。
+func (c *LLMClient) failoverEndpoint(_ string, msgs []ChatMessage) (Endpoint, bool) {
+	if c.cfg.MiniMaxAPIKey == "" || c.cfg.MiniMaxBaseURL == "" || c.cfg.MiniMaxModel == "" {
+		return Endpoint{}, false
+	}
+	for _, m := range msgs {
+		if len(m.Images) > 0 {
+			return Endpoint{}, false
+		}
+	}
+	return Endpoint{
+		Provider: EndpointMiniMax,
+		APIKey:   c.cfg.MiniMaxAPIKey,
+		BaseURL:  c.cfg.MiniMaxBaseURL,
+		Model:    c.cfg.MiniMaxModel,
+	}, true
 }

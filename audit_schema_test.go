@@ -150,7 +150,7 @@ func TestAuditPythonConsumersMirrorGateJudgement(t *testing.T) {
 func TestAuditSchemaRealDataConforms(t *testing.T) {
 	path := filepath.Join(os.Getenv("FORGE_WORKDIR_OVERRIDE"), "gate_audit.jsonl")
 	if path == "gate_audit.jsonl" {
-		path = filepath.Join("D:\\forge", "gate_audit.jsonl")
+		path = filepath.Join(testRoot(t), "gate_audit.jsonl")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

@@ -22,8 +22,12 @@
 *.csv     text eol=lf
 *.cfg     text eol=lf
 *.example text eol=lf
+*.service text eol=lf
+*.timer   text eol=lf
 *.code    text eol=lf
 *.jsonl   text eol=lf
+# systemd 单元: 强制 LF —— systemd 对 CRLF 敏感(行尾 \r 会让键值解析失败)。
+# 加规则前实测: git add 警告 "LF will be replaced by CRLF", 即检出会变 CRLF。
 .gitignore     text eol=lf
 .gitattributes text eol=lf
 LICENSE        text eol=lf

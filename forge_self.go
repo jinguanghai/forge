@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -309,10 +308,11 @@ func (f *Forge) locateSelfSource(action string) (string, error) {
 }
 
 func (f *Forge) selfHostedSelf(code, input string, start time.Time) (gateRes ForgeGateResult) {
-	// 产物名恒为 forge_new.exe: 就位统一由 deploySelfExe 负责。
+	// 产物名恒为 newExeName() (Windows: forge_new.exe / Linux: forge_new):
+	// 就位统一由 deploySelfExe 负责。
 	// 旧版按自身进程名切换目标(build -o forge.exe 直接覆盖生产 exe) =
 	// 「没冒烟就先替换」, 正是本轮回补的缺口。
-	targetExe := "forge_new.exe"
+	targetExe := newExeName()
 	action := input
 	if action == "" {
 		action = "append"
@@ -331,83 +331,16 @@ func (f *Forge) selfHostedSelf(code, input string, start time.Time) (gateRes For
 	if lerr != nil {
 		return selfGateErr(start, "%v", lerr)
 	}
-	var backupPath string // self gate 改动前备份路径; go build 失败时自动回滚用
-
-	if action != "build" {
-		bp, bres, bfailed := f.selfBackupSource(srcPath, start)
-		if bfailed {
-			return bres
-		}
-		backupPath = bp
+	// ① 改源码 (改动前备份, 失败即返) ② 编译 (失败自动回滚) ③ 部署收尾。
+	// 三段拆成独立函数 (20261011 F3): 本函数曾 148/150 行贴边。
+	backupPath, ares, afailed := f.selfApplyAction(srcPath, code, action, start)
+	if afailed {
+		return ares
 	}
-	switch {
-	case action == "build":
-		// just rebuild, no source modification
-	case action == "deploy":
-		// 仅重新编译并部署, 不改源码 (20260913): 供"改了非 forge.go 源文件后需热替换"的场景
-		// —— build 动作只编译不部署, append/replace 又必改源码, 此前无"只部署"通道。
-	case strings.HasPrefix(action, "replace:"):
-		if res, failed := selfApplyReplace(srcPath, action, start); failed {
-			return res
-		}
-	default: // "append"
-		if res, failed := selfApplyAppend(srcPath, code, start); failed {
-			return res
-		}
-	}
-	ctx, cancel := context.WithTimeout(f.effCtx(), 60*time.Second)
-	defer cancel()
-	goCmd, goErr := f.findGoCommand()
-	if goErr != nil {
-		return ForgeGateResult{
-			OK: false, Lang: "self", Stage: "compile",
-			Error:    goErr.Error(),
-			Duration: time.Since(start).Milliseconds(),
-		}
-	}
-	targetPath := filepath.Join(f.workDir, targetExe)
-	// 清理陈旧产物: 上一轮编译成功但未就位的 forge_new.exe 若留着,
-	// 之后被运行会把 exe 换成更旧的版本。清不掉(被占用)则交给 go build 覆盖。
-	if _, serr := os.Stat(targetPath); serr == nil {
-		stale := targetPath + ".stale_" + time.Now().Format("20060102_150405")
-		if rerr := os.Rename(targetPath, stale); rerr == nil {
-			os.Remove(stale)
-		}
-	}
-	// 构建事实注入 (20261002): 版本号在源码里, 但「这一版从哪个提交编出来」源码里没有。
-	buildArgs := []string{"build"}
-	if ld := buildLdflags(f.workDir); ld != "" {
-		buildArgs = append(buildArgs, "-ldflags", ld)
-	}
-	buildArgs = append(buildArgs, "-o", targetPath, ".")
-	cmd := f.newCmd(ctx, goCmd, buildArgs...)
-	cmd.Dir = f.workDir
-	stdout := newLimitedWriter(gateCaptureLimit())
-	stderr := newLimitedWriter(gateCaptureLimit())
+	targetPath, stdout, stderr, cres, cfailed := f.selfCompileSelf(targetExe, srcPath, backupPath, start)
 	defer markCaptureLimit(&gateRes, stdout, stderr)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	if err := runWithTimeout(ctx, cmd); err != nil {
-		// 编译失败 → 自动回滚 forge.go 到本次改动前的备份(不留半改状态)。
-		note := ""
-		if backupPath != "" {
-			if b, rerr := os.ReadFile(backupPath); rerr == nil {
-				if werr := os.WriteFile(srcPath, b, 0644); werr == nil {
-					note = "\n[self gate 已自动回滚 forge.go 到改动前版本]"
-				} else {
-					note = fmt.Sprintf("\n[回滚失败: %v, 备份: %s]", werr, backupPath)
-				}
-			} else {
-				note = fmt.Sprintf("\n[备份不可读: %v, 备份: %s]", rerr, backupPath)
-			}
-		}
-		return ForgeGateResult{
-			OK: false, Lang: "self", Stage: "compile",
-			Error:    fmt.Sprintf("go build failed: %s%s", stderr.String(), note),
-			Stderr:   stderr.String(),
-			Timeout:  isTimeoutErr(err),
-			Duration: time.Since(start).Milliseconds(),
-		}
+	if cfailed {
+		return cres
 	}
 	// ── 部署阶段: 编译成功 != 能跑 ──
 	// action=build 保持原语义(只编译); FORGE_SELF_NODEPLOY=1 是应急刹车。
@@ -442,10 +375,10 @@ func (f *Forge) selfHostedSelf(code, input string, start time.Time) (gateRes For
 		"sha256":   outcome.SHA256,
 		"backup":   outcome.BackupPath,
 		"smoke_ms": strconv.FormatInt(outcome.SmokeMS, 10),
-		"exe":      "forge.exe",
+		"exe":      mainExeName(),
 	})
-	report := fmt.Sprintf("built %s successfully\n冒烟通过(%dms) → 已就位 forge.exe\nsha256=%s\n备份=%s",
-		targetExe, outcome.SmokeMS, outcome.SHA256, outcome.BackupPath)
+	report := fmt.Sprintf("built %s successfully\n冒烟通过(%dms) → 已就位 %s\nsha256=%s\n备份=%s",
+		targetExe, outcome.SmokeMS, mainExeName(), outcome.SHA256, outcome.BackupPath)
 	if stdout.Len() > 0 {
 		report += "\n" + stdout.String()
 	}
@@ -454,4 +387,33 @@ func (f *Forge) selfHostedSelf(code, input string, start time.Time) (gateRes For
 		Stdout:   report,
 		Duration: time.Since(start).Milliseconds(),
 	}
+}
+
+// selfApplyAction 按 action 改源码 (改动前先备份), 失败即返回。
+// 从 selfHostedSelf 拆出 (20261011 F3 贴边): 备份 + 动作分发是独立阶段。
+func (f *Forge) selfApplyAction(srcPath, code, action string, start time.Time) (
+	backupPath string, res ForgeGateResult, failed bool) {
+	if action != "build" {
+		bp, bres, bfailed := f.selfBackupSource(srcPath, start)
+		if bfailed {
+			return "", bres, true
+		}
+		backupPath = bp
+	}
+	switch {
+	case action == "build":
+		// just rebuild, no source modification
+	case action == "deploy":
+		// 仅重新编译并部署, 不改源码 (20260913): 供"改了非 forge.go 源文件后需热替换"的场景
+		// —— build 动作只编译不部署, append/replace 又必改源码, 此前无"只部署"通道。
+	case strings.HasPrefix(action, "replace:"):
+		if r, bad := selfApplyReplace(srcPath, action, start); bad {
+			return backupPath, r, true
+		}
+	default: // "append"
+		if r, bad := selfApplyAppend(srcPath, code, start); bad {
+			return backupPath, r, true
+		}
+	}
+	return backupPath, ForgeGateResult{}, false
 }

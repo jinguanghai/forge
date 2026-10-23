@@ -82,16 +82,3 @@ func TestIsChineseHoliday_FailClosed(t *testing.T) {
 		t.Errorf("2027 无节假日表, 周三 10:00 应判 true (高峰), got false")
 	}
 }
-
-// 节假日判据注入后, 周末 + 节假日 + 调休表 全在一处定义; 主测试钉死同源, 防止两处再各自漂移.
-func TestPeakAndMiniMaxWindow_HolidayAware(t *testing.T) {
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.Local)
-	for d := 0; d < 365; d++ {
-		tt := base.AddDate(0, 0, d)
-		h10 := tt.Add(10 * time.Hour)
-		if isPeakHourAt(h10) != isMiniMaxWindow(h10) {
-			t.Fatalf("判据漂移: %s isPeakHourAt=%v isMiniMaxWindow=%v",
-				h10.Format("2006-01-02 15:04 Mon"), isPeakHourAt(h10), isMiniMaxWindow(h10))
-		}
-	}
-}

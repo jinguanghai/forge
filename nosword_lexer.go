@@ -158,74 +158,111 @@ func (p *nswParser) unary() (float64, bool) {
 	return p.power()
 }
 
+// factor 原子层: 标识符(函数调用) / 括号 / 数字 —— 三选一, 自身不含分支逻辑。
 func (p *nswParser) factor() (float64, bool) {
 	p.skip()
-	if p.pos < len(p.s) && (p.s[p.pos] >= 'a' && p.s[p.pos] <= 'z' || p.s[p.pos] >= 'A' && p.s[p.pos] <= 'Z' || p.s[p.pos] == '_') {
-		start := p.pos
-		for p.pos < len(p.s) && (p.s[p.pos] >= 'a' && p.s[p.pos] <= 'z' || p.s[p.pos] >= 'A' && p.s[p.pos] <= 'Z' || p.s[p.pos] == '_') {
-			p.pos++
-		}
-		fn := p.s[start:p.pos]
-		p.skip()
-		if p.pos < len(p.s) && p.s[p.pos] == '(' {
-			p.pos++
-			arg, ok := p.expr()
-			if !ok {
-				return 0, false
-			}
-			p.skip()
-			// round(x, n) 的第二参数写在 ')' 之前, 故此处放行逗号 (由下方 round 分支消费);
-			// 其余情况必须见到 ')' —— 缺右括号一律拒绝, 不得静默吞掉。
-			if p.pos >= len(p.s) || p.s[p.pos] != ')' {
-				if !(fn == "round" && p.pos < len(p.s) && p.s[p.pos] == ',') {
-					return 0, false
-				}
-			} else {
-				p.pos++
-			}
-			switch fn {
-			case "sqrt":
-				if arg < 0 {
-					return 0, false
-				}
-				return math.Sqrt(arg), true
-			case "log":
-				if arg <= 0 {
-					return 0, false
-				}
-				return math.Log10(arg), true
-			case "round":
-				if p.pos < len(p.s) && p.s[p.pos] == ',' {
-					p.pos++
-					n, ok := p.expr()
-					if !ok {
-						return 0, false
-					}
-					p.skip()
-					if p.pos >= len(p.s) || p.s[p.pos] != ')' {
-						return 0, false
-					}
-					p.pos++
-					scale := math.Pow(10, float64(int(n)))
-					return math.Round(arg*scale) / scale, true
-				}
-				return math.Round(arg), true
-			}
-		}
-		return 0, false
+	if p.pos < len(p.s) && nswIsIdentByte(p.s[p.pos]) {
+		return p.identFactor()
 	}
 	if p.pos < len(p.s) && p.s[p.pos] == '(' {
-		p.pos++
-		v, ok := p.expr()
-		if !ok {
-			return 0, false
-		}
-		p.skip()
-		if p.pos >= len(p.s) || p.s[p.pos] != ')' {
-			return 0, false
-		}
-		p.pos++
-		return v, true
+		return p.parenFactor()
 	}
 	return p.number()
+}
+
+// nswIsIdentByte 函数名字节集 (字母与下划线; 数字不得进首字符集)。
+func nswIsIdentByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_'
+}
+
+// identFactor 标识符分支 —— 只认函数调用形态, 标识符后无 '(' 一律拒绝
+// (不回落到 number: "abc" 不得被当作 0)。
+func (p *nswParser) identFactor() (float64, bool) {
+	start := p.pos
+	for p.pos < len(p.s) && nswIsIdentByte(p.s[p.pos]) {
+		p.pos++
+	}
+	fn := p.s[start:p.pos]
+	p.skip()
+	if p.pos >= len(p.s) || p.s[p.pos] != '(' {
+		return 0, false
+	}
+	p.pos++
+	return p.callFactor(fn)
+}
+
+// callFactor 已消费 '(': 解析首参 → 校验右括号 → 按函数名求值。
+//
+// round(x, n) 的第二参数写在 ')' 之前, 故此处放行逗号 (由 roundCall 消费);
+// 其余情况必须见到 ')' —— 缺右括号一律拒绝, 不得静默吞掉 (20260921 缺陷 S)。
+func (p *nswParser) callFactor(fn string) (float64, bool) {
+	arg, ok := p.expr()
+	if !ok {
+		return 0, false
+	}
+	p.skip()
+	if p.pos < len(p.s) && p.s[p.pos] == ')' {
+		p.pos++
+	} else if !(fn == "round" && p.pos < len(p.s) && p.s[p.pos] == ',') {
+		return 0, false
+	}
+	switch fn {
+	case "sqrt":
+		return nswSqrt(arg)
+	case "log":
+		return nswLog10(arg)
+	case "round":
+		return p.roundCall(arg)
+	}
+	return 0, false
+}
+
+// nswSqrt 定义域: 负数拒绝。
+func nswSqrt(v float64) (float64, bool) {
+	if v < 0 {
+		return 0, false
+	}
+	return math.Sqrt(v), true
+}
+
+// nswLog10 定义域: 非正数拒绝 (log 即 log10)。
+func nswLog10(v float64) (float64, bool) {
+	if v <= 0 {
+		return 0, false
+	}
+	return math.Log10(v), true
+}
+
+// roundCall round(x) 或 round(x, n)。逗号形态须自带右括号。
+func (p *nswParser) roundCall(arg float64) (float64, bool) {
+	if p.pos >= len(p.s) || p.s[p.pos] != ',' {
+		return math.Round(arg), true
+	}
+	p.pos++
+	n, ok := p.expr()
+	if !ok {
+		return 0, false
+	}
+	p.skip()
+	if p.pos >= len(p.s) || p.s[p.pos] != ')' {
+		return 0, false
+	}
+	p.pos++
+	scale := math.Pow(10, float64(int(n)))
+	return math.Round(arg*scale) / scale, true
+}
+
+// parenFactor 括号分支: '(' expr ')' —— 缺右括号一律拒绝。
+func (p *nswParser) parenFactor() (float64, bool) {
+	p.pos++
+	v, ok := p.expr()
+	if !ok {
+		return 0, false
+	}
+	p.skip()
+	if p.pos >= len(p.s) || p.s[p.pos] != ')' {
+		return 0, false
+	}
+	p.pos++
+	return v, true
 }

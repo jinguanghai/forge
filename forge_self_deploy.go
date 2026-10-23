@@ -110,7 +110,7 @@ func deploySelfExe(workDir, builtExe string, keepBackups int, smoke smokeRunner)
 		return out, fmt.Errorf("冒烟未通过(%s), 未部署, 旧 exe 保持原样; 产物: %s", why, out.FailedPath)
 	}
 
-	cur := filepath.Join(workDir, "forge.exe")
+	cur := filepath.Join(workDir, mainExeName())
 	if filepath.Clean(cur) == filepath.Clean(builtExe) {
 		out.Deployed = true
 		return out, nil
@@ -118,7 +118,7 @@ func deploySelfExe(workDir, builtExe string, keepBackups int, smoke smokeRunner)
 	if _, serr := os.Stat(cur); serr == nil {
 		backup := cur + ".bak_" + ts
 		if rerr := os.Rename(cur, backup); rerr != nil {
-			return out, fmt.Errorf("备份 forge.exe 失败, 拒绝替换(旧 exe 保持原样): %v", rerr)
+			return out, fmt.Errorf("备份 %s 失败, 拒绝替换(旧 exe 保持原样): %v", mainExeName(), rerr)
 		}
 		out.BackupPath = backup
 	}

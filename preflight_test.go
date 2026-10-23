@@ -8,6 +8,7 @@ package main
 // 变异自检: 把 preflightDeny 里的 netRedlineDeny 调用删掉, 本文件报红。
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -63,5 +64,39 @@ func TestPreflight_BuildStillDenies(t *testing.T) {
 	}
 	if strings.Contains(out, "SHOULD-NOT-RUN") {
 		t.Errorf("被拒代码竟然执行了:\n%s", out)
+	}
+}
+
+// TestPreflight_BudgetArmReachable 记忆预算臂必须能从入口到达 (T53, 20261014)。
+//
+// 沙箱里造一份「常驻超预算」的 memory.json, 断言入口拒绝且回执含「记忆预算」。
+// 为什么要端到端: memoryBudgetCheck 曾被链接器 DCE 整棵剔除, 单测它恒绿而生产
+// 零拦截 —— 判据必须证明「从入口真的拦得住」, 而不是「函数返回了非空切片」。
+func TestPreflight_BudgetArmReachable(t *testing.T) {
+	d := t.TempDir()
+	big := strings.Repeat("x", memoryResidentBudget+100)
+	if err := os.WriteFile(memoryFilePath(d), []byte(`{"identity":"`+big+`"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f := memGuardForge(d)
+	out, res, denied := f.preflightDeny(`print("x")`, "python")
+	if !denied || res == nil || res.Stage != "rejected" {
+		t.Fatalf("预算臂未在入口生效: denied=%v res=%+v\n%s", denied, res, out)
+	}
+	if !strings.Contains(out, "记忆预算") {
+		t.Errorf("预算拒绝回执异常:\n%s", out)
+	}
+}
+
+// TestPreflight_NoMemoryFilePasses 无 memory.json 的沙箱必须放行 (防误伤)。
+//
+// 口径与 checkMemoryGuard 一致: 主文件不可读 = 不判定, 而非 fail-closed 拒绝 ——
+// 否则每个 t.TempDir() 用例都会被自己的空目录拦下 (误伤会让人关掉整个入口)。
+func TestPreflight_NoMemoryFilePasses(t *testing.T) {
+	d := t.TempDir()
+	f := memGuardForge(d)
+	out, res, denied := f.preflightDeny(`print("ok-nomem")`, "python")
+	if denied || res != nil {
+		t.Fatalf("无记忆文件沙箱被拦(误伤): denied=%v res=%+v\n%s", denied, res, out)
 	}
 }

@@ -63,7 +63,7 @@ func (f *turnFinalizer) finalize(asst, reasoning, source string) bool {
 		(*f.verifyStrikes)++
 		*f.messages = append(*f.messages,
 			ChatMessage{Role: "assistant", Content: asst, ReasoningContent: reasoning},
-			ChatMessage{Role: "user", Content: verifyInterventionMsg(runVerification())},
+			ChatMessage{Role: "user", Content: verifyInterventionMsg(runVerification(f.agent.cfg.WorkDir))},
 		)
 		return true
 	}
@@ -77,5 +77,8 @@ func (f *turnFinalizer) finalize(asst, reasoning, source string) bool {
 	)
 	f.agent.trimHistory()
 	f.agent.stats.addTurn(time.Since(f.turnStart))
+	// 会话收尾自动存档 (20261009): 有代码改动则落到 refs/autosave/*, 不移动主线
+	// (双轨制, 见 git_autosave.go)。测试期由 autosaveSuppressed 抑制。
+	autosaveOnTurn(f.agent.cfg.WorkDir)
 	return false
 }

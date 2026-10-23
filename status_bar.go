@@ -110,7 +110,7 @@ func statusBarText(agent *AgentRunner, w int) string {
 //
 // 分子必须剔除固定头 —— 修正前用 estimateTokens(agent.history) 全量, 主人实测
 // 「重启显示剩7%、聊两轮变0%」: 固定头 = system提示 + 记忆锚点 + 折叠索引, 实测
-// 18749 token (system 3764 + 记忆 14687 + 折叠 298), 已占默认阈值 20000 的 93.7%,
+// 18749 token (system 3764 + 记忆 14687 + 折叠 298), 曾占旧默认阈值 20000 的 93.7%,
 // 于是状态栏一开机就报「剩7%」, 而对话内容几乎是空的。旧口径量的是"记忆有多大",
 // 不是"注意力还剩多少"; 且固定头受保护不可压缩 (maybeCompact 明确跳过 head),
 // 本就不该进对话预算。剔除后刚启动 = 剩100%, 与直觉一致。
@@ -125,7 +125,9 @@ func statusBarText(agent *AgentRunner, w int) string {
 // 注意 estimateTokens 是保守上界(ASCII 也按 1 rune=1 token), 故显示偏向"少",
 // 对预警而言宁可早报, 方向安全。
 //
-// 颜色分级: 剩 >50% 绿 / 20~50% 黄 / <20% 红 (红了 = 即将压缩, 该收尾或换会话)。
+// 颜色分级 (DG-2, 2026-10-11): 以「触发线」为界, 不再用固定 50/20 ——
+// 黄 = 已到动手线 (下次压缩随时发生), 红 = 只剩触发线的一半 (该收尾或换会话)。
+// 剩 > (100-TriggerPercent) 绿 / <= (100-TriggerPercent) 黄 / <= 其一半 红。
 func contextUsageText(agent *AgentRunner) string {
 	if agent == nil || agent.cfg == nil {
 		return ""
@@ -143,10 +145,11 @@ func contextUsageText(agent *AgentRunner) string {
 		pct = 100
 	}
 	label := fmt.Sprintf("注意力 剩%d%%", pct)
+	warn := 100 - compactTriggerPercent(agent.cfg) // 剩余%触发线 (默认占用 70% → 剩 30%)
 	switch {
-	case pct < 20:
+	case pct <= warn/2:
 		return color(ansi.red, label)
-	case pct <= 50:
+	case pct <= warn:
 		return color(ansi.yellow, label)
 	default:
 		return color(ansi.green, label)

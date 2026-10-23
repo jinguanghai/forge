@@ -13,7 +13,7 @@ import (
 var nswSniffDecls = []string{
 	"nswBareConstRe", "nswDateRe", "nswYearMonRe", "nswRangeRe", "nswNumPairRe",
 	"nswMultiSegRe", "nswUnaryBare", "nswHugeIntRe", "nswRangeDivRe", "nswLeadZeroRe",
-	"nswParenRangeRe", "nswSlashPlusRe", "nswRatioWords", "nswPureFractionRe", "nswSlashListRe",
+	"nswParenRangeRe", "nswSlashSignedRe", "nswRatioWords", "nswPureFractionRe", "nswSlashListRe",
 	"nswInCodeFence", "nswEvalMarkLine", "nswInInlineCode", "nswTableRow",
 	"nswRatioWordBefore", "nswCJKBefore", "nswNumFollows",
 }

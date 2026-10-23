@@ -7,7 +7,7 @@ package main
 //   - 专家路由 prompt 由 describeGates() 从注册表动态生成 (不再手写)
 //   - FORGE_GATES_ENABLED 配置可禁用 gate (空 = 全部启用)
 //
-// 范围: 只注册"自托管 gate"(math/logic/regex/knowledge/tcm/browser/self/chain);
+// 范围: 只注册"自托管 gate"(清单以下方 gateRegistry 为准, 勿在注释里另列 —— 副本必漂);
 // 普通编译器(go/python/sh/node)走 铸剑炉_COMPILERS, 不在此表。
 // 已裁剪 eprover/repair/system/deno/rust/tcc (冗余或降级)。
 

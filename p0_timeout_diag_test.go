@@ -49,8 +49,9 @@ func TestP0_SelfHostedPythonUnbuffered(t *testing.T) {
 		t.Fatalf("读 forge_gate_host.go: %v", err)
 	}
 	src := string(b)
-	if !strings.Contains(src, `f.newCmd(ctx, "python", "-u", absPath, code)`) {
-		t.Error("forge_gate_host.go 的 script 型 gate 未带 -u (超时可观测性退化)")
+	// T25: 命令名走 pythonCommand() 探测 (Linux 只有 python3); -u 契约不变。
+	if !strings.Contains(src, `f.newCmd(ctx, pythonCommand(), "-u", absPath, code)`) {
+		t.Error("forge_gate_host.go 的 script 型 gate 未带 -u 或未走 pythonCommand (超时可观测性 / Linux 兼容退化)")
 	}
 }
 

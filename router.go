@@ -2,7 +2,6 @@ package main
 
 import (
 	"strings"
-	"time"
 	"unicode/utf8"
 )
 
@@ -26,22 +25,22 @@ const (
 )
 
 // ─── 提供商路由 (Provider Router) ───────────────────────────
-// 高峰时段(工作日9-12/14-18)自动切 MiniMax M3 省钱, 其余/周末回 DeepSeek。
-// 与 DeepSeek 峰谷定价互补: 高峰 MiniMax 更省(实测便宜~19%), 非高峰 DeepSeek 更省。
+// 主路径恒为 DeepSeek; MiniMax 仅在 DeepSeek 请求失败(网络/429/5xx)时兜底一次。
+//
+// 20261011 主人拍板撤销"高峰时段自动切 MiniMax 省钱"(T31 成本复核):
+// MiniMax-M3 单价(输入 2.10 / 输出 8.40 元/百万)几乎正好等于 DeepSeek 高峰价(2/8),
+// 而同一份 messages 在 MiniMax tokenizer 下计数高 1.73 倍 —— 各缓存命中率下
+// 均比 DeepSeek 贵 1.39~3.90 倍, 无任何区间可翻盘。详见 TODO.md「T31 成本复核」。
 
 // 提供商名
 const (
 	EndpointDeepSeek = "deepseek"
-	EndpointMiniMax  = "minimax"
+	EndpointMiniMax  = "minimax" // 仅作故障兜底 (failover), 不参与时段路由
 )
 
 // peakHourNow 返回当前是否高峰时段 (价格×2)。
 // 包级变量便于测试注入固定状态; 生产默认取 isPeakHour (本机时钟, 等价北京时间)。
 var peakHourNow = isPeakHour
-
-// minimaxWindowNow 返回当前是否处于"切到 MiniMax 的时段"。
-// 包级变量便于测试注入; 生产默认取 minimaxWindow (本机时钟)。
-var minimaxWindowNow = minimaxWindow
 
 // classifyTask 返回任务复杂度 0.0~1.0。
 // 强信号每个 +0.45，弱信号每个 +0.12，长度 +0.08~0.15，结构信号每个 +0.08。
@@ -159,17 +158,4 @@ func effortLabel(cfg *Config) string {
 		return cfg.ReasoningEffort
 	}
 	return "默认"
-}
-
-// minimaxWindow 判断当前是否为 MiniMax 适用窗口:
-// 周一~周五 且 高峰时段(9-12 / 14-18)。周六周日一律回 DeepSeek。
-func minimaxWindow() bool {
-	return isMiniMaxWindow(time.Now())
-}
-
-// isMiniMaxWindow 纯函数: t 是否为 MiniMax 适用窗口 (工作日 且 高峰 9-12/14-18)。
-// 复用 isPeakHourAt —— 两处时段定义必须同源, 否则 "何时涨价" 与 "何时切厂商"
-// 会各自漂移 (20260913 实测: 本函数已判周末, isPeakHour 未判, 同一文件内自相矛盾)。
-func isMiniMaxWindow(t time.Time) bool {
-	return isPeakHourAt(t)
 }

@@ -93,7 +93,13 @@ func readQualityAlerts(workDir string, window time.Duration) []QualityAlert {
 			continue
 		}
 		k := a.Metric + "|" + a.Key
-		if prev, ok := latest[k]; !ok || a.Ts > prev.Ts {
+		// 同秒时必须「后出现的胜出」(>=), 与产出端 alert_sink.py 的
+		// `str(ts) >= str(cur_ts)` 同源。20261012 实测: 原实现用严格大于, 于是
+		// 同一秒内先「报」后「恢复」时, 恢复水位被丢弃 —— 告警永远撤不下来,
+		// 而 Python 侧看同一份文件却认为已恢复 (同一份数据读出两个结论)。
+		// 秒级时间戳是产出端的既定精度 (alert_sink.py timespec='seconds'),
+		// 同一轮巡检里报与恢复同秒是常态, 不是边角。
+		if prev, ok := latest[k]; !ok || a.Ts >= prev.Ts {
 			latest[k] = a
 		}
 	}

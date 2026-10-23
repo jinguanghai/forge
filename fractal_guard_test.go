@@ -22,20 +22,31 @@ import (
 //
 // 分形 = 自相似 + 尺度不变。本守卫把"结构美感"翻译成死程序能判的四条规则:
 //
-//	F1 自相似   顶层结构指纹 ∈ 有限模板集 (复杂指纹 = 上帝文件)
+//	F1 自相似   顶层声明数有上限 (声明极多 = 上帝文件)
+//	            (20261008 换度量: 原「折叠指纹长度 <= 6」在数学上恒真, 见 fractalMaxDecls)
 //	F2 尺度不变 文件规模有上限, 无超大尺度
 //	F3 单元有界 单文件 ≤500 行, 单函数 ≤150 行
 //	F4 测试镜像 实现文件应有同名测试 (自相似在测试层的体现)
+//	F5 分支密度 单函数圈复杂度 <=30 (gocyclo 口径, 见 fractal_cyclo_test.go)
 //
 // 判定权完全在死程序; 存量违规以"豁免清单"外置 (.forge/fractal_baseline.json)。
 // 清单只能收缩不能扩张 —— 新增违规立即失败, 改造后清单可手工删条目。
 // ══════════════════════════════════════════════════════════════════
 
 const (
-	fractalMaxFileLines    = 500
-	fractalMaxFuncLines    = 150
-	fractalComplexShapeLen = 6
-	fractalBaselinePath    = ".forge/fractal_baseline.json"
+	fractalMaxFileLines = 500
+	fractalMaxFuncLines = 150
+	// fractalMaxDecls 是 F1 的度量上限: 顶层声明数(不折叠)。
+	//
+	// 为什么换度量 (20261008, T32 P0-a): 旧度量 fractalComplexShapeLen=6 判的是
+	// 「折叠指纹长度」, 而指纹字母表只有 {T,V,C,F,M,?} 六种且相邻去重 ——
+	// 长度在数学上不可能超过 6。阈值 6 等于「永不报红」, 判据已死
+	// (实测根目录 max=6 恰好贴阈值)。判据的度量必须能无限增长, 阈值才可能被突破。
+	//
+	// 阈值 30 的来由(结构意图, 不是贴极值): F2 限 500 行, Go 代码平均 ~15 行/顶层声明,
+	// 30 声明 ≈ 450 行 —— 两个尺度上的约束同量级, 互为印证(自相似)。
+	fractalMaxDecls     = 30
+	fractalBaselinePath = ".forge/fractal_baseline.json"
 	// fractalDebtCeiling 是豁免清单条数的历史最高水位 —— 只能改小, 不能改大。
 	//
 	// 缺口(20260927): 原守卫只拦「实际违规不在基线里」(added), 却不拦「基线被加条目」——
@@ -73,9 +84,46 @@ const (
 	// 现值 2 的具体身份 (20261004 补留痕, 防"水位从哪来"断链):
 	//   F4|approval_delegate.go + F4|console_guard.go —— 二者同包, 由 cookguard_sentinel_test.go
 	//   集中覆盖 (拆成两个同名 _test 会出现符号重定义)。属结构性不可解项, 非"来不及修"。
-	fractalDebtCeiling = 2 // 20261002 加 cookguard (cookedBaseline/ensureCookedForApproval), 集中覆盖委托模式+控制台守护
-	fractalDumpBegin   = "<<<FRACTAL_JSON_BEGIN>>>"
-	fractalDumpEnd     = "<<<FRACTAL_JSON_END>>>"
+	// 20261008 T32 P0-d 扫描范围扩大: web/gateway 与 defense_system/logic_guard 从
+	// 隐式盲区纳入扫描根 —— 暴露 2 条存量债务(F1/F2|web/gateway/main.go, 独立 module
+	// 长期无人扫), 水位 2 → 4 是一次显式决策(已报主人)。同批把 logic_guard/main.go 的
+	// F3(main 225 行)拆解 + 补 main_test.go 消 F4: 盲区纳入后暴露的债务里, 能当场修的
+	// 不入清单 —— 清单只留「需要独立工程才能修」的项, 且只能收缩。
+	fractalDebtCeiling = 2 // 20261017 T35 P1 (主人批准「B5: 分形守卫加 F5」): 新增 F5 圈复杂度维,
+	//                     上线即暴露 8 条存量债务, 当场拆掉 2 条(prodSymbolRefs 33 /
+	//                     TestMemoryGuard_WiredInBuild 32 —— 都是判据自身的辅助函数, 拆分支不动断言),
+	//                     余 6 条入基线, 水位 2 → 8 是一次显式决策(新维引入新债务, 不是给旧违规洗白)。
+	//                     6 条身份: F5|nosword_cand.go:nswIsCandidateMode 50 / readline_session.go:processBatch 38 /
+	//                     nosword_lexer.go:factor 36 / nosword_cand.go:nswSniffCands 34 /
+	//                     config.go:LoadConfig 33 / main_interactive.go:runInteractive 33 ——
+	//                     全部是「需独立工程 + 交叉用例」的重构, 登记为 TODO T61 待拆;
+	//                     拆完必须同批下调本水位(只降不升)。
+	//                     20261018 T61 第 2 条: readline_session.go:processBatch 38 → 按逻辑单元拆成
+	//                     九段 (processBatch 13 行), 同批删基线 + 水位 7 → 6。
+	//                     20261018 T61 第 3 条: main_interactive.go:runInteractive 33 → 拆成
+	//                     主循环 + lineAssembler/readInputLine/handleLocalInput/buildPrompt/
+	//                     printFoldHint/printSessionSummary (runInteractive 24 行, 圈复杂度 7),
+	//                     同批补 13 条单元用例 (lineAssembler.feed 逐分支钉住等价性),
+	//                     删基线 + 水位 6 → 5。余 3 条待拆。
+	//                     20261018 T61 第 1 条: config.go:LoadConfig 33 → 按装载阶段拆成
+	//                     loadDotEnvIfPresent/applyAPIKey/applyBaseURL/applyModelRouting/
+	//                     applyRuntimeEnv/clampConfig 六段 (LoadConfig 19 行, 圈复杂度 5),
+	//                     同批删基线条目 + 水位 8 → 7。余 5 条待拆。
+	//                     20261018 T61 第 2 条: readline_session.go:processBatch 38 → 按「逻辑单元」
+	//                     拆成 stepBatch/stepNewline/stepTailNewline/stepEscape/stepByte/
+	//                     finishBatch/consumeTrailing/consumeCRLFContinuation (processBatch 13 行),
+	//                     同批删基线条目 + 水位 7 → 6。余 4 条待拆。
+	//                     20261010 T36 债务收缩: web/gateway/main.go 拆分(744 行/33 声明 → 237 行/6 声明)
+	//                     消掉 F1/F2 两条存量债务, 水位随真实债务下调 4→2(只降不升); 余 2 条为结构性不可解项
+	//                     (F4 approval_delegate/console_guard: 同包集中覆盖, 拆开即符号重定义)
+	//                     20261018 T61 第 1+4 条 (同文件同批): nswIsCandidateMode 50 → 9 与
+	//                     nswSniffCands 34 → 8 —— 字符白名单改查表 (switch 每 case 计 1, 拆了等于没拆)、
+	//                     闸门按「两路径共用 / 嗅探专属」分组、候选切分抽纯函数 nswBuildCand
+	//                     (rune 偏移首次可单测)。等价性判据 = 65 条输入 + 12 段文本行为快照逐字节一致
+	//                     (nosword_cand_golden_test.go) + 既有 TestNSW* 全绿。删基线 + 水位 5 → 3。
+	//                     余 1 条 (nosword_lexer.go:factor 36, 递归下降文法入口, 需交叉用例)。
+	fractalDumpBegin = "<<<FRACTAL_JSON_BEGIN>>>"
+	fractalDumpEnd   = "<<<FRACTAL_JSON_END>>>"
 )
 
 type fractalViolation struct {
@@ -100,44 +148,21 @@ type fractalBaseline struct {
 	Violations []fractalViolation `json:"violations"`
 }
 
-// fractalShape 把文件顶层声明序列折叠成指纹。
+// fractalDeclCount 统计顶层声明数(不折叠)。
 //
-//	"VF"      = 若干变量后跟若干函数      (普通模块)
-//	"TMFM..." = 类型/方法交替            (上帝文件征兆)
-func fractalShape(f *ast.File) string {
-	var sb strings.Builder
-	prev := byte(0)
+// 旧实现是 fractalShape 折叠指纹(相邻同类合并成一个字母)。折叠丢信息:
+// func a/b/c 三个声明折叠成 "F"(长度 1) —— 而上帝文件的征兆恰是「声明多」,
+// 折叠把「多」抹平了。不折叠的计数单调、可加, 拆文件必然下降。
+// import 是样板, 不计入结构复杂度。
+func fractalDeclCount(f *ast.File) int {
+	n := 0
 	for _, d := range f.Decls {
-		var k byte
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			if dd.Recv != nil {
-				k = 'M'
-			} else {
-				k = 'F'
-			}
-		case *ast.GenDecl:
-			switch dd.Tok {
-			case token.TYPE:
-				k = 'T'
-			case token.VAR:
-				k = 'V'
-			case token.CONST:
-				k = 'C'
-			case token.IMPORT:
-				continue
-			default:
-				k = '?'
-			}
-		default:
-			k = '?'
+		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.IMPORT {
+			continue
 		}
-		if k != prev {
-			sb.WriteByte(k)
-			prev = k
-		}
+		n++
 	}
-	return sb.String()
+	return n
 }
 
 // fractalBase 剥离平台后缀, 用于测试配对判定。
@@ -159,8 +184,8 @@ func fractalCheckFile(fset *token.FileSet, name string, f *ast.File) []fractalVi
 	if lines := fset.Position(f.End()).Line; lines > fractalMaxFileLines {
 		vs = append(vs, fractalViolation{"F2", name, lines, fractalMaxFileLines})
 	}
-	if shape := fractalShape(f); len(shape) > fractalComplexShapeLen {
-		vs = append(vs, fractalViolation{"F1", name, len(shape), fractalComplexShapeLen})
+	if n := fractalDeclCount(f); n > fractalMaxDecls {
+		vs = append(vs, fractalViolation{"F1", name, n, fractalMaxDecls})
 	}
 	for _, d := range f.Decls {
 		fd, ok := d.(*ast.FuncDecl)
@@ -171,8 +196,21 @@ func fractalCheckFile(fset *token.FileSet, name string, f *ast.File) []fractalVi
 		if n > fractalMaxFuncLines {
 			vs = append(vs, fractalViolation{"F3", name + ":" + fd.Name.Name, n, fractalMaxFuncLines})
 		}
+		if c := fractalFuncCyclomatic(fd); c > fractalMaxCyclomatic {
+			vs = append(vs, fractalViolation{"F5", name + ":" + fd.Name.Name, c, fractalMaxCyclomatic})
+		}
 	}
 	return vs
+}
+
+// fractalItemName 给违规条目的出处加扫描根前缀。
+// 根目录不加前缀(保持基线里既有 key 不变); 子目录必须加 —— 否则两个包里的
+// main.go 会撞同一个 key("F2|main.go"), 基线条目互相冒充。
+func fractalItemName(dir, name string) string {
+	if dir == "." || dir == "" {
+		return name
+	}
+	return filepath.ToSlash(filepath.Join(dir, name))
 }
 
 // fractalScan 扫描包目录, 返回全部违规 (尚未与基线比对)。
@@ -205,12 +243,12 @@ func fractalScan(dir string) ([]fractalViolation, int, error) {
 			return nil, 0, fmt.Errorf("解析 %s 失败: %w", name, err)
 		}
 		nFiles++
-		vs = append(vs, fractalCheckFile(fset, name, f)...)
+		vs = append(vs, fractalCheckFile(fset, fractalItemName(dir, name), f)...)
 	}
 
 	for b := range implBase {
 		if !testBase[b] {
-			vs = append(vs, fractalViolation{"F4", b + ".go", 0, 1})
+			vs = append(vs, fractalViolation{"F4", fractalItemName(dir, b+".go"), 0, 1})
 		}
 	}
 
@@ -221,6 +259,38 @@ func fractalScan(dir string) ([]fractalViolation, int, error) {
 		return vs[i].Item < vs[j].Item
 	})
 	return vs, nFiles, nil
+}
+
+// fractalScanRoots 是分形判据的显式扫描根清单 (T32 P0-d, 20261008)。
+//
+// 为什么显式: 原实现只 os.ReadDir(".") 一层(非递归), web/gateway 与
+// defense_system/logic_guard 从未被扫过 —— 盲区是隐式的, 无人知道。
+// 实测盲区内的超标: web/gateway/main.go 743 行; logic_guard main() 225 行。
+// 与「容器内部是盲区」(.forge/forge-tools 19 项躺数月而四套守卫全绿) 同型。
+//
+// TestFractalScanCoverage 断言: 仓库中每个含 .go 的目录都必须出现在本清单
+// (或显式跳过清单)里 —— 新增子目录包不可能再静默成为盲区。
+var fractalScanRoots = []string{".", "web/gateway", "defense_system/logic_guard"}
+
+// fractalScanAll 扫全部扫描根。F4(测试镜像) 按根内配对 —— 子目录是独立包。
+func fractalScanAll() ([]fractalViolation, int, error) {
+	var all []fractalViolation
+	total := 0
+	for _, root := range fractalScanRoots {
+		vs, n, err := fractalScan(root)
+		if err != nil {
+			return nil, 0, fmt.Errorf("扫描根 %s: %w", root, err)
+		}
+		all = append(all, vs...)
+		total += n
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].Rule != all[j].Rule {
+			return all[i].Rule < all[j].Rule
+		}
+		return all[i].Item < all[j].Item
+	})
+	return all, total, nil
 }
 
 // fractalDump 打印候选基线清单 (机器可读, 由死程序生成, 非人工誊抄)。
@@ -239,7 +309,7 @@ func fractalDump(t *testing.T, vs []fractalViolation) {
 
 // TestFractalGuard 主守卫: 实际违规必须是基线的子集。
 func TestFractalGuard(t *testing.T) {
-	vs, nFiles, err := fractalScan(".")
+	vs, nFiles, err := fractalScanAll()
 	if err != nil {
 		t.Fatalf("扫描失败: %v", err)
 	}
@@ -298,25 +368,60 @@ func TestFractalGuard(t *testing.T) {
 	if os.Getenv("FORGE_FRACTAL_DUMP") == "1" {
 		fractalDump(t, vs)
 	}
-	t.Logf("分形守卫: 扫描 .go 文件 %d 个(含测试) | 基线允许 %d 条 | 实际违规 %d 条 | 水位 %d",
-		nFiles, len(bl.Violations), len(vs), fractalDebtCeiling)
+	t.Logf("分形守卫: 扫描根 %v | .go 文件 %d 个(含测试) | 基线允许 %d 条 | 实际违规 %d 条 | 水位 %d",
+		fractalScanRoots, nFiles, len(bl.Violations), len(vs), fractalDebtCeiling)
 }
 
-// TestFractalShapeRule 自检1: 指纹计算是否正确。
-func TestFractalShapeRule(t *testing.T) {
-	cases := []struct{ src, want string }{
-		{"package p\n\nimport \"fmt\"\n\nvar a = 1\n\nfunc f() { fmt.Println(a) }\n", "VF"},
-		{"package p\n\ntype T struct{}\n\nfunc (t T) M() {}\n\nfunc (t T) N() {}\n", "TM"},
-		{"package p\n\nconst C = 1\n\ntype T int\n\nfunc (t T) M() {}\n\nfunc (t T) N() {}\n", "CTM"},
-		{"package p\n\nfunc a() {}\n\nfunc b() {}\n\nfunc c() {}\n", "F"},
+// TestFractalDeclCountRule 自检1: 顶层声明计数(不折叠)是否正确。
+//
+// 旧用例集测的是折叠指纹, 其中 `func a/b/c → "F"` 把「相邻同类合并」的语义
+// 钉成了契约 —— 三个声明折叠成一个字母, 信息在度量层就丢了。T32 P0-c 改为
+// 直接测计数, 并补 F1 正向用例: 此前 F1 没有任何正向样本, 「F1 恒真」这件事
+// 在结构上不可能被现有用例集发现。
+func TestFractalDeclCountRule(t *testing.T) {
+	cases := []struct {
+		src  string
+		want int
+	}{
+		{"package p\n\nimport \"fmt\"\n\nvar a = 1\n\nfunc f() { fmt.Println(a) }\n", 2}, // import 不计
+		{"package p\n\ntype T struct{}\n\nfunc (t T) M() {}\n\nfunc (t T) N() {}\n", 3},
+		{"package p\n\nconst C = 1\n\ntype T int\n\nfunc (t T) M() {}\n\nfunc (t T) N() {}\n", 4},
+		// 不折叠: 旧 shape 把这三个声明折叠成 "F"(长度 1), 计数保留 3
+		{"package p\n\nfunc a() {}\n\nfunc b() {}\n\nfunc c() {}\n", 3},
+		{"package p\n\nvar (\n\ta = 1\n\tb = 2\n)\n\nfunc f() {}\n", 2}, // 一个 var 块 = 1 个声明
 	}
 	for i, c := range cases {
 		f, err := parser.ParseFile(token.NewFileSet(), fmt.Sprintf("case%d.go", i), c.src, parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatalf("用例 %d 解析失败: %v", i, err)
 		}
-		if got := fractalShape(f); got != c.want {
-			t.Errorf("用例 %d: shape=%q, want %q", i, got, c.want)
+		if got := fractalDeclCount(f); got != c.want {
+			t.Errorf("用例 %d: decls=%d, want %d", i, got, c.want)
+		}
+	}
+
+	// F1 正向用例 + 边界: 阈值+1 必须触发; 恰好等于阈值不得触发。
+	for _, tc := range []struct {
+		n       int
+		wantHit bool
+	}{{fractalMaxDecls, false}, {fractalMaxDecls + 1, true}} {
+		var sb strings.Builder
+		sb.WriteString("package p\n")
+		for i := 0; i < tc.n; i++ {
+			fmt.Fprintf(&sb, "\nfunc f%d() {}\n", i)
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), "many.go", sb.String(), parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("合成 %d 声明文件解析失败: %v", tc.n, err)
+		}
+		hit := false
+		for _, v := range fractalCheckFile(token.NewFileSet(), "many.go", f) {
+			if v.Rule == "F1" {
+				hit = true
+			}
+		}
+		if hit != tc.wantHit {
+			t.Errorf("合成 %d 个顶层声明: F1 触发=%v, want %v (阈值 %d)", tc.n, hit, tc.wantHit, fractalMaxDecls)
 		}
 	}
 }
@@ -341,11 +446,19 @@ func TestFractalBaseRule(t *testing.T) {
 	}
 }
 
-// TestFractalThresholdRule 自检3: 阈值判定真的能抓到 —— 走真实判定路径。
+// TestFractalThresholdRule 自检3: 三条阈值判定真的能抓到 —— 走真实判定路径。
+//
+// 这是变异自检的载体: 删掉/改坏任一条判定分支(或让它永不触发), 本用例报红。
+// 20261008 T32 扩展: 原用例只构造 F2/F3 的正向样本(620 行文件), 没有 F1 ——
+// 「F1 恒真」这件事在结构上不可能被现有用例集发现。
 func TestFractalThresholdRule(t *testing.T) {
-	// 构造 620 行的单函数文件: 必须同时触发 F2(文件) 与 F3(函数)
+	// 合成文件同时触发三条: F1(顶层声明 >30) / F2(文件 >500 行) / F3(函数 >150 行)
 	var sb strings.Builder
-	sb.WriteString("package p\n\nfunc big() {\n")
+	sb.WriteString("package p\n")
+	for i := 0; i < fractalMaxDecls+1; i++ {
+		fmt.Fprintf(&sb, "\nfunc f%d() {}\n", i)
+	}
+	sb.WriteString("\nfunc big() {\n")
 	for i := 0; i < 600; i++ {
 		sb.WriteString("\t_ = 1\n")
 	}
@@ -360,11 +473,10 @@ func TestFractalThresholdRule(t *testing.T) {
 	for _, v := range fractalCheckFile(fset, "synthetic.go", f) {
 		got[v.Rule] = true
 	}
-	if !got["F2"] {
-		t.Errorf("合成 620 行文件未触发 F2 —— 文件行数判定失效")
-	}
-	if !got["F3"] {
-		t.Errorf("合成 620 行函数未触发 F3 —— 函数长度判定失效")
+	for _, rule := range []string{"F1", "F2", "F3"} {
+		if !got[rule] {
+			t.Errorf("合成文件未触发 %s —— 该判定分支失效(变异自检)", rule)
+		}
 	}
 
 	// 反向: 合规小文件不得误报

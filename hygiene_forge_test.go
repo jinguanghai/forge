@@ -170,7 +170,8 @@ func forgeManifestProblem(m forgeManifest) string {
 		return "缺少必需字段 " + strings.Join(missing, ", ") +
 			" —— 缺字段会让判定失去对照, 静默变成「全部放行」或「全部违规」"
 	}
-	return ""
+	// T56 内容禁则: 判定在 hygiene_forge_denylist_test.go (本文件已近 F2 上限, 故不增字段)。
+	return forgeForbiddenProblem(m)
 }
 
 func forgeItems(t *testing.T) []forgeItem {

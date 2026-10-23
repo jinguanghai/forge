@@ -125,17 +125,30 @@ func tokenizeCN(s string) []string {
 			cur = nil
 		}
 	}
-	for _, r := range []rune(strings.ToLower(s)) {
+	runes := []rune(strings.ToLower(s))
+	for i := 0; i < len(runes); {
+		r := runes[i]
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
 			cur = append(cur, r)
+			i++
 		case r >= 0x4e00 && r <= 0x9fff:
 			flush()
+			// 词典优先 (T29-E, cn_terms.go): 命中即整体成词, 未命中才退回单字。
+			// 中医术语被单字切碎会让 BM25 的 idf 失去区分度 —— 「药对」曾被
+			// 停用字「对」拆成「药」。
+			if term, n := matchCNTerm(runes[i:]); n > 0 {
+				toks = append(toks, term)
+				i += n
+				continue
+			}
 			if !cnStopChars[r] { // 中文单字即词, 过滤停用字
 				toks = append(toks, string(r))
 			}
+			i++
 		default:
 			flush()
+			i++
 		}
 	}
 	flush()
@@ -190,9 +203,9 @@ func bm25Score(docs [][]string, query []string, k1, b float64) []float64 {
 
 var datePat = regexp.MustCompile(`20\d{6}`)
 
-// freshnessOf 计算新鲜度三态。ts 是显式时间锚点(唯一真相源, 20260926):
+// freshnessOf 计算新鲜度四态。ts 是显式时间锚点(唯一真相源, 20260926):
 //
-//	"static"   → 永久事实(机制/原则/硬约束), 恒 current;
+//	"static"   → 永久事实(机制/原则/硬约束), 单列一态 (T29-D: 恒 1.0 不降权);
 //	"20060102" → 具体事实(模型名/路径/清单), 按日期算三态;
 //	""         → 回退到 text 内的 20YYMMDD(兼容旧数据); 仍无 → stale(fail-closed)。
 //
@@ -201,7 +214,11 @@ var datePat = regexp.MustCompile(`20\d{6}`)
 func freshnessOf(ts, text string) (state string, days int) {
 	anchor := strings.TrimSpace(ts)
 	if anchor == "static" {
-		return "current", 0
+		// T29-D (20261012): static 单列一态, 与 7-30 天的 "current" 分开。
+		// 原实现借用 "current" → 权重 0.8, 等于给永久事实打折: 一条 20 天前的
+		// 具体事实与一条机制/原则同分, 而后者才是硬约束。current 仍保持 0.8
+		// (半旧事实降权是有意设计, 不随之升到 1.0)。
+		return "static", 0
 	}
 	if anchor == "" {
 		anchor = datePat.FindString(text)
@@ -229,8 +246,8 @@ func freshnessOf(ts, text string) (state string, days int) {
 
 func freshnessWeight(state string) float64 {
 	switch state {
-	case "fresh":
-		return 1.0
+	case "fresh", "static":
+		return 1.0 // static = 永久事实, 不随时间降权 (T29-D)
 	case "current":
 		return 0.8
 	default:

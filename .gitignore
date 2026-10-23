@@ -179,7 +179,6 @@ bench/
 .forge/forge-tools/go-cache/
 # 本机操作脚本/辅助脚本(含本机路径/私有逻辑)
 cache_guard.py
-一键恢复.bat
 替换上线.bat
 # 私有救援手册(双agent互救, 敏感)
 _RESCUE_*.md
@@ -214,8 +213,6 @@ restart_self.ps1
 # 开发过程待办/笔记
 no_sword_pressure_todo.md
 
-# 本机一键重启脚本 (含硬编码路径, 不入库)
-重启铸剑炉.bat
 
 # 本机一次性脚本 (含硬编码路径, 不入库)
 应用修复并重启.bat
@@ -304,3 +301,16 @@ web/**/.tls/
 #       工作区常驻 "?? .forge/ossdrift_state.json", 且被 fractal 仓库文本卫生判据扫到(未跟踪非忽略)。
 #       写入端判据 = TestOpenSourceDriftStateFileIsLF(直调 save_state), 故忽略它不产生盲区。
 .forge/ossdrift_state.json
+
+# --- 20261012: 记忆预算判据的告警去重水位 (运行时状态, 与 fractal/cache_guard/vpslogin 同类) ---
+# 动因: memory_budget.py 每轮经 alert_sink.emit 写去重水位; 与 ossdrift_state.json 同型 ——
+#       运行时状态不入库(写入端判据在 defense_system/memory_budget.py), 但必须登记在
+#       defense_system/hygiene_forge_manifest.json 的 entries 里, 否则 .forge 定置判据报红。
+.forge/memory_budget_state.json
+# 20261013 补: SKIP 告警去重水位 —— 同类运行时状态 (mutation_rotate/vps_login/ossdrift/memory_budget) 均不入库;
+#       两处都要登记: 本文件(不入库) + defense_system/hygiene_forge_manifest.json 的 entries(定置判据)。
+.forge/mutation_probe_state.json
+
+# 20261016 补: 升级脚本的验证输出日志 (每次升级一份, 运行时产物) —— 不入库;
+#       位置合法性由 defense_system/hygiene_forge_manifest.json 的 subdirs[logs] 管 (两处职责不同, 都要登记)。
+.forge/logs/

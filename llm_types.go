@@ -109,6 +109,7 @@ type chatRequest struct {
 	Tools           []json.RawMessage `json:"tools,omitempty"`
 	Thinking        *ThinkingConfig   `json:"thinking,omitempty"`
 	ReasoningEffort string            `json:"reasoning_effort,omitempty"` // V4-Pro: low|high|max
+	ReasoningSplit  bool              `json:"reasoning_split,omitempty"`  // MiniMax: 思维链走 reasoning_content, 不污染正文
 	StreamOptions   *StreamOptions    `json:"stream_options,omitempty"`   // 要求流式末尾返回 usage (缓存度量)
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -270,5 +271,221 @@ func TestSummarizePreservesPrefix(t *testing.T) {
 	// system 保持头部
 	if gotMsgs[0].Role != "system" {
 		t.Fatalf("摘要请求首条应为 system: %s", gotMsgs[0].Role)
+	}
+}
+
+// ══════════════════════════════════════════════════════════════
+// DG-2 (2026-10-11 主人拍板): 触发线按百分比 / 压缩量按 token 目标反推 / 达标判据
+//
+// 实测根因 (源 = gate_audit.jsonl, 188 次真实长会话压缩): 旧实现「压缩量 = rest/3 夹
+// 4~12」与「超出多少 token」无关 —— compressed_msgs 分布 10/12/7/4 全落在夹取区间,
+// 于是 23.9% 的压缩压完仍剩 <30% (冷却一过又撞线 = 抖动), 而判据侧对此完全空白。
+// 本组判据: ① 70% 占用即触发 (旧实现要满 100%); ② 压后必须到达目标线;
+// ③ 压不到目标线必须落 compact_undershoot 审计 (可度量, 不靠事后统计);
+// ④ 配置矛盾 (目标 >= 触发) 自动纠正。
+// ══════════════════════════════════════════════════════════════
+
+// buildEvenHistory 构造 pairs 对等长消息 (user n rune / assistant n rune)。
+// estimateTokens 对每个 rune 计 1, 故 token 量可精确预判 (判据不依赖经验值)。
+func buildEvenHistory(system string, pairs, n int) []ChatMessage {
+	h := []ChatMessage{{Role: "system", Content: system}}
+	for i := 0; i < pairs; i++ {
+		h = append(h, ChatMessage{Role: "user", Content: strings.Repeat("u", n)})
+		h = append(h, ChatMessage{Role: "assistant", Content: strings.Repeat("a", n)})
+	}
+	return h
+}
+
+// auditEventRows 读隔离审计文件 (TestMain 设 FORGE_AUDIT_PATH) 里某 event 的行。
+func auditEventRows(t *testing.T, event string) []map[string]interface{} {
+	t.Helper()
+	b, err := os.ReadFile(os.Getenv("FORGE_AUDIT_PATH"))
+	if err != nil {
+		t.Fatalf("读隔离审计文件失败: %v", err)
+	}
+	var out []map[string]interface{}
+	for _, ln := range strings.Split(string(b), "\n") {
+		if !strings.Contains(ln, `"`+event+`"`) {
+			continue
+		}
+		var o map[string]interface{}
+		if json.Unmarshal([]byte(ln), &o) != nil {
+			continue
+		}
+		if o["event"] == event {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// 8. 触发线: 占用达 TriggerPercent% 即动手 (旧实现要满 100% 才压)。
+// 区分力对照: 同一份历史在 TriggerPercent=100 下必须不触发 —— 否则用例恒真。
+func TestCompactTriggersAtTriggerPercent(t *testing.T) {
+	srv := httptest.NewServer((&fakeSummaryServer{summary: "摘要T"}).handler())
+	defer srv.Close()
+
+	// 历史 = 5 对 x 160 rune = 800 token; 阈值 1000 → 70% 线 = 700 (800 >= 700 → 触发)
+	build := func() []ChatMessage { return buildEvenHistory("SYS", 5, 80) }
+
+	low := newCompactRunner(t, srv, &Config{CompactEnabled: true, CompactTokenThreshold: 1000,
+		CompactTriggerPercent: 70, CompactTargetPercent: 50})
+	low.history = build()
+	low.maybeCompact()
+	if len(low.history) >= len(build()) {
+		t.Fatalf("占用 80%% (>=70%% 触发线) 应压缩, 历史未变短: %d", len(low.history))
+	}
+
+	high := newCompactRunner(t, srv, &Config{CompactEnabled: true, CompactTokenThreshold: 1000,
+		CompactTriggerPercent: 100, CompactTargetPercent: 50})
+	high.history = build()
+	before := len(high.history)
+	high.maybeCompact()
+	if len(high.history) != before {
+		t.Fatalf("占用 80%% < 100%% 触发线不应压缩, 历史变短: %d → %d", before, len(high.history))
+	}
+}
+
+// 9. 压缩量按 token 目标反推: 压完对话部分必须 <= 目标线 (旧实现压不干净)。
+func TestCompactReachesTargetLine(t *testing.T) {
+	srv := httptest.NewServer((&fakeSummaryServer{summary: "摘要T"}).handler())
+	defer srv.Close()
+	cfg := &Config{CompactEnabled: true, CompactTokenThreshold: 20000,
+		CompactTriggerPercent: 70, CompactTargetPercent: 50}
+	a := newCompactRunner(t, srv, cfg)
+	// 50 对 x 200 rune = 20000 token; 目标线 = 10000 → 需压掉约 10420 (53 条)
+	a.history = buildEvenHistory("SYS", 50, 200)
+	if got := contextBudgetUsed(a); got != 20000 {
+		t.Fatalf("夹具前提失配: est=%d want 20000", got)
+	}
+	a.maybeCompact()
+	target := compactTargetTokens(cfg)
+	if got := contextBudgetUsed(a); got > target {
+		t.Fatalf("压后对话 %d 仍超目标线 %d —— 压缩量未按 token 目标反推", got, target)
+	}
+}
+
+// 10. 压不到目标线时必须落 compact_undershoot 审计 (判据侧空白补上)。
+// 构造: 对话量远超阈值 (80000 vs 20000) → 削减需求超过「单次至多压 3/4」护栏 → 必然未达标。
+func TestCompactUndershootAudit(t *testing.T) {
+	srv := httptest.NewServer((&fakeSummaryServer{summary: "摘要T"}).handler())
+	defer srv.Close()
+	cfg := &Config{CompactEnabled: true, CompactTokenThreshold: 20000,
+		CompactTriggerPercent: 70, CompactTargetPercent: 50}
+	a := newCompactRunner(t, srv, cfg)
+	a.history = buildEvenHistory("SYS", 400, 200) // 80000 token
+	// 增量判定: 隔离审计文件被整个测试进程共用, 读全量会把别的用例的行算进来。
+	before := len(auditEventRows(t, "compact_undershoot"))
+	a.maybeCompact()
+	if got := contextBudgetUsed(a); got <= compactTargetTokens(cfg) {
+		t.Fatalf("夹具前提失配: 本用例需压不达标, 实际已达标 (%d <= %d)",
+			got, compactTargetTokens(cfg))
+	}
+	rows := auditEventRows(t, "compact_undershoot")
+	if len(rows) <= before {
+		t.Fatal("压后未达标却无 compact_undershoot 审计行 —— 抖动不可度量")
+	}
+	last := rows[len(rows)-1]
+	for _, f := range []string{"conv_after_tokens", "target_tokens", "overshoot_tokens", "compressed_msgs"} {
+		if _, ok := last[f]; !ok {
+			t.Errorf("compact_undershoot 缺字段 %q (audit_schema.go 必填契约)", f)
+		}
+	}
+	if ov, _ := last["overshoot_tokens"].(float64); ov <= 0 {
+		t.Errorf("overshoot_tokens 应 > 0, 实际 %v", last["overshoot_tokens"])
+	}
+}
+
+// 11. 达标时不得写 undershoot (防判据恒真: 无条件写审计也算"有落痕")。
+func TestCompactNoUndershootWhenReached(t *testing.T) {
+	srv := httptest.NewServer((&fakeSummaryServer{summary: "摘要T"}).handler())
+	defer srv.Close()
+	cfg := &Config{CompactEnabled: true, CompactTokenThreshold: 20000,
+		CompactTriggerPercent: 70, CompactTargetPercent: 50}
+	a := newCompactRunner(t, srv, cfg)
+	a.history = buildEvenHistory("SYS", 50, 200) // 20000 token, 同 TestCompactReachesTargetLine
+	// 增量判定 (同用例 10): 审计文件跨用例累积, 绝对值断言会互相污染。
+	beforeUS := len(auditEventRows(t, "compact_undershoot"))
+	beforeCP := len(auditEventRows(t, "compact"))
+	a.maybeCompact()
+	if got := contextBudgetUsed(a); got > compactTargetTokens(cfg) {
+		t.Fatalf("夹具前提失配: 本用例需达标, 实际 %d > %d", got, compactTargetTokens(cfg))
+	}
+	if n := len(auditEventRows(t, "compact_undershoot")); n != beforeUS {
+		t.Fatalf("已达标却新增 %d 条 compact_undershoot", n-beforeUS)
+	}
+	if n := len(auditEventRows(t, "compact")); n != beforeCP+1 {
+		t.Fatalf("compact 审计行增量 = %d, want 1", n-beforeCP)
+	}
+}
+
+// 12. 配置矛盾 (目标线 >= 触发线) 自动纠正 —— 否则每次压缩都注定不达标。
+func TestNormalizeCompactPercents(t *testing.T) {
+	cases := []struct {
+		trigger, target, wantTarget int
+	}{
+		{70, 50, 50},  // 正常: 不动
+		{70, 70, 35},  // 相等 → 折半 (否则压不到线)
+		{70, 90, 35},  // 目标高于触发 → 折半
+		{100, 99, 99}, // 未矛盾 (99 < 100): 不纠正 —— 激进但自洽的配置由主人自担
+	}
+	for _, c := range cases {
+		cfg := &Config{CompactTriggerPercent: c.trigger, CompactTargetPercent: c.target}
+		normalizeCompactPercents(cfg)
+		if cfg.CompactTargetPercent != c.wantTarget {
+			t.Errorf("trigger=%d target=%d: got %d want %d",
+				c.trigger, c.target, cfg.CompactTargetPercent, c.wantTarget)
+		}
+	}
+	normalizeCompactPercents(nil) // 不得 panic
+}
+
+// 13. 预算公式钉住: 触发线/目标线必须真的等于 threshold x 百分比 (含零值兜底)。
+// 动机 (变异自检实测): 「压后 <= 目标线」这类端到端判据抓不到「目标线本身被设成 100%」
+// 的变异 —— 目标=阈值时压掉一点就"达标"。公式必须由值判据直接钉住, 否则该臂是盲区。
+func TestCompactLineFormulas(t *testing.T) {
+	cfg := &Config{CompactTokenThreshold: 60000, CompactTriggerPercent: 70, CompactTargetPercent: 50}
+	if got := compactTriggerTokens(cfg); got != 42000 {
+		t.Errorf("触发线 = %d, want 42000 (60000 x 70%%)", got)
+	}
+	if got := compactTargetTokens(cfg); got != 30000 {
+		t.Errorf("目标线 = %d, want 30000 (60000 x 50%%)", got)
+	}
+	// 零值兜底: 测试夹具/直接构造 Config 不走 DefaultConfig, 兜底值必须生效
+	zero := &Config{CompactTokenThreshold: 1000}
+	if got := compactTriggerTokens(zero); got != 700 {
+		t.Errorf("零值触发百分比应兜底 70%%: got %d want 700", got)
+	}
+	if got := compactTargetTokens(zero); got != 500 {
+		t.Errorf("零值目标百分比应兜底 50%%: got %d want 500", got)
+	}
+	if got := compactTriggerTokens(nil); got != 0 {
+		t.Errorf("nil cfg 触发线应得 0, 实际 %d", got)
+	}
+	if got := compactTargetTokens(nil); got != 0 {
+		t.Errorf("nil cfg 目标线应得 0, 实际 %d", got)
+	}
+}
+
+// 14. 默认参数哨兵: 生产默认值必须等于主人拍板值。
+// 动机: 本次改的是"默认值", 而默认值此前没有任何判据盯着 —— 被改回旧值 (20000/无百分比)
+// 不会有任何用例转红, 等于改动可被静默回滚。主人若再调参数, 本用例须同步更新 (棘轮)。
+func TestCompactDefaultParams(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.CompactTokenThreshold != 60000 {
+		t.Errorf("默认阈值 = %d, want 60000 (DG-2: 1M 窗口下 20000 太早, 触发全量仅占窗口 4.0%%)",
+			cfg.CompactTokenThreshold)
+	}
+	if cfg.CompactTriggerPercent != 70 {
+		t.Errorf("默认触发百分比 = %d, want 70 (主人原话: 注意力少于 30%% 就动作)", cfg.CompactTriggerPercent)
+	}
+	if cfg.CompactTargetPercent != 50 {
+		t.Errorf("默认目标百分比 = %d, want 50 (压一次就到位)", cfg.CompactTargetPercent)
+	}
+	if cfg.CompactMinTurns != 10 {
+		t.Errorf("默认冷却 = %d, want 10 (防前缀频繁变)", cfg.CompactMinTurns)
+	}
+	if cfg.CompactTargetPercent >= cfg.CompactTriggerPercent {
+		t.Errorf("默认配置自相矛盾: 目标 %d >= 触发 %d", cfg.CompactTargetPercent, cfg.CompactTriggerPercent)
 	}
 }

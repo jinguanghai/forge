@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -178,6 +179,59 @@ func TestTrimTurnMessagesIfNeeded_OverLimit(t *testing.T) {
 	}
 	if len(got) > maxTurnMessages {
 		t.Errorf("裁剪后不应超过阈值 %d, 实际 %d", maxTurnMessages, len(got))
+	}
+	if got[0].Content != "固定头" {
+		t.Errorf("messages[0](固定头)必须保留, 实际 %q", got[0].Content)
+	}
+}
+
+// TestTrimTurnMessagesIfNeeded_OneShotToLowWater: 触发裁剪必须一次裁到低水位。
+//
+// 这是 20261013 断裂事故的判据 (54 次全量重算 / 986 万 miss tokens / 9.86 元)。
+// 若裁成"刚好压回阈值", 每轮都会再触发 → 每轮断链一次 → 全量 miss (成本 ×50)。
+// 故断言裁后条数 <= trimTurnLowWater, 而不是 <= maxTurnMessages。
+func TestTrimTurnMessagesIfNeeded_OneShotToLowWater(t *testing.T) {
+	msgs := []ChatMessage{{Role: "system", Content: "固定头"}}
+	for i := 0; len(msgs) <= maxTurnMessages+10; i++ {
+		id := fmt.Sprintf("call_%d", i)
+		msgs = append(msgs,
+			ChatMessage{Role: "assistant", ToolCalls: []ToolCall{{ID: id}}},
+			ChatMessage{Role: "tool", ToolCallID: id, Content: "结果"},
+		)
+	}
+	got := trimTurnMessagesIfNeeded(msgs)
+	if len(got) > trimTurnLowWater {
+		t.Fatalf("必须一次裁到低水位 %d, 实际 %d (每轮裁一点 = 每轮断链)",
+			trimTurnLowWater, len(got))
+	}
+	if got[0].Content != "固定头" {
+		t.Errorf("messages[0](固定头)必须保留, 实际 %q", got[0].Content)
+	}
+}
+
+// TestTrimTurnMessagesIfNeeded_TokenBudget: 条数未超但 token 超预算时也要裁。
+//
+// 条数与成本脱钩: 少数条巨消息同样撑爆窗口。构造 3 条各 25 万字符的消息,
+// 条数 (7) 远小于 maxTurnMessages, 但估算 token 超 maxTurnTokens。
+func TestTrimTurnMessagesIfNeeded_TokenBudget(t *testing.T) {
+	huge := strings.Repeat("x", maxTurnTokens/2+1)
+	msgs := []ChatMessage{{Role: "system", Content: "固定头"}}
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("big_%d", i)
+		msgs = append(msgs,
+			ChatMessage{Role: "assistant", ToolCalls: []ToolCall{{ID: id}}},
+			ChatMessage{Role: "tool", ToolCallID: id, Content: huge},
+		)
+	}
+	if len(msgs) > maxTurnMessages {
+		t.Fatalf("用例前提: 条数 %d 不应超 %d", len(msgs), maxTurnMessages)
+	}
+	got := trimTurnMessagesIfNeeded(msgs)
+	if len(got) >= len(msgs) {
+		t.Fatalf("token 超预算应裁剪, 原 %d 条 → 实际 %d 条", len(msgs), len(got))
+	}
+	if est := estimateTokens(got); est > maxTurnTokens {
+		t.Errorf("裁剪后 token 仍超预算: %d > %d", est, maxTurnTokens)
 	}
 	if got[0].Content != "固定头" {
 		t.Errorf("messages[0](固定头)必须保留, 实际 %q", got[0].Content)

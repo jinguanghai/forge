@@ -88,7 +88,7 @@ func TestQualityAlertBadLines(t *testing.T) {
 
 // 真实工作目录冒烟: 读得到就解析, 读不到不 panic。
 func TestQualityAlertsRealWorkdirSmoke(t *testing.T) {
-	as := readQualityAlerts(`D:\forge`, 24*time.Hour)
+	as := readQualityAlerts(testRoot(t), 24*time.Hour)
 	t.Logf("真实工作目录告警 %d 条", len(as))
 	for _, a := range as {
 		t.Logf("  [%s] %s", a.Sev, a.Msg)
@@ -218,19 +218,24 @@ func TestAlertSinkResolvedKeyContract(t *testing.T) {
 	}
 }
 
-// 接线哨兵: 两个巡检脚本必须把恢复语义接到共享实现上 ——
+// 接线哨兵: 全部巡检脚本必须把恢复语义接到共享实现上 ——
+// (20261013: 原为「两个脚本」, cache_guard.py 长期不在清单里 = 判据覆盖面漏登记)
 // 判据是「调用点存在」, 不是「文件里有这段文字」(模型声称/提交信息都不算证据)。
 // 同时钉住 prefixes 参数: 漏传它, 流驱动(历史缺口自愈)静默失效, 而单测全绿。
-func TestAlertSinkWiredBothScripts(t *testing.T) {
+func TestAlertSinkWiredAllScripts(t *testing.T) {
 	cases := []struct {
 		file   string
 		prefix string
 	}{
-		{"forge_watchdog.py", "prefixes=WATCH_PREFIXES"},
-		{"fractal_check.py", "prefixes=('fractal_',)"},
+		{filepath.Join("defense_system", "forge_watchdog.py"), "prefixes=WATCH_PREFIXES"},
+		{filepath.Join("defense_system", "fractal_check.py"), "prefixes=('fractal_',)"},
+		// cache_guard.py (20261013 接入): 此前不在这份清单里 —— 判据覆盖面漏登记 =
+		// 那条臂根本没被测到, 它的「resolved 只写自己 state」的缺口因此长期无人发现。
+		// 它在仓库根目录 (不在 defense_system/), 故路径写全。
+		{"cache_guard.py", "prefixes=CACHE_PREFIXES"},
 	}
 	for _, c := range cases {
-		raw, err := os.ReadFile(filepath.Join("defense_system", c.file))
+		raw, err := os.ReadFile(c.file)
 		if err != nil {
 			t.Fatalf("读 %s 失败: %v", c.file, err)
 		}
@@ -248,5 +253,29 @@ func TestAlertSinkWiredBothScripts(t *testing.T) {
 		if strings.Contains(src, "open(ALERTS, 'a'") {
 			t.Fatalf("%s 又自己写告警流了 —— 两套实现必然漂移", c.file)
 		}
+	}
+}
+
+// 同秒「报 + 恢复」: 消费端必须看到恢复 (>= 语义, 与 alert_sink.py 同源)。
+// 缺陷回归 (20261012): 原实现用严格大于, 同秒时保留先出现的「报」→ 恢复水位
+// 被丢弃, 告警撤不下来; 而 Python 侧读同一份文件判为已恢复 = 同一份数据两个结论。
+func TestQualityAlertSameSecondResolveWins(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Now().Format(time.RFC3339) // 两条同秒
+	writeAlerts(t, dir,
+		`{"ts":"`+ts+`","sev":"warn","metric":"anchor_exempt","key":"daily","value":3,"threshold":3,"msg":"豁免超线"}`,
+		`{"ts":"`+ts+`","sev":"info","resolved":true,"metric":"anchor_exempt","key":"daily","msg":"已恢复"}`,
+	)
+	if as := readQualityAlerts(dir, 24*time.Hour); len(as) != 0 {
+		t.Fatalf("同秒恢复未生效 (告警撤不下来): %+v", as)
+	}
+	// 反向: 同秒内先恢复后复发 -> 必须重新报警 (顺序敏感, 不是「有 resolved 就永久压制」)
+	dir2 := t.TempDir()
+	writeAlerts(t, dir2,
+		`{"ts":"`+ts+`","sev":"info","resolved":true,"metric":"anchor_exempt","key":"daily","msg":"已恢复"}`,
+		`{"ts":"`+ts+`","sev":"warn","metric":"anchor_exempt","key":"daily","value":4,"threshold":3,"msg":"复发"}`,
+	)
+	if as := readQualityAlerts(dir2, 24*time.Hour); len(as) != 1 {
+		t.Fatalf("同秒复发应重新报警, 得 %d 条: %+v", len(as), as)
 	}
 }

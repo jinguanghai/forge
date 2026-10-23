@@ -9,6 +9,8 @@ package main
 //   V4 接线     —— Build 里拒绝必须发生在 retryGate 之前(只报不拦 = 软约束)
 //   V5 出路     —— 拒绝文本必须含出口工具用法与回滚开关(拒绝必须自带出路)
 //   V6 端到端   —— 走 Build 入口: 旁路版本必拒且不执行, 合规版本必放行(防误伤)
+//   V7 回滚通道 —— rollback.cmd 恢复 memory.json 前必须过留痕校验(T29-C), 且校验
+//                  必须在 copy 之前(顺序反了=判据形同虚设)
 //
 // 变异自检(判据的判据): 删掉 memory_guard.go 的拒绝分支, V1/V6 必报红;
 // 删掉 Build 里的接线, V4 必报红; 清空 memoryGuardFixHints, V2 必报红。
@@ -131,8 +133,34 @@ func TestMemoryGuard_TextHasWayOut(t *testing.T) {
 
 // TestMemoryGuard_WiredInBuild V4: 接线必须前置于执行(只报不拦 = 软约束)。
 // 用 AST 扫描而非字符串匹配 —— 注释里提及不算接线。
+// TestMemoryGuard_WiredInBuild 三段接线断言 (20261017 T35 P1 拆解: 圈复杂度 32 > 30,
+// 把三段各自的分支下沉为 mgBuildGatePositions / mgFuncCalls —— 断言内容逐字保留)。
 func TestMemoryGuard_WiredInBuild(t *testing.T) {
 	fset := token.NewFileSet()
+	guardPos, retryPos := mgBuildGatePositions(t, fset)
+	if guardPos == 0 {
+		t.Fatal("Build 未接线 preflightDeny —— 判据只在 /memhealth 显示 = 软约束")
+	}
+	if retryPos == 0 {
+		t.Fatal("找不到 retryGate 调用点 (接线顺序判据失去参照)")
+	}
+	if guardPos > retryPos {
+		t.Error("记忆护栏必须前置于执行: 拒绝要发生在 retryGate 之前")
+	}
+	// 第二段: 入口必须收拢记忆臂 (preflight.go)
+	if !mgFuncCalls(t, fset, "preflight.go", "preflightDeny", "memoryGuardDeny", true) {
+		t.Error("preflightDeny 未收拢 memoryGuardDeny —— 入口漏臂(判据仍在 /memhealth 显示)")
+	}
+	// 第三段: 执行臂内部必须真的调 checkMemoryGuard (接线不能被换成空壳)
+	if !mgFuncCalls(t, fset, "memory_guard.go", "memoryGuardDeny", "checkMemoryGuard", false) {
+		t.Error("memoryGuardDeny 未调用 checkMemoryGuard —— 执行臂被换成空壳")
+	}
+}
+
+// mgBuildGatePositions 在 forge.go 的 (*Forge).Build 里取 preflightDeny / retryGate
+// 的首次调用位置 (0 = 未出现)。
+func mgBuildGatePositions(t *testing.T, fset *token.FileSet) (guardPos, retryPos token.Pos) {
+	t.Helper()
 	af, err := parser.ParseFile(fset, "forge.go", nil, parser.SkipObjectResolution)
 	if err != nil {
 		t.Fatalf("解析 forge.go 失败: %v", err)
@@ -146,81 +174,74 @@ func TestMemoryGuard_WiredInBuild(t *testing.T) {
 	if buildFn == nil {
 		t.Fatal("forge.go 里找不到 (*Forge).Build")
 	}
-	var guardPos, retryPos token.Pos
 	ast.Inspect(buildFn, func(n ast.Node) bool {
-		ce, ok := n.(*ast.CallExpr)
+		name, pos, ok := mgMethodCall(n)
 		if !ok {
 			return true
 		}
-		if se, ok := ce.Fun.(*ast.SelectorExpr); ok {
-			if se.Sel.Name == "preflightDeny" && guardPos == 0 {
-				guardPos = ce.Pos()
-			}
-			if se.Sel.Name == "retryGate" && retryPos == 0 {
-				retryPos = ce.Pos()
-			}
+		if name == "preflightDeny" && guardPos == 0 {
+			guardPos = pos
+		}
+		if name == "retryGate" && retryPos == 0 {
+			retryPos = pos
 		}
 		return true
 	})
-	if guardPos == 0 {
-		t.Fatal("Build 未接线 preflightDeny —— 判据只在 /memhealth 显示 = 软约束")
+	return guardPos, retryPos
+}
+
+// mgMethodCall 若节点是 x.f(...) 形式的方法调用, 返回方法名与调用位置。
+func mgMethodCall(n ast.Node) (string, token.Pos, bool) {
+	ce, ok := n.(*ast.CallExpr)
+	if !ok {
+		return "", 0, false
 	}
-	if retryPos == 0 {
-		t.Fatal("找不到 retryGate 调用点 (接线顺序判据失去参照)")
+	se, ok := ce.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "", 0, false
 	}
-	if guardPos > retryPos {
-		t.Error("记忆护栏必须前置于执行: 拒绝要发生在 retryGate 之前")
-	}
-	// 第二段: 入口必须收拢记忆臂 (preflight.go)
-	af2, err := parser.ParseFile(fset, "preflight.go", nil, parser.SkipObjectResolution)
+	return se.Sel.Name, ce.Pos(), true
+}
+
+// mgFuncCalls 判断 file 中名为 fn 的顶层函数体内是否调用了 callee。
+// method=true 认 x.callee(...) 方法调用形态; false 只认裸标识符 callee(...)。
+// 两种形态必须分开认: preflight.go 里是 f.memoryGuardDeny(...), memory_guard.go 里是
+// checkMemoryGuard(...) —— 混用会让其中一段变成「任何同名方法都算」的弱判据
+// (20261017 拆解时实测: 只用裸标识符形态, 第二段当场假红)。
+func mgFuncCalls(t *testing.T, fset *token.FileSet, file, fn, callee string, method bool) bool {
+	t.Helper()
+	af, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
 	if err != nil {
-		t.Fatalf("解析 preflight.go 失败: %v", err)
+		t.Fatalf("解析 %s 失败: %v", file, err)
 	}
-	entryCallsArm := false
-	for _, d := range af2.Decls {
+	found := false
+	for _, d := range af.Decls {
 		fd, ok := d.(*ast.FuncDecl)
-		if !ok {
+		if !ok || fd.Name.Name != fn {
 			continue
 		}
 		ast.Inspect(fd, func(n ast.Node) bool {
-			ce, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			if se, ok := ce.Fun.(*ast.SelectorExpr); ok && se.Sel.Name == "memoryGuardDeny" {
-				if fd.Name.Name == "preflightDeny" {
-					entryCallsArm = true
-				}
+			if mgCallMatches(n, callee, method) {
+				found = true
 			}
 			return true
 		})
 	}
-	if !entryCallsArm {
-		t.Error("preflightDeny 未收拢 memoryGuardDeny —— 入口漏臂(判据仍在 /memhealth 显示)")
+	return found
+}
+
+// mgCallMatches 判断节点是否为目标调用形态 (裸标识符 / 方法名)。
+func mgCallMatches(n ast.Node, callee string, method bool) bool {
+	ce, ok := n.(*ast.CallExpr)
+	if !ok {
+		return false
 	}
-	// 第三段: 执行臂内部必须真的调 checkMemoryGuard (接线不能被换成空壳)
-	af3, err := parser.ParseFile(fset, "memory_guard.go", nil, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatalf("解析 memory_guard.go 失败: %v", err)
+	if method {
+		name, _, ok := mgMethodCall(ce)
+		return ok && name == callee
 	}
-	armCallsCheck := false
-	for _, d := range af3.Decls {
-		fd, ok := d.(*ast.FuncDecl)
-		if !ok || fd.Name.Name != "memoryGuardDeny" {
-			continue
-		}
-		ast.Inspect(fd, func(n ast.Node) bool {
-			if ce, ok := n.(*ast.CallExpr); ok {
-				if id, ok := ce.Fun.(*ast.Ident); ok && id.Name == "checkMemoryGuard" {
-					armCallsCheck = true
-				}
-			}
-			return true
-		})
-	}
-	if !armCallsCheck {
-		t.Error("memoryGuardDeny 未调用 checkMemoryGuard —— 执行臂被换成空壳")
-	}
+	id, ok := ce.Fun.(*ast.Ident)
+	return ok && id.Name == callee
 }
 
 // TestMemoryGuard_BuildRejectsBypassEndToEnd V6 反例: 旁路版本必拒, 且代码不得执行。
@@ -272,5 +293,31 @@ func TestMemoryGuard_BuildSwitchOff(t *testing.T) {
 	}
 	if !strings.Contains(out, "ok-switch-off") {
 		t.Errorf("代码未被执行:\n%s", out)
+	}
+}
+
+// V7 回滚通道 —— rollback.cmd 恢复 memory.json 前必须过留痕校验 (T29-C)。
+// 为什么必须钉住: 批处理没有编译期保护, 校验段被摘掉零报错, 而它正是把
+// 「旁路写入产物」变回「当前记忆」的唯一入口 —— gate 层的 memory_guard 拦不住
+// 回滚本身 (回滚在 gate 之外), 判据只能在入口。
+func TestMemoryGuard_RollbackCmdVerifiesTrail(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(testRoot(t), "rollback.cmd"))
+	if err != nil {
+		t.Skip("无 rollback.cmd (非主仓库环境), 跳过")
+	}
+	s := string(raw)
+	for _, need := range []string{"memory_write.py", "verify", "--file", ":mem_reject", "FORGE_MEMORY_GUARD=0"} {
+		if !strings.Contains(s, need) {
+			t.Errorf("rollback.cmd 缺 %q —— 记忆恢复的留痕前置校验被摘掉了", need)
+		}
+	}
+	// 顺序也是判据: 校验必须在 copy memory.json 之前 (在其后 = 形同虚设)
+	vi := strings.Index(s, "memory_write.py")
+	cp := strings.Index(s, `copy /Y "%CP_DIR%\memory.json"`)
+	if vi < 0 || cp < 0 {
+		t.Fatalf("定位失败: verify=%d copy=%d", vi, cp)
+	}
+	if vi > cp {
+		t.Fatalf("留痕校验(%d) 出现在 copy memory.json(%d) 之后 —— 顺序反了, 判据无效", vi, cp)
 	}
 }

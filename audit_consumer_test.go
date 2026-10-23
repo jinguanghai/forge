@@ -72,6 +72,7 @@ func TestQualityReportConsumesSinkEvents(t *testing.T) {
 		`{"event":"nosword_expr","ts":"` + ts + `","enabled":true,"marks":4,"rejected":1}`,
 		`{"event":"compact","ts":"` + ts + `","compressed_msgs":3,"summary_len":10,"before_tokens":100,"after_tokens":60,"saved_tokens":40,"saved_pct":"40.0%"}`,
 		`{"event":"compact_failed","ts":"` + ts + `","err":"boom","est_tokens":100}`,
+		`{"event":"compact_undershoot","ts":"` + ts + `","conv_after_tokens":120,"target_tokens":100,"overshoot_tokens":20,"compressed_msgs":3}`,
 	}
 	dir := t.TempDir()
 	audit := filepath.Join(dir, "audit.jsonl")
@@ -94,6 +95,7 @@ func TestQualityReportConsumesSinkEvents(t *testing.T) {
 		"无剑表达式: 标记 4 次", // nosword_expr
 		"上下文压缩: 成功 1 次", // compact
 		"失败 1 次",        // compact_failed
+		"压缩未达标: 1 次",    // compact_undershoot
 	}
 	for _, w := range wants {
 		if !strings.Contains(s, w) {

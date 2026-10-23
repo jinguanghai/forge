@@ -50,14 +50,6 @@ func TestLLMClient_Lifecycle(t *testing.T) {
 	c.Shutdown() // 不得 panic
 }
 
-// withMiniMaxWindow 注入窗口状态, 测试结束自动还原。
-func withMiniMaxWindow(t *testing.T, open bool) {
-	t.Helper()
-	old := minimaxWindowNow
-	minimaxWindowNow = func() bool { return open }
-	t.Cleanup(func() { minimaxWindowNow = old })
-}
-
 func miniMaxReadyConfig() *Config {
 	return &Config{
 		APIKey: "ds-key", BaseURL: "https://ds.example", Model: "deepseek-flash",
@@ -65,49 +57,65 @@ func miniMaxReadyConfig() *Config {
 	}
 }
 
-// 识图必须强制 DeepSeek —— 路由降级会丢识图能力。
-func TestLLMClient_ResolveEndpoint_VisionForcesDeepSeek(t *testing.T) {
-	withMiniMaxWindow(t, true)
+// 主路径恒 DeepSeek —— 即使 MiniMax 三字段齐备、即使处于高峰时段。
+// 核心判据 (20261011 T31): 谁把"高峰切 MiniMax"加回来, 本用例必须报红。
+func TestLLMClient_ResolveEndpoint_AlwaysDeepSeek(t *testing.T) {
+	old := peakHourNow
+	peakHourNow = func() bool { return true } // 高峰时段
+	t.Cleanup(func() { peakHourNow = old })
+
 	c := NewLLMClient(miniMaxReadyConfig())
-	ep := c.resolveEndpoint("", []ChatMessage{{Role: "user", Images: []ImagePart{{URL: "x"}}}})
-	if ep.Provider != EndpointDeepSeek {
-		t.Fatalf("识图应强制 DeepSeek, 实际 %s", ep.Provider)
+	cases := []struct {
+		name string
+		msgs []ChatMessage
+	}{
+		{"纯文本", []ChatMessage{{Role: "user", Content: "hi"}}},
+		{"识图", []ChatMessage{{Role: "user", Images: []ImagePart{{URL: "x"}}}}},
+		{"空消息", nil},
 	}
-	if ep.APIKey != "ds-key" || ep.Model != "deepseek-flash" {
-		t.Fatalf("端点参数不对: %+v", ep)
+	for _, tc := range cases {
+		ep := c.resolveEndpoint("", tc.msgs)
+		if ep.Provider != EndpointDeepSeek {
+			t.Fatalf("[%s] 主路径必须 DeepSeek (高峰也不切厂商), 实际 %s", tc.name, ep.Provider)
+		}
+		if ep.APIKey != "ds-key" || ep.BaseURL != "https://ds.example" {
+			t.Fatalf("[%s] 端点参数不对: %+v", tc.name, ep)
+		}
 	}
 }
 
-func TestLLMClient_ResolveEndpoint_MiniMaxWhenWindowOpen(t *testing.T) {
-	withMiniMaxWindow(t, true)
+// ── 故障兜底 (failoverEndpoint): MiniMax 唯一登场路径 ──
+
+func TestLLMClient_FailoverEndpoint_Ready(t *testing.T) {
 	c := NewLLMClient(miniMaxReadyConfig())
-	ep := c.resolveEndpoint("", []ChatMessage{{Role: "user", Content: "hi"}})
-	if ep.Provider != EndpointMiniMax || ep.APIKey != "mm-key" || ep.Model != "minimax-m3" {
-		t.Fatalf("窗口开启且三字段齐备应走 MiniMax: %+v", ep)
+	ep, ok := c.failoverEndpoint("deepseek-flash", []ChatMessage{{Role: "user", Content: "hi"}})
+	if !ok {
+		t.Fatal("三字段齐备且非识图, 应可兜底")
+	}
+	if ep.Provider != EndpointMiniMax || ep.APIKey != "mm-key" ||
+		ep.BaseURL != "https://mm.example" || ep.Model != "minimax-m3" {
+		t.Fatalf("兜底端点字段错: %+v", ep)
 	}
 }
 
-func TestLLMClient_ResolveEndpoint_WindowClosedUsesDeepSeek(t *testing.T) {
-	withMiniMaxWindow(t, false)
-	c := NewLLMClient(miniMaxReadyConfig())
-	ep := c.resolveEndpoint("", []ChatMessage{{Role: "user", Content: "hi"}})
-	if ep.Provider != EndpointDeepSeek {
-		t.Fatalf("窗口关闭应回 DeepSeek: %+v", ep)
-	}
-}
-
-func TestLLMClient_ResolveEndpoint_IncompleteMiniMaxConfig(t *testing.T) {
-	withMiniMaxWindow(t, true)
+func TestLLMClient_FailoverEndpoint_NotConfigured(t *testing.T) {
 	cfg := miniMaxReadyConfig()
-	cfg.MiniMaxModel = "" // 三字段缺一 → 不激活
+	cfg.MiniMaxModel = "" // 三字段缺一
 	c := NewLLMClient(cfg)
-	if ep := c.resolveEndpoint("", nil); ep.Provider != EndpointDeepSeek {
-		t.Fatalf("三字段不齐不应走 MiniMax: %+v", ep)
+	if _, ok := c.failoverEndpoint("", nil); ok {
+		t.Fatal("三字段不齐不得兜底 (半配置会打到错误端点)")
+	}
+}
+
+func TestLLMClient_FailoverEndpoint_VisionRefused(t *testing.T) {
+	c := NewLLMClient(miniMaxReadyConfig())
+	msgs := []ChatMessage{{Role: "user", Images: []ImagePart{{URL: "x"}}}}
+	if _, ok := c.failoverEndpoint("", msgs); ok {
+		t.Fatal("识图不得兜底到 MiniMax (不识图, 降级会丢能力)")
 	}
 }
 
 func TestLLMClient_ResolveEndpoint_PreferModelWins(t *testing.T) {
-	withMiniMaxWindow(t, false)
 	c := NewLLMClient(miniMaxReadyConfig())
 	if ep := c.resolveEndpoint("deepseek-v4-pro", nil); ep.Model != "deepseek-v4-pro" {
 		t.Fatalf("preferModel 非空应优先: %+v", ep)

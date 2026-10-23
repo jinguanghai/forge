@@ -248,3 +248,101 @@ func TestBenchRotationSim(t *testing.T) {
 	}
 	t.Logf("沙箱输出:\n%s", out)
 }
+
+// ── T39 (20261010): 生成端「落盘后立即轮转」的接线 ──────────────────────────
+
+// rotateBenchReports 生成端落盘后的轮转接线。
+//
+// 缺陷 (T39 实测): 判据 (本文件 TestBenchReportsWithinLimit) 实时读目录,
+// 而处置 (bench_report_check.py --apply) 由 hourly 按小时跑 —— 日报 19:39 生成
+// 把份数顶到 15, 下一次轮转尚未跑, 这个窗口期内任何全量测试必红。
+// 根因不是「阈值不对」, 是判据与处置的时间错位: 判据即时, 处置小时级。
+//
+// 为什么是「落盘后」而不是「落盘前」(TODO T39 倾向①的原文是"先轮转再落盘"):
+//
+//	--apply 的语义是「把份数压回上限」, 不是「压到上限-1」。
+//	先轮转: 15 -> 14, 再落盘 -> 又回到 15, 判据照红 —— 顺序反了治不了病。
+//	落盘后: 15 -> 14, 判据读时恒 <= 上限。
+//
+// 为什么 Go 只做接线、不自己实现轮转: 轮转逻辑与阈值只有一份
+// (watchlist.BENCH_LIMITS + bench_report_apply.py); 复制一份必然漂移,
+// 漂移即「清理阈值与实际不符」。
+//
+// 副作用: 会移动 bench/ 最旧报告到 _archive/ (与 hourly 同一动作: 幂等 /
+// 只移不删 / 可 --rollback)。TestBench 本来就写真实 bench/ 目录 (报告是真实
+// 产物而非测试夹具), 故此处不做沙箱隔离; 沙箱端到端由 TestBenchRotationSim 覆盖。
+//
+// 失败不 fail 测试: 处置是 best-effort, 判据仍独立报红 —— 处置失败不得把
+// 判据一起带绿 (检测与处置分权)。
+func rotateBenchReports(t *testing.T, why string) {
+	t.Helper()
+	cmd := exec.Command(guardGatePython(), benchReportRel, "--apply")
+	cmd.Env = pythonUTF8Env()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("[T39] bench 轮转(%s)未成功, 交 hourly/判据处置: %v\n%s", why, err, out)
+		return
+	}
+	t.Logf("[T39] bench 轮转(%s): %s", why, strings.TrimSpace(string(out)))
+}
+
+// TestBenchRotationWiredToGenerators 钉住「生成端真的会轮转」(T39)。
+//
+//	① 行为: 接线可跑通, 且跑完份数 <= 上限 / 违规 0 (幂等: 未超限时不动 ——
+//	   若它反而制造违规, 这条会红)
+//	② 接线: 两个生成端落盘段都调用它, 剥注释后断言 (注释里提一句不算接线,
+//	   这是实测过的漏检形态)
+//
+// 为什么 ② 只能读源码文本: 「调用点存在」是包级接线属性, 轮转幂等时没有
+// 任何运行时可观测信号 (跑与不跑输出相同) —— 无信号可判, 只能静态钉住。
+func TestBenchRotationWiredToGenerators(t *testing.T) {
+	rotateBenchReports(t, "接线自检")
+	f := benchFactsOf(t)
+	if len(f.Violations) != 0 {
+		t.Errorf("轮转后仍有违规: %+v", f.Violations)
+	}
+	for g, n := range f.Groups {
+		if n > f.MaxCount {
+			t.Errorf("轮转后 %s 仍超上限: %d > %d", g, n, f.MaxCount)
+		}
+	}
+	for _, rel := range []string{"bench_test.go", "bench_semantics_test.go"} {
+		src, err := os.ReadFile(rel)
+		if err != nil {
+			t.Fatalf("读 %s 失败 (fail-closed): %v", rel, err)
+		}
+		if !strings.Contains(stripComments(string(src)), "rotateBenchReports(") {
+			t.Errorf("%s 落盘段未调用 rotateBenchReports —— 生成端不轮转, 判据与处置的时间错位会复发", rel)
+		}
+	}
+}
+
+// ── 语义基准调度臂的「判据的判据」(20261012) ────────────────────────────────
+
+// benchSemanticsCheckRel 是 gate 语义基准的调度臂 (hourly 任务 semantics)。
+const benchSemanticsCheckRel = "defense_system/bench_semantics_check.py"
+
+// TestBenchSemanticsCheckSelftest 钉住调度臂的失败项解析口径。
+//
+// 缺陷 (20261012 实测): bench_semantics_check.py 把 go test -v 输出里**所有**
+// `bench_semantics_test.go:` 前缀且含 `]` 的行当失败项 —— 而 -v 下 t.Logf 与
+// t.Errorf 的行格式完全相同, 于是【通过测试的普通日志】被展示成失败项:
+// hourly 每次打印「失败项: [T39] bench 轮转(TestBenchSemantics): 基准报告:
+// 25 份 / 38.2 KB」, 而同一份输出里 rc=0 且 41/41 通过 —— 长期假红 = 狼来了,
+// 真失败会被淹掉 (检测层正确, 展示层说谎)。修法=按 `=== RUN` / `--- FAIL`
+// 分块归属, 只有以 `--- FAIL` 收尾的块内的行才算失败行。
+//
+// 为什么要 Go 侧再钉一道: 口径的判据 (Python --selftest) 无人调用即
+// 「备而未用」—— 接线/归属是包级属性, 必须进 go test 回归才有人跑。
+func TestBenchSemanticsCheckSelftest(t *testing.T) {
+	t.Parallel()
+	cmd := exec.Command(guardGatePython(), benchSemanticsCheckRel, "--selftest")
+	cmd.Env = pythonUTF8Env()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("--selftest 失败 (失败项解析口径不符): %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "0 失败") {
+		t.Errorf("selftest 未报「0 失败」: %s", out)
+	}
+}

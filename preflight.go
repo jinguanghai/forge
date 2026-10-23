@@ -6,9 +6,15 @@ package main
 // Build 152 > 150, forge.go 511 > 500)。每加一条前置拒绝就吃一次预算,
 // 而抬水位是掩盖不是解决(实测教训: 水位必须跟随真实债务下降)。
 //
-// 本文件收拢两类拒绝, 共同点: 判据确定性(命中即拒) + 拒绝自带修复路径。
+// 本文件收拢三类拒绝, 共同点: 判据确定性(命中即拒) + 拒绝自带修复路径。
 //   · GitHub 出口红线 —— 第三方镜像绝不可接触登录态/私有内容/凭据
 //   · 记忆写入完整性 —— memory.json 变化必须留痕(否则跳过体检与审计)
+//   · 记忆预算健康 —— 常驻超预算/档案死引用 = 记忆系统自身不健康 (T53, 20261014)
+//
+// T53 教训: 第三条臂的判据 (memory_budget.go) 早已写好且测试全绿, 但生产侧
+// 零调用 -> 链接器 DCE 整棵剔除 (go tool nm 里 memoryBudget* 符号 0 个) ->
+// 那次源码改动对 exe 零行为影响。「写了、测了、但不跑」是判据的第三种形态,
+// 比「没判据」更隐蔽(测试全绿给人已经守住的错觉), 由 judgement_reach_test.go 兜。
 // 降级臂保留: GitHub 跨行共现只记审计不拦 —— 静态不可判定数据流, 误伤代价高于收益。
 //
 // 公理四: git=安全网(事后可还原) 与 gate=安全带(前置拦截) 是两层, 不可互相替代 ——
@@ -21,7 +27,10 @@ func (f *Forge) preflightDeny(code, lang string) (string, *ForgeGateResult, bool
 	if out, res, denied := f.netRedlineDeny(code, lang); denied {
 		return out, res, true
 	}
-	return f.memoryGuardDeny(code, lang)
+	if out, res, denied := f.memoryGuardDeny(code, lang); denied {
+		return out, res, true
+	}
+	return f.memoryBudgetDeny(code, lang)
 }
 
 // netRedlineDeny GitHub 红线执行臂。

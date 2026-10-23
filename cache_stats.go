@@ -31,6 +31,23 @@ type CacheStat struct {
 	Out        int    `json:"out,omitempty"`         // 输出(completion) tokens; 20261002 起记, 历史行缺此字段读为 0
 	SysHash    string `json:"sys_hash,omitempty"`    // system 前缀 SHA-256 前16位 (六西格玛守卫)
 	SysChanged bool   `json:"sys_changed,omitempty"` // 进程内 system 前缀发生过变化
+
+	// ── 请求形状埋点 (20261013) ──
+	// 旧行只有 hit/miss/out, 断裂只能靠「hit 恰等于固定头长度」反推, 属推测。
+	// 这些字段把断链点变成可直接读出的数据 (计算见 cache_reqshape.go)。
+	// 历史行缺这些字段, 读为 0 / 空 (LCP 读为 0 而非 -1, 分析脚本按 msgs>0 判有效)。
+	PID   int    `json:"pid,omitempty"`   // 进程 ID: 区分并发实例
+	Msgs  int    `json:"msgs,omitempty"`  // messages 条数
+	Chars int    `json:"chars,omitempty"` // 全部 content 的字符数
+	Est   int    `json:"est,omitempty"`   // 估算 tokens
+	LCP   int    `json:"lcp,omitempty"`   // 与上一次请求的公共前缀条数
+	Prev  int    `json:"prev,omitempty"`  // 上一次请求的条数
+	Pfx   string `json:"pfx,omitempty"`   // 前 4 条指纹 (role:sha8)
+
+	// Reason 是 Out 中属于思考(reasoning)的部分 (DeepSeek: completion_tokens
+	// 已含 reasoning, 此字段只做细分)。用于回答"输出成本里思考占多少" ——
+	// .env 默认 DEEPSEEK_REASONING_EFFORT=high, 每轮都烧, 但此前无度量。
+	Reason int `json:"reason,omitempty"`
 }
 
 var (
@@ -78,10 +95,16 @@ func cacheStatPathForWrite() string {
 // 完全无度量。零值跳过条件同步扩到 out: 有输出即有消耗, 不应被丢弃。
 // 边界: 上游仅在 usage 带 hit/miss 时调用本函数, 故 hit=miss=0 且 out>0 的
 // 请求(理论上的空 prompt)不会被记账 —— 属既有契约, 非本次引入。
-func recordCacheStat(model string, hit, miss, out int, sysHash string, sysChanged bool) {
+// reasonTokens 为可选参数 (思考 tokens): 不传视为 0, 保持既有调用点零改动。
+func recordCacheStat(model string, hit, miss, out int, sysHash string, sysChanged bool, reasonTokens ...int) {
+	reason := 0
+	if len(reasonTokens) > 0 {
+		reason = reasonTokens[0]
+	}
 	if hit <= 0 && miss <= 0 && out <= 0 && !sysChanged {
 		return
 	}
+	sh := getReqShape()
 	stat := CacheStat{
 		Time:       time.Now().Format(time.RFC3339),
 		Model:      model,
@@ -90,6 +113,14 @@ func recordCacheStat(model string, hit, miss, out int, sysHash string, sysChange
 		Out:        out,
 		SysHash:    sysHash,
 		SysChanged: sysChanged,
+		PID:        sh.PID,
+		Msgs:       sh.Msgs,
+		Chars:      sh.Chars,
+		Est:        sh.Est,
+		LCP:        sh.LCP,
+		Prev:       sh.Prev,
+		Pfx:        sh.Pfx,
+		Reason:     reason,
 	}
 	data, err := json.Marshal(stat)
 	if err != nil {

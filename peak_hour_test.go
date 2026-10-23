@@ -5,8 +5,8 @@ package main
 // 背景: isPeakHour 旧实现只判小时不判星期, 周末 9-12/14-18 误报"高峰×2":
 //   - pickModel 周末把 pro 门槛 0.6 抬到 0.8 → 中复杂度任务无谓降级到 flash
 //   - checkPeakHour 提示用户"躲高峰", 但周末并不涨价 → 误导
-// 而同文件的 isMiniMaxWindow 已判周末 → 两处时段定义自相矛盾。
-// 现两函数同源 (isMiniMaxWindow 复用 isPeakHourAt), 本测试把"同源"固化为死程序判定。
+// 判据现集中在 isPeakHourAt 一处 —— 20261011 撤销 MiniMax 时段窗口后,
+// "何时涨价" 只剩这一个定义, 原先的"两处同源"哨兵已无对象。
 
 import (
 	"testing"
@@ -37,21 +37,6 @@ func TestIsPeakHourAt_WeekdayWeekend(t *testing.T) {
 	for _, c := range cases {
 		if got := isPeakHourAt(c.t); got != c.want {
 			t.Errorf("[%s] %s -> want %v got %v", c.name, c.t.Format("2006-01-02 15:04 Mon"), c.want, got)
-		}
-	}
-}
-
-// 单一源哨兵: 任意时刻, "DeepSeek 是否涨价" 与 "是否切 MiniMax" 必须同真同假。
-// 两者判据曾各自漂移 (20260913), 本测试使其在结构上不可能再漂移。
-func TestPeakAndMiniMaxWindow_SameSource(t *testing.T) {
-	base := time.Date(2026, 8, 24, 0, 0, 0, 0, time.Local) // 周一
-	for d := 0; d < 14; d++ {
-		for h := 0; h < 24; h++ {
-			tt := base.AddDate(0, 0, d).Add(time.Duration(h) * time.Hour)
-			if isPeakHourAt(tt) != isMiniMaxWindow(tt) {
-				t.Fatalf("判据漂移: %s isPeakHourAt=%v isMiniMaxWindow=%v",
-					tt.Format("2006-01-02 15:04 Mon"), isPeakHourAt(tt), isMiniMaxWindow(tt))
-			}
 		}
 	}
 }

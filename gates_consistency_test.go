@@ -10,6 +10,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -130,14 +132,6 @@ func TestPeakHourEntry_MatchesPureFunc(t *testing.T) {
 	}
 }
 
-func TestMiniMaxWindowEntry_MatchesPureFunc(t *testing.T) {
-	if minimaxWindow() != isMiniMaxWindow(time.Now()) {
-		if minimaxWindow() != isMiniMaxWindow(time.Now()) {
-			t.Fatal("minimaxWindow() 与 isMiniMaxWindow(now) 不一致 (入口包装写错?)")
-		}
-	}
-}
-
 // 哨兵: tool schema 的 lang.enum 必须与唯一源 铸剑炉_GATES 完全一致 (20261002)
 //
 // 动机: enum 是给 LLM 的「邀请函」—— 列着就是在邀请模型用它, 漏项即该 gate 对
@@ -194,5 +188,107 @@ func TestForgeToolSchema_EnumMatchesGatesList(t *testing.T) {
 	// ④ 面数对齐 (兜底: 上面两条都过时长度必然相等, 保留作独立断言)
 	if len(got) != len(铸剑炉_GATES) {
 		t.Errorf("enum 面数 %d 与唯一源 %d 不一致", len(got), len(铸剑炉_GATES))
+	}
+}
+
+// 哨兵: tool schema 的 lang.description 不得复述 gate 规则 (20261013)
+//
+// 动机: description 是 gateRegistry 的手写副本, 已实测漂移 —— 它列 8 个 gate
+// (math/logic/regex/knowledge/tcm/browser/self/chain), 而注册表有 11 个
+// (缺 relation/task/media)。与上一条 enum 缺陷同型: 副本存在 → 必然漂。
+// gate 选用规则单点在 <gates_enabled> (由 describeGates 生成, 受 promptMapBudgetRunes
+// 预算管控); description 只保留 enum 无法表达的信息 (默认语言/自动检测/退役说明)。
+// 本哨兵钉住"副本不得复现"。
+func TestForgeToolSchema_LangDescriptionNoGateNames(t *testing.T) {
+	raw := ForgeToolSchema()
+	var doc struct {
+		Function struct {
+			Parameters struct {
+				Properties struct {
+					Lang struct {
+						Description string `json:"description"`
+					} `json:"lang"`
+				} `json:"properties"`
+			} `json:"parameters"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("ForgeToolSchema 非法 JSON: %v", err)
+	}
+	desc := doc.Function.Parameters.Properties.Lang.Description
+	if desc == "" {
+		t.Fatal("schema 缺 lang.description")
+	}
+	// 词边界匹配 (gate 名全为 ASCII 字母, 避免 self-check 这类子串误命中)
+	wordAt := func(s, w string) bool {
+		isWord := func(b byte) bool {
+			return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+		}
+		for i := 0; i+len(w) <= len(s); i++ {
+			if s[i:i+len(w)] != w {
+				continue
+			}
+			l, r := byte(' '), byte(' ')
+			if i > 0 {
+				l = s[i-1]
+			}
+			if i+len(w) < len(s) {
+				r = s[i+len(w)]
+			}
+			if !isWord(l) && !isWord(r) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, g := range gateNames() {
+		if wordAt(desc, g) {
+			t.Errorf("lang.description 复述了 gate %q —— 规则单点在 <gates_enabled>; "+
+				"此处副本已实测漂移 (描述列 8 个 vs 注册表 %d 个), 副本消失才不可能漂", g, len(gateNames()))
+		}
+	}
+	// 反向断言: 编译器名必须保留 (否则模型不知道默认执行体是什么)
+	for _, c := range []string{"python", "go", "node"} {
+		if !wordAt(desc, c) {
+			t.Errorf("lang.description 丢了编译器 %q 的说明 (enum 之外模型仍需知道默认执行体)", c)
+		}
+	}
+}
+
+// 哨兵: gate_registry.go 的注释里不得再出现 gate 名 (20261013)
+//
+// 动机: 原注释写"只注册自托管 gate(math/logic/regex/knowledge/tcm/browser/self/chain)"
+// —— 8 项手写快照, 实测已漂 (注册表 11 个)。与 lang.description 同型: 副本存在 → 必然漂。
+// 注释已改为"以下方 gateRegistry 为准"; 本哨兵钉住它不再复现。
+func TestGateRegistryComment_NoGateNameSnapshot(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller 失败, 无法定位源码目录")
+	}
+	path := filepath.Join(filepath.Dir(thisFile), "gate_registry.go")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读 %s 失败: %v", path, err)
+	}
+	text := string(raw)
+	// 探针自检: 扫到的是不是真源码 (路径错/内容退化时立即报红, 不静默全绿)
+	if !strings.Contains(text, "var gateRegistry") {
+		t.Fatalf("探针自检失败: %s 不含 var gateRegistry, 扫描目标可疑", path)
+	}
+	if len(gateNames()) == 0 {
+		t.Fatal("探针自检失败: gateNames() 为空, 判据退化")
+	}
+	for ln, line := range strings.Split(text, "\n") {
+		i := strings.Index(line, "//")
+		if i < 0 {
+			continue
+		}
+		comment := line[i:]
+		for _, g := range gateNames() {
+			if strings.Contains(comment, g) {
+				t.Errorf("gate_registry.go:%d 注释里出现 gate 名 %q —— 手写清单必漂; "+
+					"清单唯一源是 gateRegistry, 注释请勿另列", ln+1, g)
+			}
+		}
 	}
 }

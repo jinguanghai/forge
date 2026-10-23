@@ -58,6 +58,8 @@ func TestInjectEnvelope_NotSelfSniffed(t *testing.T) {
 		autoInjectEnvelope("算式求值校验", "【求值】「17*23 = 391」 「3/4 = 0.75」"),
 		verifyInterventionMsg("git log --oneline -5; [go vet .] (clean);"),
 		autoInjectEnvelope("完成态核验", "【证据先于声称】声称已提交 3 次"),
+		autoInjectEnvelope("工具截图识图", "工具结果包含图片文件, 已作为截图注入, 请结合截图进行分析:"),
+		autoInjectEnvelope("无进展干预", "⚠️ 循环拦截(第3次): 你已连续多轮执行相同/相似代码且输出无变化, 任务没有推进。"),
 	}
 	for i, c := range cases {
 		if n := len(nswEvaluate(c)); n != 0 {
@@ -123,6 +125,8 @@ func TestInjectEnvelope_WiredAtBothSites(t *testing.T) {
 	}{
 		{`autoInjectEnvelope("算式求值校验"`, 2, "无剑嗅探 + 表达式化拒绝权 两处都必须套信封 (缺失=反馈又被当成用户发言)"},
 		{`autoInjectEnvelope("完成态核验"`, 1, "虚报干预必须套信封 (缺失=干预又被当成用户发言)"},
+		{`autoInjectEnvelope("工具截图识图"`, 1, "工具截图识图注入必须套信封 (缺失=模型把程序注入的看图提示当成主人发言)"},
+		{`autoInjectEnvelope("无进展干预"`, 1, "无进展拦截注入必须套信封 (缺失=模型把死程序的循环拦截当成主人指令)"},
 	}
 	for _, c := range checks {
 		if got := strings.Count(all, c.kind); got != c.want {

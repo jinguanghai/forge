@@ -74,10 +74,18 @@ func verifyInterventionMsg(verif string) string {
 // maxVerifyStrikes 虚报强干预上限: 最多强制重答 1 次, 防止"模型持续虚报→无限循环"。
 const maxVerifyStrikes = 1
 
-func runVerification() string {
+// runVerification 采集完成态证据 (git 状态 + go vet), 供虚报检测注入真实状态。
+//
+// workDir 绑定子进程工作目录: 这三条命令依赖仓库上下文 (git 仓库 / go.mod),
+// 若继承进程 cwd (启动目录), 从仓库外启动时会全数失败, 其错误输出会被当作
+// "模型虚报" 的反证注入 -> 反过来诱导模型去修正并不存在的错误 (20261007 实测)。
+// 空值 = 继承进程 cwd (生产调用方须显式传仓库根)。
+func runVerification(workDir string) string {
 	var b bytes.Buffer
 	runCmd := func(name string, args ...string) {
-		out, err := exec.Command(name, args...).Output()
+		cmd := exec.Command(name, args...)
+		cmd.Dir = workDir
+		out, err := cmd.Output()
 		if err != nil {
 			b.WriteString(fmt.Sprintf("[%s %s] %v; ", name, strings.Join(args, " "), err))
 			return

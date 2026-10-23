@@ -29,6 +29,9 @@ type AnchorAuditEntry struct {
 	Reason   string   `json:"reason,omitempty"`    // 备注 (missing_last_updated 等)
 	GuardOff bool     `json:"guard_off,omitempty"` // true=护栏关闭时写入 (留痕但不计配额)
 	Src      string   `json:"src,omitempty"`       // 写入路径: exempt=事后认领 (内容未变, 不计配额)
+	// Rejected=true 是「被配额拒绝」的留痕 (T29-B): 只记账, 不是一次写入, 故不占配额、
+	// 也不算豁免 —— 拒绝若被算成写入, 护栏会被自己的留痕顶穿。
+	Rejected bool `json:"rejected,omitempty"`
 }
 
 const anchorAuditFileName = "anchor_audit.jsonl"
@@ -136,6 +139,9 @@ func anchorAuditTodayStats(workDir string) (total, counted int, err error) {
 		if !strings.HasPrefix(e.Time, today) {
 			continue
 		}
+		if e.Rejected {
+			continue // 拒绝留痕只记账: 它不是一次写入, 不得挤占配额或污染豁免统计
+		}
 		total++
 		if !e.GuardOff && e.Src != anchorAuditSrcExempt {
 			counted++
@@ -169,6 +175,7 @@ func anchorGuardCheck(workDir string) error {
 		// 提示里的"今日已写"必须是实际改动量: 只报计配额数会让模型低估已付出的缓存成本
 		// (实测某日实际 14 次而计配额 1 次, 拦截文案却称"今日已写 1 次")。
 		total, _, _ := anchorAuditTodayStats(workDir)
+		anchorGuardRejectAudit(workDir, total, counted) // T29-B: 拒了必须有账
 		return fmt.Errorf("锚点写入护栏: 今日锚点改动 %d 次 (其中计配额 %d 次), 禁止第 %d 次 (缓存将重置, 未命中价是命中价 30 倍)。请合并改动到一次写入, 或设 FORGE_ANCHOR_GUARD=0 关闭护栏", total, counted, counted+1)
 	}
 	return nil
@@ -245,16 +252,10 @@ func anchorGuardAudit(workDir string, fields []string, reason string) {
 	if data, err := os.ReadFile(memoryFilePath(workDir)); err == nil {
 		entry.SysHash = sysHashPrefix(data)
 	}
-	line, err := json.Marshal(entry)
-	if err != nil {
-		return
-	}
-	f, err := os.OpenFile(anchorAuditPath(workDir), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	_, _ = f.WriteString(string(line) + "\n")
-	_ = f.Close()
+	appendAnchorAudit(workDir, entry)
+	// 豁免可见化 (T29-A): 摘要里的「今日豁免 N 次」过去只活在 /anchor 文本里,
+	// 现在同判据接告警出口 —— 启动横幅与 /health 也能看见。
+	syncAnchorExemptAlert(workDir)
 }
 
 // anchorAuditSummary 生成锚点改动摘要 (供 /anchor 命令与 /cache 归因)。

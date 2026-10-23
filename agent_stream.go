@@ -173,7 +173,7 @@ func (t *toolLoop) executeOneToolCall(tc ToolCall) error {
 	if len(toolImgs) > 0 && visionCapable(t.agent.cfg) {
 		imgMsg := ChatMessage{
 			Role:    "user",
-			Content: "工具结果包含图片文件, 已作为截图注入, 请结合截图进行分析:",
+			Content: autoInjectEnvelope("工具截图识图", "工具结果包含图片文件, 已作为截图注入, 请结合截图进行分析:"),
 			Images:  toolImgs,
 		}
 		*t.messages = append(*t.messages, imgMsg)

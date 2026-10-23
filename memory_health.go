@@ -28,6 +28,11 @@ func memHealthLint(data []byte) error {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return fmt.Errorf("写入前体检: JSON 解析失败: %v", err)
 	}
+	// 控制字符体检 (20261011): JSON 文本合法 != 内容合法 —— \f 是合法转义, 解码后是换页符。
+	if bad := memCtrlCharIssues(m, ""); len(bad) > 0 {
+		return fmt.Errorf("写入前体检: 含 %d 个非法控制字符 (只允许 \\n \\t): %s",
+			len(bad), strings.Join(bad[:min(3, len(bad))], "; "))
+	}
 	_, hasAxioms := m["axioms"]
 	_, hasGovernance := m["self_governance"]
 	if hasAxioms || hasGovernance {
@@ -38,6 +43,36 @@ func memHealthLint(data []byte) error {
 		}
 	}
 	return nil
+}
+
+// memCtrlCharIssues 递归扫 JSON 值里的控制字符 (除 \n \t 与 DEL), 返回人类可读条目。
+//
+// 为什么必须解码后查 (20261011 实测; 与 Python 侧 memory_write.py 的 ctrl_chars_in_obj
+// 同判据): 传参 JSON 里写盘符 + 反斜杠 + forge, 而 \f 是**合法 JSON 转义** → 解析成换页符 0x0C,
+// 路径落库成 "D:<FF>orge"。文本层完全合法 (转义序列只是两个 ASCII 字节), json.Valid
+// 拦不住 —— 只有解码后逐字符的判据能拦。fail-closed。
+func memCtrlCharIssues(v interface{}, path string) []string {
+	var bad []string
+	switch t := v.(type) {
+	case string:
+		for i, ch := range []rune(t) {
+			if ch == '\n' || ch == '\t' {
+				continue
+			}
+			if ch < 0x20 || ch == 0x7F {
+				bad = append(bad, fmt.Sprintf("%s 第%d字符=0x%02X", path, i, ch))
+			}
+		}
+	case map[string]interface{}:
+		for k, sub := range t {
+			bad = append(bad, memCtrlCharIssues(sub, path+"/"+k)...)
+		}
+	case []interface{}:
+		for i, sub := range t {
+			bad = append(bad, memCtrlCharIssues(sub, fmt.Sprintf("%s[%d]", path, i))...)
+		}
+	}
+	return bad
 }
 
 // memHealthReport 生成记忆体检报告。只读, 永不 panic。
@@ -67,6 +102,14 @@ func memHealthReport(workDir string) string {
 		return strings.Join(append(infos, issues...), "\n")
 	}
 	infos = append(infos, "✅ JSON 结构有效")
+
+	// ②b 控制字符 (20261011): 文本合法 != 内容合法 (\f 转义解码成换页符 0x0C)
+	if bad := memCtrlCharIssues(m, ""); len(bad) > 0 {
+		issues = append(issues, fmt.Sprintf("🔴 含 %d 个非法控制字符 (只允许 \\n \\t): %s",
+			len(bad), strings.Join(bad[:min(3, len(bad))], "; ")))
+	} else {
+		infos = append(infos, "✅ 无非法控制字符")
+	}
 
 	// ③ 必填锚点字段 (memStableOrder 核心)
 	required := []string{"identity", "role", "language", "working_dir", "gates", "axioms", "self_governance"}

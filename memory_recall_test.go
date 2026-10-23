@@ -71,8 +71,8 @@ func TestFreshnessOf(t *testing.T) {
 		t.Fatalf("无时间锚点应 stale(fail-closed), got %s", st)
 	}
 	// 显式锚点优先于正文日期
-	if st, _ := freshnessOf("static", "旧日期(20200101)"); st != "current" {
-		t.Fatalf("static 应 current, got %s", st)
+	if st, _ := freshnessOf("static", "旧日期(20200101)"); st != "static" {
+		t.Fatalf("static 应单列一态 static (T29-D), got %s", st)
 	}
 	if st, d := freshnessOf(old, "static 字样(20200101)"); st != "stale" || d < 30 {
 		t.Fatalf("显式 ts 应优先于正文日期: state=%s days=%d", st, d)

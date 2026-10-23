@@ -173,7 +173,7 @@ func (f *Forge) selfHostedGate(gateName, code string, start time.Time) (gateRes 
 	var cmd *exec.Cmd
 	if isScript {
 		// -u 强制无缓冲: 超时前已打印的内容必须可见(同 python gate, P0 20260930)。
-		cmd = f.newCmd(ctx, "python", "-u", absPath, code)
+		cmd = f.newCmd(ctx, pythonCommand(), "-u", absPath, code) // T25: Linux 只有 python3
 	} else {
 		cmd = f.newCmd(ctx, absPath, code)
 	}

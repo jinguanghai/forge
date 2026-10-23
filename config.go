@@ -20,7 +20,7 @@ type Config struct {
 	ModelFlash            string // 轻量模型 (简单任务)
 	ModelPro              string // 重量模型 (复杂任务)
 	ModelVision           string // 视觉模型 (识图, 官方 deepseek-flash —— V4-Pro 不支持图像理解)
-	MiniMaxAPIKey         string // MiniMax 备用密钥 (高峰路由, 可空=纯DeepSeek)
+	MiniMaxAPIKey         string // MiniMax 兜底密钥 (DeepSeek 故障转移, 可空=纯DeepSeek)
 	MiniMaxBaseURL        string // MiniMax 端点 (可空)
 	MiniMaxModel          string // MiniMax 模型名 (可空)
 	RouterMode            string // auto | flash | pro | fixed
@@ -34,7 +34,9 @@ type Config struct {
 	MaxLoopStrikes        int // 循环拦截次数上限: 无进展检测拦截 N 次后自动收尾 (非回合上限)
 	MaxHistoryMessages    int
 	CompactEnabled        bool // 历史压缩开关 (六西格玛立项20260815): 超阈值先摘要再裁剪
-	CompactTokenThreshold int  // 触发压缩的历史 token 估算阈值
+	CompactTokenThreshold int  // 对话预算 token 上限 (分母); 触发线 = 此值 x TriggerPercent%
+	CompactTriggerPercent int  // 触发线: 对话预算占用达此百分比即动手 (DG-2, 默认 70)
+	CompactTargetPercent  int  // 目标线: 压完对话预算占用应 <= 此百分比 (DG-2, 默认 50)
 	CompactMinTurns       int  // 压缩冷却: 距上次压缩最少间隔轮数 (防前缀频繁变)
 	ShowReasoning         bool
 	ReasoningEffort       string // "low"|"high"|"max" (V4-Pro 思考强度), 空=官方默认
@@ -47,7 +49,7 @@ type Config struct {
 	WorkDir               string
 	CachePersistFile      string
 	GatesEnabled          []string // 三期 I3: 启用的自托管 gate 列表; 空 = 全部启用
-	PluginReleaseDir      string   // forge-gates 插件发布根目录 (默认 D:\forge_release, 可 FORGE_PLUGIN_RELEASE_DIR 覆盖)
+	PluginReleaseDir      string   // forge-gates 插件发布根目录 (默认仓库根同级的 forge_release, 可 FORGE_PLUGIN_RELEASE_DIR 覆盖)
 }
 
 // ─── Sentinel errors ────────────────────────────────────────
@@ -101,7 +103,9 @@ func DefaultConfig() *Config {
 		MaxLoopStrikes:        4,  // 循环拦截 4 次后带进展收尾; 无回合上限, 真正干活可无限跑
 		MaxHistoryMessages:    80, // V4-Flash 1M 上下文: 历史容量 40 → 80（公理一: 记忆仍须梳理，骨架优先）
 		CompactEnabled:        getEnvInt("AGENT_COMPACT_ENABLED", 1) == 1,
-		CompactTokenThreshold: getEnvInt("AGENT_COMPACT_TOKEN_THRESHOLD", 20000),
+		CompactTokenThreshold: getEnvInt("AGENT_COMPACT_TOKEN_THRESHOLD", 60000),
+		CompactTriggerPercent: getEnvInt("AGENT_COMPACT_TRIGGER_PERCENT", 70),
+		CompactTargetPercent:  getEnvInt("AGENT_COMPACT_TARGET_PERCENT", 50),
 		CompactMinTurns:       getEnvInt("AGENT_COMPACT_MIN_TURNS", 10),
 		MaxCodeSize:           1 * 1024 * 1024, // 1MB (was 512KB)
 		MaxOutputLength:       24000,           // V4-Flash 1M 上下文: 工具输出截断 16KB → 24KB
@@ -110,52 +114,91 @@ func DefaultConfig() *Config {
 		RetryMax:              3,
 		RetryBackoff:          1 * time.Second,
 		WorkDir:               wd,
-		PluginReleaseDir:      "D:\\forge_release",
+		PluginReleaseDir:      filepath.Join(filepath.Dir(wd), "forge_release"),
 	}
 }
 
 // ─── LoadConfig ─────────────────────────────────────────────
+//
+// 拆分 (20261018 T61): 原 146 行 / 圈复杂度 33 的单函数按「装载阶段」切成 5 段,
+// 每段一个私有函数。语句顺序与拆分前逐字一致 —— 顺序即语义 (后段依赖前段填好的
+// 默认值), 不是可自由重排的装饰。收益: 单段可独立单测, 不再只能靠端到端用例间接覆盖。
 
+// LoadConfig 装载配置: .env → 出厂默认 → 分层环境变量覆盖 → 数值夹取。
 func LoadConfig() (*Config, error) {
+	if err := loadDotEnvIfPresent(); err != nil {
+		return nil, err
+	}
+	cfg := DefaultConfig()
+	if err := applyAPIKey(cfg); err != nil {
+		return nil, err
+	}
+	if err := applyBaseURL(cfg); err != nil {
+		return nil, err
+	}
+	if err := applyModelRouting(cfg); err != nil {
+		return nil, err
+	}
+	applyEnvNumberOverrides(cfg)
+	applyRuntimeEnv(cfg)
+	clampConfig(cfg)
+	return cfg, nil
+}
+
+// loadDotEnvIfPresent 加载 .env: 先找 forge.exe 同目录, 再找当前目录。
+//
+// .env 加载 (20261004 自实现 loadEnvFile, 移除 github.com/joho/godotenv):
+// 旧版 `_ = godotenv.Load(...)` 把错误整体丢弃 —— .env 读不动/语法坏时症状
+// 表现为「密钥没设置」, 排查先怀疑自己再怀疑依赖。新版: 文件不存在 = 正常
+// 静默(不报错); 文件存在但读失败/语法非法 = 显式返回错误。
+func loadDotEnvIfPresent() error {
 	// Load .env from forge.exe directory (absolute path)
 	exePath, execErr := os.Executable()
 	if execErr != nil {
 		exePath = os.Args[0] // 失败回退: 用可执行文件参数
 	}
 	envFile := filepath.Join(filepath.Dir(exePath), ".env")
-	// .env 加载 (20261004 自实现 loadEnvFile, 移除 github.com/joho/godotenv):
-	// 旧版 `_ = godotenv.Load(...)` 把错误整体丢弃 —— .env 读不动/语法坏时症状
-	// 表现为「密钥没设置」, 排查先怀疑自己再怀疑依赖。新版: 文件不存在 = 正常
-	// 静默(不报错); 文件存在但读失败/语法非法 = 显式返回错误。
 	if _, err := os.Stat(envFile); err == nil {
 		if err := loadEnvFile(envFile); err != nil {
-			return nil, fmt.Errorf("加载 %s 失败: %w", envFile, err)
+			return fmt.Errorf("加载 %s 失败: %w", envFile, err)
 		}
-	} else if _, err := os.Stat(".env"); err == nil {
+		return nil
+	}
+	if _, err := os.Stat(".env"); err == nil {
 		if err := loadEnvFile(".env"); err != nil {
-			return nil, fmt.Errorf("加载 .env 失败: %w", err)
+			return fmt.Errorf("加载 .env 失败: %w", err)
 		}
 	}
+	return nil
+}
 
-	cfg := DefaultConfig()
-
+// applyAPIKey 装载 DeepSeek 密钥 (DEEPSEEK_API_KEY 优先, LLM_API_KEY 为兼容旧名)。
+func applyAPIKey(cfg *Config) error {
 	// API key (DeepSeek only)
 	cfg.APIKey = os.Getenv("DEEPSEEK_API_KEY")
 	if cfg.APIKey == "" {
 		cfg.APIKey = os.Getenv("LLM_API_KEY")
 	}
 	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("%w: set DEEPSEEK_API_KEY", ErrMissingAPIKey)
+		return fmt.Errorf("%w: set DEEPSEEK_API_KEY", ErrMissingAPIKey)
 	}
+	return nil
+}
 
+// applyBaseURL 装载并校验 API 端点。
+func applyBaseURL(cfg *Config) error {
 	// Base URL
 	if v := os.Getenv("DEEPSEEK_BASE_URL"); v != "" {
 		cfg.BaseURL = strings.TrimSpace(v)
 	}
 	if u, err := url.Parse(cfg.BaseURL); err != nil || u.Scheme == "" {
-		return nil, fmt.Errorf("%w: %q", ErrInvalidURL, cfg.BaseURL)
+		return fmt.Errorf("%w: %q", ErrInvalidURL, cfg.BaseURL)
 	}
+	return nil
+}
 
+// applyModelRouting 装载模型名与路由模式, 并归一非法值 (含 MiniMax 可选兜底字段)。
+func applyModelRouting(cfg *Config) error {
 	// Model (fixed 模式兼容: 显式设置 DEEPSEEK_MODEL 则固定用该模型)
 	if v := os.Getenv("DEEPSEEK_MODEL"); v != "" {
 		cfg.Model = strings.TrimSpace(v)
@@ -170,7 +213,8 @@ func LoadConfig() (*Config, error) {
 	if v := os.Getenv("DEEPSEEK_MODEL_VISION"); v != "" {
 		cfg.ModelVision = strings.TrimSpace(v)
 	}
-	// MiniMax 高峰路由 (可选): 三字段齐备才激活, 否则纯 DeepSeek。
+	// MiniMax 故障兜底 (可选): 三字段齐备才激活, 否则纯 DeepSeek。
+	// 20261011 (T31): 已撤销"高峰时段自动路由" —— 只在 DeepSeek 请求失败时兜底一次。
 	if v := os.Getenv("MINIMAX_API_KEY"); v != "" {
 		cfg.MiniMaxAPIKey = strings.TrimSpace(v)
 	}
@@ -202,11 +246,13 @@ func LoadConfig() (*Config, error) {
 		cfg.RouterMode = RouterAuto
 	}
 	if cfg.Model == "" {
-		return nil, ErrInvalidModel
+		return ErrInvalidModel
 	}
+	return nil
+}
 
-	applyEnvNumberOverrides(cfg)
-
+// applyRuntimeEnv 装载运行期开关 (缓存文件 / gate 白名单 / 推理强度 / 工作目录)。
+func applyRuntimeEnv(cfg *Config) {
 	// Cache persistence
 	cfg.CachePersistFile = getEnv("FORGE_CACHE_PERSIST_FILE", cfg.CachePersistFile)
 
@@ -240,12 +286,18 @@ func LoadConfig() (*Config, error) {
 	if v := os.Getenv("FORGE_PLUGIN_RELEASE_DIR"); v != "" {
 		cfg.PluginReleaseDir = v
 	}
+}
 
+// clampConfig 把数值参数压进安全区间 (防止 .env 手改出越界值)。
+func clampConfig(cfg *Config) {
 	// Clamp to safe ranges
 	cfg.MaxConsecutiveFails = clamp(cfg.MaxConsecutiveFails, 1, 50)
 	cfg.MaxLoopStrikes = clamp(cfg.MaxLoopStrikes, 1, 20)
 	cfg.MaxHistoryMessages = clamp(cfg.MaxHistoryMessages, 4, 500)
 	cfg.CompactTokenThreshold = clamp(cfg.CompactTokenThreshold, 1000, 200000)
+	cfg.CompactTriggerPercent = clamp(cfg.CompactTriggerPercent, 10, 100)
+	cfg.CompactTargetPercent = clamp(cfg.CompactTargetPercent, 1, 99)
+	normalizeCompactPercents(cfg)
 	cfg.CompactMinTurns = clamp(cfg.CompactMinTurns, 1, 100)
 	cfg.MaxConcurrent = clamp(cfg.MaxConcurrent, 1, 64)
 	cfg.CacheMaxSize = clamp(cfg.CacheMaxSize, 0, 10000)
@@ -255,8 +307,19 @@ func LoadConfig() (*Config, error) {
 	cfg.MaxTokens = clamp(cfg.MaxTokens, 256, 262144)               // V4 输出上限 384K
 	cfg.Temperature = clampFloat(cfg.Temperature, 0, 2.0)
 	cfg.TopP = clampFloat(cfg.TopP, 0, 1.0)
+}
 
-	return cfg, nil
+// normalizeCompactPercents 压缩预算配置矛盾自动纠正 (DG-2): 目标线必须低于触发线 ——
+// 否则每次压缩都注定不达标 (白付摘要费 + 冷却一过又撞线; 实测旧实现 23.9% 的压缩
+// 压完仍剩 <30% 即此形态)。抽成纯函数以便单测: 内联在 LoadConfig 里就只能靠端到端
+// 用例间接覆盖 (公理三: 架构约束必须是死程序可判定的)。
+func normalizeCompactPercents(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if cfg.CompactTargetPercent >= cfg.CompactTriggerPercent {
+		cfg.CompactTargetPercent = cfg.CompactTriggerPercent / 2
+	}
 }
 
 // applyEnvNumberOverrides 从环境变量应用数值/时长类覆盖。
@@ -273,6 +336,8 @@ func applyEnvNumberOverrides(cfg *Config) {
 	cfg.MaxHistoryMessages = getEnvInt("AGENT_MAX_HISTORY", cfg.MaxHistoryMessages)
 	cfg.CompactEnabled = getEnvInt("AGENT_COMPACT_ENABLED", 1) == 1
 	cfg.CompactTokenThreshold = getEnvInt("AGENT_COMPACT_TOKEN_THRESHOLD", cfg.CompactTokenThreshold)
+	cfg.CompactTriggerPercent = getEnvInt("AGENT_COMPACT_TRIGGER_PERCENT", cfg.CompactTriggerPercent)
+	cfg.CompactTargetPercent = getEnvInt("AGENT_COMPACT_TARGET_PERCENT", cfg.CompactTargetPercent)
 	cfg.CompactMinTurns = getEnvInt("AGENT_COMPACT_MIN_TURNS", cfg.CompactMinTurns)
 	cfg.MaxConcurrent = getEnvInt("FORGE_MAX_CONCURRENT", cfg.MaxConcurrent)
 	cfg.CacheMaxSize = getEnvInt("FORGE_CACHE_SIZE", cfg.CacheMaxSize)

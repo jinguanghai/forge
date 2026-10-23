@@ -223,10 +223,10 @@ func TestNSWExprWire_NoOrphanFunctions(t *testing.T) {
 // 约束段一旦无条件追加, 会让所有历史会话的前缀缓存失效 (未命中价是命中价的 30 倍)。
 func TestNSWExprSystemPromptSwitch(t *testing.T) {
 	os.Unsetenv("FORGE_NSW_EXPR")
-	off := buildSystemPromptStable("D:/forge", []string{"python"})
+	off := buildSystemPromptStable(testRoot(t), []string{"python"})
 	os.Setenv("FORGE_NSW_EXPR", "1")
 	defer os.Unsetenv("FORGE_NSW_EXPR")
-	on := buildSystemPromptStable("D:/forge", []string{"python"})
+	on := buildSystemPromptStable(testRoot(t), []string{"python"})
 
 	if strings.Contains(off, "numeric_output") || strings.Contains(off, nswExprConstraint) {
 		t.Error("开关关时 system 仍含表达式化约束 -> 缓存前缀被污染")

@@ -58,7 +58,7 @@ func TestBuildRestartScript(t *testing.T) {
 // TestRestartScriptPath 钉住重启脚本落点归属(2S 定置: 自动生成物必须有专属容器)。
 // 根目录再出现 restart_self.ps1 = 归位失效; .forge-temp/ = 与启动清空机制(⑤)冲突。
 func TestRestartScriptPath(t *testing.T) {
-	work := `D:\forge`
+	work := testRoot(t)
 	got := restartScriptPath(work)
 	want := filepath.Join(work, ".forge", "restart_self.ps1")
 	if got != want {

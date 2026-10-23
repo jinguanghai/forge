@@ -45,6 +45,10 @@ func (r symRefs) wired(k wireKind, name string) bool {
 // 为什么必须用 AST: 文本匹配分不清"函数定义行 / 注释提及 / 真正的调用点"三者,
 // 于是"删掉调用点"这类最该防的改动反而防不住(变异测试实证, 见文件头注释)。
 // 扫描范围是包级而非单文件: 接线是包级属性, 代码重组会换文件而不改接线。
+//
+// 20261017 (T35 P1) 拆解: 原函数圈复杂度 33 > 30 (F5)。两个 ast.Inspect 的
+// switch 分支全部下沉到 symMarkDef / symMarkRef —— 拆的是分支, 不是行为
+// (原两遍遍历的语义逐字保留)。
 func prodSymbolRefs(t *testing.T) symRefs {
 	t.Helper()
 	r := symRefs{
@@ -75,72 +79,90 @@ func prodSymbolRefs(t *testing.T) symRefs {
 				r.funcs[fd.Name.Name] = name
 			}
 		}
-		// 第一遍: 收集"定义类位置" —— 落在这些位置的标识符不是引用。
-		defPos := map[token.Pos]bool{}
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.FuncDecl:
-				defPos[x.Name.Pos()] = true
-			case *ast.Field: // 结构体字段名 / 参数名 / 返回值名
-				for _, nm := range x.Names {
-					defPos[nm.Pos()] = true
-				}
-			case *ast.ValueSpec: // var / const 名
-				for _, nm := range x.Names {
-					defPos[nm.Pos()] = true
-				}
-			case *ast.ImportSpec:
-				if x.Name != nil {
-					defPos[x.Name.Pos()] = true
-				}
-			case *ast.KeyValueExpr: // 结构体字面量的字段名
-				if id, ok := x.Key.(*ast.Ident); ok {
-					defPos[id.Pos()] = true
-				}
-			case *ast.SelectorExpr: // x.Name 的 Name 是字段/方法名, 不计入标识符引用
-				defPos[x.Sel.Pos()] = true
-			case *ast.AssignStmt: // := 左侧新变量(含局部遮蔽同名)
-				if x.Tok == token.DEFINE {
-					for _, lhs := range x.Lhs {
-						if id, ok := lhs.(*ast.Ident); ok {
-							defPos[id.Pos()] = true
-						}
-					}
-				}
-			case *ast.LabeledStmt:
-				defPos[x.Label.Pos()] = true
-			}
-			return true
-		})
-		// 第二遍: 统计引用证据。
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.CallExpr:
-				switch fn := x.Fun.(type) {
-				case *ast.Ident: // 包级函数调用 fn(...)
-					r.called[fn.Name] = append(r.called[fn.Name], at(fset, name, x.Pos()))
-				case *ast.SelectorExpr: // 方法调用 x.fn(...)
-					r.calledMethod[fn.Sel.Name] = append(r.calledMethod[fn.Sel.Name], at(fset, name, x.Pos()))
-				}
-			case *ast.SelectorExpr:
-				p := at(fset, name, x.Sel.Pos())
-				r.selected[x.Sel.Name] = append(r.selected[x.Sel.Name], p)
-				if id, ok := x.X.(*ast.Ident); ok {
-					k := id.Name + "." + x.Sel.Name
-					r.selected[k] = append(r.selected[k], p)
-				}
-			case *ast.Ident:
-				if !defPos[x.Pos()] {
-					r.referred[x.Name] = append(r.referred[x.Name], at(fset, name, x.Pos()))
-				}
-			}
-			return true
-		})
+		symCollectRefs(fset, name, f, symDefPositions(f), &r)
 	}
 	if scanned == 0 {
 		t.Fatal("未扫描到任何生产 .go 文件 — 哨兵自身失效(扫描范围或工作目录错误)")
 	}
 	return r
+}
+
+// symDefPositions 收集"定义类位置" —— 落在这些位置的标识符不是引用。
+func symDefPositions(f *ast.File) map[token.Pos]bool {
+	defPos := map[token.Pos]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		symMarkDef(n, defPos)
+		return true
+	})
+	return defPos
+}
+
+// symMarkDef 标记单个节点上的定义类标识符位置。
+func symMarkDef(n ast.Node, defPos map[token.Pos]bool) {
+	switch x := n.(type) {
+	case *ast.FuncDecl:
+		defPos[x.Name.Pos()] = true
+	case *ast.Field: // 结构体字段名 / 参数名 / 返回值名
+		for _, nm := range x.Names {
+			defPos[nm.Pos()] = true
+		}
+	case *ast.ValueSpec: // var / const 名
+		for _, nm := range x.Names {
+			defPos[nm.Pos()] = true
+		}
+	case *ast.ImportSpec:
+		if x.Name != nil {
+			defPos[x.Name.Pos()] = true
+		}
+	case *ast.KeyValueExpr: // 结构体字面量的字段名
+		if id, ok := x.Key.(*ast.Ident); ok {
+			defPos[id.Pos()] = true
+		}
+	case *ast.SelectorExpr: // x.Name 的 Name 是字段/方法名, 不计入标识符引用
+		defPos[x.Sel.Pos()] = true
+	case *ast.AssignStmt: // := 左侧新变量(含局部遮蔽同名)
+		if x.Tok == token.DEFINE {
+			for _, lhs := range x.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					defPos[id.Pos()] = true
+				}
+			}
+		}
+	case *ast.LabeledStmt:
+		defPos[x.Label.Pos()] = true
+	}
+}
+
+// symCollectRefs 统计单文件的三类符号引用证据 (第二遍遍历)。
+func symCollectRefs(fset *token.FileSet, name string, f *ast.File, defPos map[token.Pos]bool, r *symRefs) {
+	ast.Inspect(f, func(n ast.Node) bool {
+		symMarkRef(fset, name, n, defPos, r)
+		return true
+	})
+}
+
+// symMarkRef 记录单个节点上的引用证据。
+func symMarkRef(fset *token.FileSet, name string, n ast.Node, defPos map[token.Pos]bool, r *symRefs) {
+	switch x := n.(type) {
+	case *ast.CallExpr:
+		switch fn := x.Fun.(type) {
+		case *ast.Ident: // 包级函数调用 fn(...)
+			r.called[fn.Name] = append(r.called[fn.Name], at(fset, name, x.Pos()))
+		case *ast.SelectorExpr: // 方法调用 x.fn(...)
+			r.calledMethod[fn.Sel.Name] = append(r.calledMethod[fn.Sel.Name], at(fset, name, x.Pos()))
+		}
+	case *ast.SelectorExpr:
+		p := at(fset, name, x.Sel.Pos())
+		r.selected[x.Sel.Name] = append(r.selected[x.Sel.Name], p)
+		if id, ok := x.X.(*ast.Ident); ok {
+			k := id.Name + "." + x.Sel.Name
+			r.selected[k] = append(r.selected[k], p)
+		}
+	case *ast.Ident:
+		if !defPos[x.Pos()] {
+			r.referred[x.Name] = append(r.referred[x.Name], at(fset, name, x.Pos()))
+		}
+	}
 }
 
 func at(fset *token.FileSet, file string, p token.Pos) string {

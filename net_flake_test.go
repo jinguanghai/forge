@@ -10,6 +10,16 @@ package main
 // 处置: 命中网络层特征 → 降级为「跳过(网络不可用)」并保留原始错误摘要, 不算 FAIL。
 // 降级必须留痕(测试日志 + bench 报告), 不得静默 —— 静默降级 = 真缺陷隐身。
 //
+// 形态族化 (T40 · 20261010 实测):
+//   旧表只收固定错误串, 而源码注释自陈「唯一差异是 net::ERR_CONNECTION_CLOSED」——
+//   那句"唯一"就是盲区本身: 把「我见过的那一种」当成了「全部」。
+//   实测反例: 同一份代码第 4 次跑报 `Page.goto: Timeout 30000ms exceeded`,
+//   超时族一个都不在旧表里 -> 降级失效 -> 假红(用例其实已标 net:true)。
+//   修法: 按【形态族】收 (超时族/连接族/DNS族/代理族), 不再按固定串。
+//   放宽的代价用两条防线抵住: ① 判定权仍窄 —— 只对显式 net:true 用例生效;
+//   ② 降级必入 note 不静默。判据侧同步加反例向量 (见 TestNetFlakeDetectorSelfCheck),
+//   钉住「放宽不得连业务/成本类错误一起降级」。
+//
 // 为什么不用「开跑前探测可达性」:
 //   browser_gate_test.go 的 bingReachable() 探的是 cn.bing.com(中国域名, 直连),
 //   而被测的 example.com 走代理 —— 探的链路与实际链路不同, 预检通过仍会失败
@@ -43,6 +53,10 @@ var netFlakePatterns = []string{
 	"dial tcp",
 	"tls handshake timeout",
 	"context deadline exceeded",
+	// --- T40 (20261010) 超时族补齐: playwright 的 Timeout 措辞不在上面任何一种字面里 ---
+	"ms exceeded",     // playwright 统一措辞: "Page.goto: Timeout 30000ms exceeded"
+	"timeout 30000ms", // 同上, 防错误文本被截断到不含 "ms exceeded" (同一族的不同切面, 冗余是安全的)
+	"timed out",       // 通用超时措辞: "connection timed out" / "request timed out"
 }
 
 // isNetFlake 判定输出是否为网络层不可用, 返回 (命中, 命中的特征)。
@@ -123,6 +137,12 @@ func TestNetFlakeDetectorSelfCheck(t *testing.T) {
 		`proxyconnect tcp: dial tcp 127.0.0.1:1080: connectex: No connection could be made because the target machine actively refused it.`,
 		`net::ERR_NAME_NOT_RESOLVED at https://example.com`,
 		`read tcp: i/o timeout`,
+		// T40: 实测漏网的形态 —— 加了形态表却不加向量 = 「改了但没判据」
+		`{"ok":false,"error":"Page.goto: Timeout 30000ms exceeded.\nCall log:\n  - navigating to \"https://example.com/\", waiting until \"load\""}`,
+		`{"ok":false,"error":"Timeout 30000ms exceeded"}`,
+		`dial tcp 203.0.113.7:443: connection timed out`,
+		// T41: knowledge gate 外层 30s 超时的真实文本 (forge_gate_host.go 归一为 ctx.Err())
+		`{"ok":false,"error":"knowledge_gate execution failed: context deadline exceeded","timeout":true}`,
 	}
 	for _, s := range hits {
 		if ok, _ := isNetFlake(s); !ok {
@@ -134,12 +154,59 @@ func TestNetFlakeDetectorSelfCheck(t *testing.T) {
 		`{"ok":false,"error":"bad json: unexpected end of JSON input"}`,
 		`{"ok":false,"error":"未知 action: zzz"}`,
 		`{"ok":false,"error":"拒绝: 单次成本超上限"}`,
+		// T40 放宽的代价防线: "exceeded" / 超时词不得被单独当作网络特征 ——
+		// 否则成本护栏、本地 gate 超时都会被降级, 真缺陷隐身。
+		`{"ok":false,"error":"single cost limit exceeded"}`,
+		`{"ok":false,"error":"用例超时: gate 执行 30s 未返回"}`,
 		`{"ok":true,"stdout":"Example Domain"}`,
 		``,
 	}
 	for _, s := range miss {
 		if ok, p := isNetFlake(s); ok {
 			t.Errorf("业务/代码错误不得判为网络抖动 (命中特征 %q): %s", p, s)
+		}
+	}
+}
+
+// ── T41 (20261010): 外网依赖 gate 的用例必须声明 net:true ─────────────
+//
+// 动机 (实测): full 档跑 TestBenchSemantics 时 knowledge 用例 30146ms 撞上
+// knowledge 的 ExecTimeout=30s (forge_lang.go) → 判 FAIL; 而同一份代码单独跑
+// 只需 2.4s。同一类网络抖动, browser 被降级、knowledge 判 FAIL —— 差异不在
+// 代码质量, 而在「用例有没有声明 net:true」。
+//
+// 根因不是「knowledge 慢」, 是判据自身不一致: 20261003 引入 net 机制时只观测到
+// browser 抖动, 就把 browser 标了 net, knowledge 只标了 slow。教训同 T40 ——
+// 「我见过的那一种」被当成了「全部」。
+//
+// externalNetGates 已知依赖真实外网的 gate (来源: 各自实现里写死的端点/目标):
+//
+//	browser   -> 抓取任意外部 URL (经代理)
+//	knowledge -> knowledge_gate.go 的 endpoints{wikidata,dbpedia} SPARQL (经代理)
+//
+// 新增外网 gate 时必须同批登记此处, 否则本判据覆盖不到 (清单本身也要有反向断言)。
+var externalNetGates = []string{"browser", "knowledge"}
+
+// TestExternalGateCasesDeclareNet 双向断言:
+//
+//	正向 — 清单里的 gate 的每个用例都必须 net:true (漏标 = 网络抖动被判 FAIL);
+//	反向 — 清单里的 gate 必须在 semCases() 里真实出现 (清单悬空 = 判据空转)。
+//
+// 只查单向会留下「清单写了但用例没了」或「用例加了但没进清单」两种盲区。
+func TestExternalGateCasesDeclareNet(t *testing.T) {
+	seen := map[string]int{}
+	for _, c := range semCases() {
+		seen[c.gate]++
+		for _, g := range externalNetGates {
+			if c.gate == g && !c.net {
+				t.Errorf("[%s/%s] 依赖外网的用例必须声明 net:true — 否则网络抖动会被判 FAIL (T41)",
+					c.gate, c.name)
+			}
+		}
+	}
+	for _, g := range externalNetGates {
+		if seen[g] == 0 {
+			t.Errorf("外网 gate 清单里的 %q 在 semCases() 中不存在 — 清单已悬空", g)
 		}
 	}
 }

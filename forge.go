@@ -206,7 +206,7 @@ func ForgeToolSchema() json.RawMessage {
 					},
 					"lang": map[string]interface{}{
 						"type":        "string",
-						"description": "语言(可省略, 自动检测, 默认python, 90%场景无需指定)。python=默认代码执行; go=Go代码; node=JavaScript; math=数值/符号计算; logic=逻辑证明(含量词必走它); regex=正则验证; chain=多步编排; knowledge=知识查询(SPARQL); tcm=中医药药对(触发词: 查药对X Y/药对：A、B/配伍); browser=网页浏览(直连不走代理); self=源码自修改(需主人审批)。拿不准就省略lang, 自动检测默认python。注意: sh gate 已退役(实测失败率48.2%), shell 命令请用 python 的 subprocess 承接, 不要指定 lang=sh。",
+						"description": "语言(可省略, 自动检测, 默认python, 90%场景无需指定)。python=默认代码执行; go=Go代码; node=JavaScript。其余 gate 的选用规则见 system prompt 的 <gates_enabled> 段 (单点维护, 不在此复制)。拿不准就省略lang, 自动检测默认python。注意: sh gate 已退役(实测失败率48.2%), shell 命令请用 python 的 subprocess 承接, 不要指定 lang=sh。",
 						"enum":        铸剑炉_GATES,
 					},
 				},
@@ -338,7 +338,7 @@ func (f *Forge) Build(code, lang, input string) (string, *ForgeGateResult, error
 			}
 			logGuardEvent(f.workDir, "info", "重活", hitName, "deny", "重活拒绝: "+ev, code)
 			return fmt.Sprintf("--- ⛔ 重活被拒 [rejected] ---\n命中「%s」: %s\n\n%s\n--- 结束 ---",
-				hitName, ev, heavyTaskText), &result, nil
+				hitName, ev, heavyTaskText(f.workDir)), &result, nil
 		}
 	}
 

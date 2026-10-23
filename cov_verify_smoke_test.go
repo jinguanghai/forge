@@ -17,7 +17,7 @@ import (
 
 // runVerification 采集三类证据且只读 (不修改仓库状态)。
 func TestRunVerification_CollectsReadOnlyEvidence(t *testing.T) {
-	got := runVerification()
+	got := runVerification("") // 空值=继承 cwd: 本用例在包目录(仓库根)下运行
 	if strings.TrimSpace(got) == "" {
 		t.Fatalf("验证输出不得为空")
 	}

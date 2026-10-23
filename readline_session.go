@@ -1,18 +1,9 @@
-//go:build windows
-
 package main
 
 import (
 	"time"
 	"unicode/utf8"
 )
-
-// inputRecord 对应 Windows INPUT_RECORD（EventType + 16 字节 union）。
-type inputRecord struct {
-	EventType uint16
-	_         [2]byte
-	Event     [16]byte
-}
 
 // ---- readLine ----
 
@@ -225,8 +216,8 @@ func (s *inputSession) commit() (bool, error) {
 	s.redrawFn()
 	// 多行输入时编辑光标可能在块中间：先把光标移到块底再换行,
 	// 否则后续输出从中间行开始会覆盖块下方内容("看不到自己写了什么")。
-	if s.ed.lastLines > 0 && consoleProcsOK {
-		setCursorPos(0, s.ed.lastTop+s.ed.lastLines-1)
+	if s.ed.lastLines > 0 {
+		commitCursorPlacement(s.ed)
 	}
 	s.echoNewline()
 	flushPending(s.ed, &s.pending)
@@ -235,146 +226,175 @@ func (s *inputSession) commit() (bool, error) {
 
 // processBatch 处理一批从 stdin 读到的字节（批量读取优化）。
 // 返回 committed=true 表示输入已提交（调用方应立即返回 string(ed.buf)）。
+// processBatch 处理一批输入字节。返回 committed=true 表示输入已提交。
+// burst 唯一入口 = 批内/批尾换行(粘贴特征); 中文IME上屏(纯文字)永不触发。
 func (s *inputSession) processBatch(data []byte) (bool, error) {
-	// burst 唯一入口 = 批内/批尾换行(粘贴特征); 中文IME上屏(纯文字)永不触发
-	for i := 0; i < len(data); i++ {
-		ch := data[i]
-
-		// 换行处理(20260808 重写):
-		//  - 批中换行(后面还有内容) -> 必然是粘贴: 动态进入收集模式(手动输入不可能批中带\n)
-		//  - 批尾换行(非burst)      -> 手动回车: 立即提交, 0延迟, 不做跨批探测
-		//  - 批尾换行(burst)        -> 粘贴流的换行: 先刷积累字节再保留\n(顺序保真)
-		if ch == '\r' || ch == '\n' {
-			if i+1 < len(data) {
-				// 批中换行: 粘贴特征, 进入收集模式
-				if !s.burst {
-					s.burst = true
-				}
-				s.sawNewline = true
-				consumePending(s.ed, &s.pending, false)
-				if ch == '\r' && data[i+1] == '\n' {
-					i++ // CRLF 同批
-				}
-				insertRune(s.ed, '\n')
-				continue
-			}
-			// 批尾换行
-			if !s.burst {
-				// 手动回车 vs 跨批粘贴: 30ms 短探测。
-				// (20260808: 原 300ms 会把回车后立刻打的字误判为粘贴并吞进 pending;
-				//  30ms 覆盖粘贴批间间隔(<1ms); 手动回车最多延迟 30ms 提交, 人无感知)
-				if s.probe(30 * time.Millisecond) {
-					next, err := s.readNext()
-					if err != nil {
-						return false, err
-					}
-					s.burst = true
-					s.sawNewline = true
-					consumePending(s.ed, &s.pending, false)
-					if ch == '\r' && next == '\n' {
-						insertRune(s.ed, '\n') // CRLF: 批尾\r + 开头\n = 一个换行
-						continue
-					}
-					insertRune(s.ed, '\n') // 保留跨批换行
-					s.pending = append(s.pending, next)
-					continue
-				}
-				// 手动回车: 立即提交(30ms 内无后续 -> 提交, 不吞键)
-				return s.commit()
-			}
-			// 粘贴流中的批尾换行: 先刷积累字节再插换行(保序)
-			s.sawNewline = true
-			consumePending(s.ed, &s.pending, false)
-			insertRune(s.ed, '\n')
-			continue
-		}
-
-		// ESC 序列(20260808): 批内完整序列解析(导航键执行/色码静默忽略);
-		// 批尾不完整序列丢弃到批尾(防色码残片); 孤立/批尾 ESC 交给 handleByte 流式兜底。
-		if ch == 0x1b {
-			if i+1 < len(data) && data[i+1] == '[' {
-				j := i + 2
-				for j < len(data) {
-					c := data[j]
-					if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '~' {
-						j++
-						break
-					}
-					j++
-				}
-				if j < len(data) {
-					// 批内完整序列: 导航执行, 色码/未知序列静默忽略
-					s.applySeq(string(data[i+1 : j]))
-					i = j - 1
-					continue
-				}
-				// 序列不完整(截断在批尾): 丢弃到批尾, 防色码残片花屏
-				i = j - 1
-				continue
-			}
-			// 孤立 ESC / 批尾 ESC: 交给 handleByte (readEscapeSeq 流式读取)
-			committed, herr := s.handleByte(ch)
-			if herr != nil {
-				return committed, herr
-			}
-			if committed {
-				return true, nil
-			}
-			continue
-		}
-
-		// 非换行非 ESC 字节
-		committed, herr := s.handleByte(ch)
-		if herr != nil {
-			return committed, herr
+	for i := 0; i < len(data); {
+		consumed, committed, err := s.stepBatch(data, i)
+		if err != nil {
+			return committed, err
 		}
 		if committed {
 			return true, nil
 		}
+		i += consumed
 	}
+	return s.finishBatch()
+}
 
-	// 批尾：burst 短探测(30ms)——粘贴流是否还在继续？
-	// (20260808: 原粘贴空闲判定=300ms 会吞掉手动回车后 300ms 内键入的字符 -> "突然无法输入")
-	if s.burst {
-		if s.probe(30 * time.Millisecond) {
-			// 还有后续字节：读一个并处理，然后由调用方继续 Read
-			next, err := s.readNext()
-			if err != nil {
-				return false, err
-			}
-			if next == '\r' || next == '\n' {
-				// 跨批换行：一律作为粘贴内容
-				s.sawNewline = true
-				consumePending(s.ed, &s.pending, false)
-				if next == '\r' {
-					// 可能 CRLF：探测并消费 \n
-					if s.probe(newlineProbe) {
-						n2, err2 := s.readNext()
-						if err2 == nil && n2 == '\n' {
-							insertRune(s.ed, '\n')
-							return false, nil
-						}
-						if err2 == nil {
-							s.pending = append(s.pending, n2)
-						}
-					}
-				}
-				insertRune(s.ed, '\n')
-				return false, nil
-			}
-			s.pending = append(s.pending, next)
-			return false, nil
-		}
+// stepBatch 处理 data[i] 起的一个逻辑单元(换行 / ESC 序列 / 普通字节)。
+// 返回消费的字节数(>=1)与是否已提交。
+func (s *inputSession) stepBatch(data []byte, i int) (int, bool, error) {
+	switch ch := data[i]; {
+	case ch == '\r' || ch == '\n':
+		return s.stepNewline(data, i, ch)
+	case ch == 0x1b:
+		return s.stepEscape(data, i)
+	default:
+		return s.stepByte(ch)
+	}
+}
 
-		// 粘贴流结束
-		s.burst = false
+// stepByte 处理单个普通字节(非换行非 ESC)。
+func (s *inputSession) stepByte(ch byte) (int, bool, error) {
+	committed, err := s.handleByte(ch)
+	if err != nil {
+		return 1, committed, err
+	}
+	return 1, committed, nil
+}
+
+// stepNewline 处理换行字节(20260808 重写):
+//   - 批中换行(后面还有内容) -> 必然是粘贴: 动态进入收集模式(手动输入不可能批中带\n)
+//   - 批尾换行(非burst)      -> 手动回车: 立即提交, 0延迟, 不做跨批探测
+//   - 批尾换行(burst)        -> 粘贴流的换行: 先刷积累字节再保留\n(顺序保真)
+func (s *inputSession) stepNewline(data []byte, i int, ch byte) (int, bool, error) {
+	if i+1 < len(data) {
+		// 批中换行: 粘贴特征, 进入收集模式
+		s.burst = true
+		s.sawNewline = true
 		consumePending(s.ed, &s.pending, false)
-		s.redrawFn()
-		if s.sawNewline {
-			// 多行粘贴：直接提交
-			return s.commit()
+		consumed := 1
+		if ch == '\r' && data[i+1] == '\n' {
+			consumed = 2 // CRLF 同批
 		}
-		// 单行粘贴：留在编辑区，等待用户继续编辑/回车
+		insertRune(s.ed, '\n')
+		return consumed, false, nil
 	}
+	if s.burst {
+		// 粘贴流中的批尾换行: 先刷积累字节再插换行(保序)
+		s.sawNewline = true
+		consumePending(s.ed, &s.pending, false)
+		insertRune(s.ed, '\n')
+		return 1, false, nil
+	}
+	return s.stepTailNewline(ch)
+}
+
+// stepTailNewline 处理「批尾换行且非 burst」: 30ms 短探测区分手动回车与跨批粘贴。
+// (20260808: 原 300ms 会把回车后立刻打的字误判为粘贴并吞进 pending;
+// 30ms 覆盖粘贴批间间隔(<1ms); 手动回车最多延迟 30ms 提交, 人无感知)
+func (s *inputSession) stepTailNewline(ch byte) (int, bool, error) {
+	if !s.probe(30 * time.Millisecond) {
+		// 手动回车: 立即提交(30ms 内无后续 -> 提交, 不吞键)
+		committed, err := s.commit()
+		return 1, committed, err
+	}
+	next, err := s.readNext()
+	if err != nil {
+		return 1, false, err
+	}
+	s.burst = true
+	s.sawNewline = true
+	consumePending(s.ed, &s.pending, false)
+	if ch == '\r' && next == '\n' {
+		insertRune(s.ed, '\n') // CRLF: 批尾\r + 开头\n = 一个换行
+		return 1, false, nil
+	}
+	insertRune(s.ed, '\n') // 保留跨批换行
+	s.pending = append(s.pending, next)
+	return 1, false, nil
+}
+
+// stepEscape 处理 ESC 起始字节(20260808): 批内完整序列解析(导航键执行/色码静默忽略);
+// 批尾不完整序列丢弃到批尾(防色码残片); 孤立/批尾 ESC 交给 handleByte 流式兜底。
+func (s *inputSession) stepEscape(data []byte, i int) (int, bool, error) {
+	if i+1 >= len(data) || data[i+1] != '[' {
+		return s.stepByte(0x1b)
+	}
+	j := i + 2
+	for j < len(data) && !isSeqFinalByte(data[j]) {
+		j++
+	}
+	if j < len(data) {
+		j++ // 含终止字节
+		// 批内完整序列: 导航执行, 色码/未知序列静默忽略
+		s.applySeq(string(data[i+1 : j]))
+		return j - i, false, nil
+	}
+	// 序列不完整(截断在批尾): 丢弃到批尾, 防色码残片花屏
+	return len(data) - i, false, nil
+}
+
+// isSeqFinalByte 判断字节是否为 CSI 序列的终止字节(字母或 ~)。
+func isSeqFinalByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '~'
+}
+
+// finishBatch 处理批尾: burst 短探测判断粘贴流是否还在继续。
+// (20260808: 原粘贴空闲判定=300ms 会吞掉手动回车后 300ms 内键入的字符 -> "突然无法输入")
+func (s *inputSession) finishBatch() (bool, error) {
+	if !s.burst {
+		return false, nil
+	}
+	if s.probe(30 * time.Millisecond) {
+		// 还有后续字节：读一个并处理，然后由调用方继续 Read
+		return s.consumeTrailing()
+	}
+	// 粘贴流结束
+	s.burst = false
+	consumePending(s.ed, &s.pending, false)
+	s.redrawFn()
+	if s.sawNewline {
+		return s.commit() // 多行粘贴：直接提交
+	}
+	return false, nil // 单行粘贴：留在编辑区，等待用户继续编辑/回车
+}
+
+// consumeTrailing 读取批尾探测到的后续字节并处理(跨批粘贴的续片)。
+func (s *inputSession) consumeTrailing() (bool, error) {
+	next, err := s.readNext()
+	if err != nil {
+		return false, err
+	}
+	if next != '\r' && next != '\n' {
+		s.pending = append(s.pending, next)
+		return false, nil
+	}
+	// 跨批换行：一律作为粘贴内容
+	s.sawNewline = true
+	consumePending(s.ed, &s.pending, false)
+	if next == '\r' && s.consumeCRLFContinuation() {
+		return false, nil
+	}
+	insertRune(s.ed, '\n')
 	return false, nil
+}
+
+// consumeCRLFContinuation 处理跨批 CRLF 的 \n 部分。
+// 返回 true 表示 \n 已作为同一换行插入, 调用方不应再插换行。
+func (s *inputSession) consumeCRLFContinuation() bool {
+	if !s.probe(newlineProbe) {
+		return false
+	}
+	n2, err := s.readNext()
+	if err != nil {
+		return false
+	}
+	if n2 == '\n' {
+		insertRune(s.ed, '\n')
+		return true
+	}
+	s.pending = append(s.pending, n2)
+	return false
 }

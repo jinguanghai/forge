@@ -46,6 +46,11 @@ func expandArgs(args []string, srcPath, workDir, tmpDir string) ([]string, bool)
 			expanded[i] = strings.ReplaceAll(a, "{dir}", tmpDir)
 		}
 	}
+	// T25: 编译器表里的可执行名归一化 (python → 本机实际解释器, Linux 只有 python3)。
+	// 放在单点而非改表字面量: 表是数据 (被多个哨兵断言 "python"), 归一化是运行时行为。
+	if len(expanded) > 0 {
+		expanded[0] = resolveExecutable(expanded[0])
+	}
 	return expanded, place
 }
 

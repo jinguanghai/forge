@@ -319,7 +319,7 @@ func (rs *runState) runTurns() error {
 			return rs.finishStuck()
 		}
 		if intervene != "" {
-			rs.messages = append(rs.messages, ChatMessage{Role: "user", Content: intervene})
+			rs.messages = append(rs.messages, ChatMessage{Role: "user", Content: autoInjectEnvelope("无进展干预", intervene)})
 		}
 
 		// Trim accumulated turn messages: a long task can grow `messages` without

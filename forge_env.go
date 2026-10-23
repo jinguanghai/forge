@@ -157,7 +157,7 @@ func forgeCleanupStaleTempDirs() {
 // 实测(20260928): 该目录长期躺着上一轮的 arch_scan.json / browser_test.png, 而四套守卫全绿。
 //
 // 位置纪律(实测约束, 勿挪): 只能在启动序调用, 严禁放进 NewForge —— NewForge 有 17 个
-// 测试调用点, 其中多个以 D:\forge 为 workDir, 放进去会让测试互踩(browser_gate_test.go
+// 测试调用点, 其中多个以仓库根为 workDir, 放进去会让测试互踩(browser_gate_test.go
 // 的截图正是写到 .forge-temp), 且每跑一次单测就清空生产临时目录。
 //
 // 行为三条:
@@ -238,7 +238,7 @@ func (f *Forge) newCmd(ctx context.Context, name string, args ...string) *exec.C
 	cmd := exec.Command(name, args...)
 	// 工作目录绑定: 自托管 gate (relation/tcm 等) 靠相对路径读源码与数据文件。
 	// 若子进程继承"启动目录", 从别处启动 forge.exe 就会扫错根、找不到数据
-	// (20260925 实测: 从 C:\\Users\\<user> 启动 -> relation 报"生产符号 0"、tcm 报"方剂库未找到";
+	// (20260925 实测: 从用户目录启动 -> relation 报"生产符号 0"、tcm 报"方剂库未找到";
 	//  而全量测试全绿, 因测试里 WorkDir 恰好 == 进程 cwd, 错位场景构造不出来)。
 	// 全部 gate 子进程都经 newCmd 这一个入口创建, 故在此单点绑定。
 	if f.workDir != "" {

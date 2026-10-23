@@ -19,13 +19,13 @@ import (
 //	contextBudgetUsed = estimateTokens(history[headLen:])  ← 剔除固定头
 //
 // 修正动机(主人实测「重启显示剩7%、聊两轮变0%」): 旧口径分子取全量 history,
-// 而固定头(system提示+记忆锚点+折叠索引)实测 18749 token, 已占默认阈值 20000 的
+// 而固定头(system提示+记忆锚点+折叠索引)实测 18749 token, 曾占旧默认阈值 20000 的
 // 93.7% —— 一开机就报「剩7%」, 对话内容却几乎是空的。旧口径量的是"记忆有多大"。
 //
 // 判据分层:
 //  1. 核心回归: 固定头不计入 (18749 token 的固定头 + 空对话 → 剩100%)
 //  2. 口径: 剩% = 100 - 对话量*100/阈值
-//  3. 颜色分级边界: >50 绿 / 20~50 黄 / <20 红
+//  3. 颜色分级边界 (DG-2): 以触发线为界 —— 黄=已到动手线 / 红=触发线一半
 //  4. 降级: agent/cfg/阈值缺失 → 空串且不影响旧版逐字节输出
 //  5. 优先级: 窄终端下被截断的必须是末尾会话统计, 注意力段必须完整可见
 //  6. 同源: 显示与压缩触发共用 contextBudgetUsed (数值临界 + AST 接线双判据)
@@ -33,8 +33,9 @@ import (
 // 变异验证: ①把 contextBudgetUsed 里的 head 剔除去掉(改回全量) → 第1组转红;
 //          ②把 maybeCompact 的触发改回 estimateTokens(a.history) → 第10组转红。
 
-// attnTestLimit 取 config.go 默认值 (AGENT_COMPACT_TOKEN_THRESHOLD, 默认20000)。
-const attnTestLimit = 20000
+// attnTestLimit 取 config.go 默认值 (AGENT_COMPACT_TOKEN_THRESHOLD, 默认60000 ——
+// DG-2 2026-10-11 主人拍板: 1M 窗口下 20000 太早, 触发时全量上下文仅占窗口 4.0%)。
+const attnTestLimit = 60000
 
 // newAttentionTestAgent 构造 headLen=1、固定头 headTokens 个 rune、对话 dialogTokens 个 rune 的 agent。
 // estimateTokens 对每个 rune 计 1 (ASCII 与 CJK 同口径), 故 strings.Repeat("a", n) 恰好 n token。
@@ -63,8 +64,8 @@ func TestContextUsageText_IgnoresFixedHead(t *testing.T) {
 	if !strings.HasPrefix(raw, ansi.green) {
 		t.Errorf("空对话应判绿, 实际 %q", raw)
 	}
-	// 对话 2000 token (约两轮) → 剩90%, 仍绿 (旧口径此时已是 0%/红)
-	a2 := newAttentionTestAgent(18749, 2000)
+	// 对话 6000 token (约两轮) → 剩90%, 仍绿 (旧口径此时已是 0%/红)
+	a2 := newAttentionTestAgent(18749, 6000)
 	if got := stripANSI(contextUsageText(a2)); !strings.Contains(got, "剩90%") {
 		t.Errorf("固定头 + 对话2000 应显示剩90%%, 实际 %q", got)
 	}
@@ -82,11 +83,11 @@ func TestContextUsageText_Percent(t *testing.T) {
 		want   string
 	}{
 		{0, "剩100%"},
-		{5000, "剩75%"},
-		{12000, "剩40%"},
-		{17000, "剩15%"},
+		{15000, "剩75%"},
+		{36000, "剩40%"},
+		{51000, "剩15%"},
 		{attnTestLimit, "剩0%"},
-		{30000, "剩0%"}, // 超阈值 clamp 到 0, 不得出现负数
+		{90000, "剩0%"}, // 超阈值 clamp 到 0, 不得出现负数
 	}
 	for _, c := range cases {
 		got := stripANSI(contextUsageText(newAttentionTestAgent(0, c.dialog)))
@@ -96,18 +97,24 @@ func TestContextUsageText_Percent(t *testing.T) {
 	}
 }
 
-// ── 3. 颜色分级边界: >50 绿 / 20~50 黄 / <20 红 ─────────────
+// ── 3. 颜色分级边界 (DG-2): 以触发线为界 ────────────────────
+//
+// 分级口径 (与 status_bar.go contextUsageText 同源): 剩余% <= (100-TriggerPercent) 黄
+// (已到动手线, 下次压缩随时发生), <= 其一半 红 (该收尾或换会话)。
+// 默认 TriggerPercent=70 → warn=30 → 黄 16~30 / 红 <=15。
+// 旧分级 (>50 绿 / 20~50 黄 / <20 红) 与触发机制无关: 显示"黄"时其实离动手还差一半预算。
 func TestContextUsageText_ColorGrade(t *testing.T) {
 	cases := []struct {
 		dialog int
 		want   string
 	}{
-		{5000, ansi.green},   // 75%
-		{9800, ansi.green},   // 51% → 绿
-		{10000, ansi.yellow}, // 50% 边界 → 黄 (>50 才是绿)
-		{16000, ansi.yellow}, // 20% 边界 → 黄
-		{16200, ansi.red},    // 19% → 红
-		{20000, ansi.red},    // 0% → 红
+		{15000, ansi.green},  // 75% 未到动手线
+		{29400, ansi.green},  // 51% → 绿
+		{30000, ansi.green},  // 50% 仍绿 (旧分级此处是黄边界; DG-2 起黄=已到动手线)
+		{42000, ansi.yellow}, // 30% 边界 → 黄 (= 触发线)
+		{49800, ansi.yellow}, // 17% → 黄
+		{51000, ansi.red},    // 15% 边界 → 红 (= 触发线一半)
+		{60000, ansi.red},    // 0% → 红
 	}
 	for _, c := range cases {
 		got := contextUsageText(newAttentionTestAgent(0, c.dialog))
@@ -137,7 +144,7 @@ func TestContextUsageText_Degrade(t *testing.T) {
 
 // ── 5. 段存在: 注意力段必须出现在组装结果里 ─────────────────
 func TestStatusBarText_AttentionPresent(t *testing.T) {
-	visible := stripANSI(statusBarText(newAttentionTestAgent(0, 5000), 135))
+	visible := stripANSI(statusBarText(newAttentionTestAgent(0, 15000), 135))
 	if !strings.Contains(visible, "注意力 剩75%") {
 		t.Errorf("135 列下注意力段缺失: %q", visible)
 	}
@@ -162,7 +169,7 @@ func TestStatusBarText_AttentionFits(t *testing.T) {
 
 // ── 7. 优先级: 窄终端牺牲末尾会话统计, 保住预警段 ───────────
 func TestStatusBarText_AttentionPriority(t *testing.T) {
-	a := newAttentionTestAgent(0, 17000) // 剩15%, 红
+	a := newAttentionTestAgent(0, 51000) // 剩15%, 红
 	for _, w := range []int{60, 80, 100} {
 		visible := stripANSI(statusBarText(a, w))
 		if !strings.Contains(visible, "注意力 剩15%") {
@@ -277,7 +284,7 @@ func TestContextBudgetUsed_HeadLenOutOfRange(t *testing.T) {
 
 // ── 12. 诊断输出: 打印各宽度下的真实渲染 (-v 可见) ───────────
 func TestStatusBarText_AttentionDiagnostic(t *testing.T) {
-	for _, d := range []int{0, 5000, 17000, 20000} {
+	for _, d := range []int{0, 15000, 51000, 60000} {
 		a := newAttentionTestAgent(18749, d)
 		for _, w := range []int{40, 60, 100, 135} {
 			t.Logf("dialog=%d w=%d: %q", d, w, stripANSI(statusBarText(a, w)))

@@ -43,7 +43,7 @@ func (f *Forge) forgeGateInline(code, lang string, compiler CompilerDef, input s
 		execArgs = append(execArgs, code)
 	}
 	if len(execArgs) > 0 {
-		exe := execArgs[0]
+		exe := resolveExecutable(execArgs[0]) // T25: python → 本机解释器
 		args := execArgs[1:]
 		cmd = f.newCmd(ctx, exe, args...)
 	} else {
@@ -234,6 +234,11 @@ func (f *Forge) forgeGateFile(code, lang string, compiler CompilerDef, input str
 // "context deadline exceeded" 模型无法定位卡点, 只能盲猜重写(实测 14 天内 python
 // 超时占 gate 缺陷 75%)。部分输出已由 Stdout/Stderr 渲染在上文, 这里只补「它是什么
 // 性质 + 下一步怎么做」, 不重复贴正文。
+//
+// T24 P2 (20261008): 追加「改走长任务通道」出路 (taskChannelHint)。动机 = 超时回告
+// 此前只给了「重写/拆小」这一条出路, 而实测 461 条 python 超时里 137 条跑满 3 次重试
+// (≈93s)才放弃 —— 「换通道」不在默认联想里, 得由死程序写进反馈 (同 heavyTaskText /
+// sh_retired 的教训: 只拒绝不给替代 = 断路)。
 func timeoutDiag(lang string, budget time.Duration, stdout, stderr string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s 执行超时: %s 预算烧完, 代码未跑完 —— 这不是语法/编译错误。\n", lang, budget)
@@ -243,5 +248,23 @@ func timeoutDiag(lang string, budget time.Duration, stdout, stderr string) strin
 		fmt.Fprintf(&sb, "上方共 %d 字节输出是超时前的部分结果, 不代表任务完成。\n", n)
 	}
 	sb.WriteString("建议: 把任务拆小分批执行; 关键步骤后 print(..., flush=True) 以定位卡点。")
+	sb.WriteString(taskChannelHint(lang))
 	return sb.String()
+}
+
+// taskChannelHint 是超时回告里的「出路」段 (T24 P2, 20261008)。
+//
+// 自指防护: lang=task 自身超时时必须返回空串 —— 对已经在长任务通道里的调用说
+// 「请改用长任务通道」是逻辑矛盾, 会把模型推向原地打转。这是本函数唯一的判据分支,
+// 由 p2_timeout_task_hint_test.go 的正例/反例双向量表钉住。
+//
+// 措辞为条件式(「若这是重活而非死循环/等输入」): 超时前无输出的情形也可能是死循环,
+// 那时换通道同样卡死 —— 出路必须自带适用边界, 不能无条件劝换。
+func taskChannelHint(lang string) string {
+	if lang == "task" {
+		return ""
+	}
+	return "\n出路: 若这是重活(大目录遍历 / 全量测试 / 慢网络 / 大批量计算)而非死循环或等输入, " +
+		"改走长任务通道 lang=\"task\" —— 提交秒回拿 task_id, 再 {\"action\":\"status\",\"id\":\"...\"} " +
+		"轮询到 state=done; 后台执行不受前台 gate 预算约束, 不要在原 gate 里反复重写。"
 }

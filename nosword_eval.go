@@ -38,7 +38,7 @@ func nswEval(expr string) (string, bool) { return nswEvalMode(expr, false) }
 // nswEvalExplicit 显式标记路径求值 (20260920 三十三期)。
 //
 // 与嗅探路径的唯一差别: 跳过"数值范围歧义"类闸 (nswRangeRe / nswParenRangeRe /
-// nswUnaryBare / nswLeadZeroRe / nswSlashPlusRe / 裸数对升序)。
+// nswUnaryBare / nswLeadZeroRe / nswSlashSignedRe / 裸数对升序)。
 // 根因: 那些闸的存在理由是"输入无位置信息, 分不清算式与区间"; 而 {{}} 标记
 // 本身就是模型的意图声明, 歧义已被消解。若显式路径仍套用嗅探闸, 升级的信息
 // 价值等于零 —— 实测 {{100-37}} 被拒 → 拒绝权回告 → 模型多烧一轮改写。

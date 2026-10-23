@@ -7,6 +7,13 @@ import "testing"
 
 var nswCandDecls = []string{
 	"nswIsCandidate", "nswIsCandidateMode", "nswCand", "nswSniffCands", "nswCtxReject",
+	// T61 (20261018) 拆分出的闸门单元: 逐个登记, 防止实现再被搬回调用方文件 (归属判据)。
+	"nswExprRuneTable", "nswIsExprRune", "nswAllExprRunes", "nswListPrefixRejects",
+	"nswRejectShape", "nswRejectSniffOnly", "nswRejectRangeAmbiguous",
+	"nswRejectSlashAmbiguous", "nswRejectAscendingDecimalPair", "nswHasExprBody",
+	"nswIsCandRune", "nswAppendCand", "nswBuildCand",
+	// T61 (20261018) 上下文裁决按闸门族拆分: 三组单元逐个登记, 防止实现被搬回调用方。
+	"nswRejectMeta", "nswRejectMarkup", "nswRejectRatio",
 }
 
 func TestNSWCand_Ownership(t *testing.T) {

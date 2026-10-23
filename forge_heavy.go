@@ -49,10 +49,11 @@ type heavyRule struct {
 
 // heavyTaskText 拒绝回告 —— 拒绝必须自带出路。
 // (sh_retired.go 同款教训: 只拒绝不给替代 = 断路, 实测模型会瞎试重写。)
-const heavyTaskText = `这是重活: 耗时由外部决定, 物理上塞不进 30s 前台预算。
+func heavyTaskText(root string) string {
+	return `这是重活: 耗时由外部决定, 物理上塞不进 30s 前台预算。
 请改走长任务通道 lang="task" —— 提交秒回拿 task_id, 再轮询:
 
-  {"action":"submit","cmd":"go test -count=1 .","cwd":"D:\\forge"}
+  {"action":"submit","cmd":"go test -count=1 .","cwd":` + strconv.Quote(root) + `}
       -> {"ok":true,"result":{"task_id":"t20261002_...", ...}}
   {"action":"status","id":"t20261002_..."}      # 轮询到 state=done/failed
   {"action":"wait","id":"...","timeout":20}     # 或等一次(单次上限 20s)
@@ -63,6 +64,7 @@ const heavyTaskText = `这是重活: 耗时由外部决定, 物理上塞不进 3
   · 不要在 python gate 里手搓 subprocess.run(go test) —— 必然超时且拿不到输出
   · 日志落 .forge/tasks/<id>.log, 终态写 .forge/tasks/<id>.json
   · 扫大目录同理: 提交到 task gate, 不要在前台 os.walk`
+}
 
 // heavyRules 判据表 (单一数据源: 新增判据只加一行, 文本与哨兵自动跟随)。
 var heavyRules = []heavyRule{

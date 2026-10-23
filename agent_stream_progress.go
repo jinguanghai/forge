@@ -24,14 +24,29 @@ const (
 	// B3 批4: 原为 RunStream 内局部 const, 块外无引用, 随检测逻辑一并迁出。
 	sameOutputThreshold = 4
 
-	// maxTurnMessages 单轮内 messages 的长度上限, 超过则裁剪最早的完整 tool 轮。
+	// maxTurnMessages 单轮内 messages 的条数安全网, 超过则裁剪最早的完整 tool 轮。
 	//
-	// 阈值从 60 提到 300 (缓存修复 20260826)。旧阈值 60 在工具密集任务(单轮多次
-	// forge 调用)中极易触发, 而 trimTurnMessages 从头部删最早 tool 轮 → 固定头
-	// 之后的前缀断裂 → 后续所有 API 全量 miss (实证: cache hit 恒等于固定头长度)。
-	// 单轮内 tool 轮几乎不可能超 300 次, 提高阈值从根本上避免触发。
-	// 真正超长的历史由 trimHistory(尾部删, 缓存友好)与 maybeCompact 兜底。
-	maxTurnMessages = 300
+	// 阈值沿革: 60 → 300 (缓存修复 20260826) → 1200 (20261013 断裂实测)。
+	// 300 仍会触发: 10-13 一个 turn 内 168 次请求, 每轮追加 assistant+tool 两条,
+	// 初始 84 条 + 336 = 420 > 300 → 自第 108 轮起每轮都裁 → 每轮断链。
+	// 实测该日 54 次全量重算 (单次 miss > 10 万, 与正常追加的 miss 形成双峰,
+	// 中间 [1万,10万) 区间为空), 吃掉 986 万 miss tokens = 当日 miss 的 93%,
+	// 折 9.86 元 (当日总成本 13.32 元)。全期同判据: 227 次 / 4403 万 tokens。
+	// 结论: 命中价只有 miss 的 1/50, 长上下文远比断链便宜 —— 阈值宁高勿低。
+	maxTurnMessages = 1200
+
+	// maxTurnTokens 单轮内 messages 的 token 预算 (硬窗口 1M, 留余量后取 50 万)。
+	//
+	// 为什么条数之外还要 token: 条数与成本脱钩 —— 一条 tool 消息可能 50 token
+	// (短回执), 也可能 5 万 (大文件内容)。只按条数判会放过"少数条巨消息"。
+	maxTurnTokens = 500_000
+
+	// trimTurnLowWater 裁剪目标: 一次裁到低水位, 而非刚好压回阈值。
+	//
+	// 本条是本文件最贵的一行经验: 裁剪必然使 messages 前缀在固定头之后断裂,
+	// 下一次请求全量 miss (成本 ×50)。"每轮裁一点" = 每轮断一次;
+	// "一次裁够" = 断一次, 之后 N 轮重新命中。同样的删除总量, 成本差 N 倍。
+	trimTurnLowWater = 200
 )
 
 // progressTracker 承载"连续相同输出"无进展检测的全部状态。
@@ -85,11 +100,38 @@ func (p *progressTracker) check() (string, bool) {
 	return stuckInterventionMsg(*p.loopStrikes), false
 }
 
-// trimTurnMessagesIfNeeded 超过 maxTurnMessages 时裁剪最早的完整 tool 轮。
-// B3 批4: 阈值判定自 RunStream 抽出, 与常量 maxTurnMessages 就近放置。
+// trimTurnMessagesIfNeeded 超出条数安全网或 token 预算时裁剪最早的完整 tool 轮。
+//
+// 判据两路并行 (条数 + token): 条数防"极多条小消息", token 防"少数条巨消息"。
+// 触发后一次裁到 trimTurnLowWater, 而非刚好压回阈值 —— 理由见该常量注释
+// (断链成本是命中价的 50 倍, 裁一次比裁 N 次便宜 N 倍)。
+// 未超限时原样返回同一底层数组, 不复制 (复制本身不影响缓存, 但无谓开销)。
+//
+// B3 批4: 阈值判定自 RunStream 抽出, 与常量就近放置。
 func trimTurnMessagesIfNeeded(msgs []ChatMessage) []ChatMessage {
-	if len(msgs) > maxTurnMessages {
-		return trimTurnMessages(msgs, maxTurnMessages)
+	if len(msgs) <= maxTurnMessages && estimateTokens(msgs) <= maxTurnTokens {
+		return msgs
 	}
-	return msgs
+	target := trimTurnLowWater
+	if est := estimateTokens(msgs); est > maxTurnTokens {
+		// token 超预算: 按线性比例把目标条数压到半预算以内 (至少留 1 条固定头)。
+		target = len(msgs) * (maxTurnTokens / 2) / est
+		if target < 1 {
+			target = 1
+		}
+	}
+	if target > trimTurnLowWater {
+		target = trimTurnLowWater
+	}
+	out := trimTurnMessages(msgs, target)
+	// 线性近似在"消息大小悬殊"时会低估, 兜底循环继续删到预算内。
+	// 触发概率低 (token 超预算本身罕见), 故不优化为前缀和。
+	for estimateTokens(out) > maxTurnTokens && len(out) > 1 {
+		next := trimTurnMessages(out, len(out)-1)
+		if len(next) >= len(out) {
+			break // 已无可删的完整 tool 轮
+		}
+		out = next
+	}
+	return out
 }

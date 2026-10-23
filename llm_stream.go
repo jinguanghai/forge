@@ -12,6 +12,7 @@ import (
 	"strings"
 )
 
+// doStream 主路径: 端点由 resolveEndpoint 决定 (恒 DeepSeek)。
 func (c *LLMClient) doStream(
 	ctx context.Context,
 	messages []ChatMessage,
@@ -19,6 +20,35 @@ func (c *LLMClient) doStream(
 	ch chan<- StreamEvent,
 	model string, // 本次请求使用的模型 (路由选择)
 ) error {
+	return c.doStreamTo(ctx, messages, tools, ch, model, c.resolveEndpoint(model, messages))
+}
+
+// preflightStream 发送前的本地预检与诊断 (从 doStreamTo 抽出, 保持单函数 <=150 行):
+//  1. 上下文硬上限预检 (§6.4 规则1): len(messages_tokens) + max_tokens <= 1_048_576;
+//  2. 前缀指纹守卫: system 前缀进程内应恒定, 变化 (运行中 memory.json 被改) 则告警
+//     并记 sys_changed 事件到 cache_stats.jsonl 供 /cache 汇总;
+//  3. FORGE_DEBUG_REQ: 打印请求消息构成 (缓存诊断)。
+func (c *LLMClient) preflightStream(messages []ChatMessage, model string) error {
+	// 请求形状埋点 (20261013): 算与上一次请求的公共前缀条数(LCP)并缓存, 由
+	// recordCacheStat 落盘。纯本地计算, 不改请求体、不影响缓存前缀。
+	// 动机与判读方法见 cache_reqshape.go。
+	setReqShape(messages)
+	// 断链即时告警: 前缀在"两次请求的公共长度"之内就不同 → 本条全量 miss。
+	// 这是最贵的失败模式 (miss 单价是命中的 50 倍; 10-13 实测 54 次共 986 万
+	// tokens), 必须当场可见, 而不是等事后查账才发现。判据用 common 而非 Prev:
+	// 新 turn 的 messages 天然是上一次的前缀 (LCP==Msgs==common), 不算断裂。
+	if sh := getReqShape(); sh.LCP >= 0 {
+		common := sh.Prev
+		if sh.Msgs < common {
+			common = sh.Msgs
+		}
+		if common >= 50 && sh.LCP < common {
+			fmt.Fprintf(os.Stderr, "  %s %s\n", color(ansi.yellow, "⚠"),
+				dim(fmt.Sprintf("前缀断裂: 公共前缀 %d/%d 条, 本条将全量 miss 约 %d tokens",
+					sh.LCP, common, sh.Est)))
+		}
+	}
+
 	// 上下文硬上限预检 (§6.4 规则1): len(messages_tokens) + max_tokens <= 1_048_576
 	estIn := estimateTokens(messages)
 	if c.cfg.MaxTokens > 0 && estIn+c.cfg.MaxTokens > hardContextLimit {
@@ -65,6 +95,23 @@ func (c *LLMClient) doStream(
 		fmt.Fprintf(&sb, "  totalChars=%d\n", totalCh)
 		fmt.Fprintln(os.Stderr, sb.String())
 	}
+	return nil
+}
+
+// doStreamTo 向指定端点发送 —— 故障兜底路径直接把 MiniMax 端点传进来,
+// 主路径则经 doStream 由 resolveEndpoint 解析。
+func (c *LLMClient) doStreamTo(
+	ctx context.Context,
+	messages []ChatMessage,
+	tools []json.RawMessage,
+	ch chan<- StreamEvent,
+	model string, // 本次请求使用的模型 (路由选择, 仅用于调试打印与缓存统计)
+	ep Endpoint, // 实际到达的端点
+) error {
+	if err := c.preflightStream(messages, model); err != nil {
+		return err
+	}
+
 	reqBody := chatRequest{
 		Model:         model,
 		Messages:      messages,
@@ -76,11 +123,10 @@ func (c *LLMClient) doStream(
 		StreamOptions: &StreamOptions{IncludeUsage: true}, // 流式末尾返回 usage → 缓存度量
 	}
 
-	// 提供商路由: 解析本次请求端点 (MiniMax 高峰省钱)
-	// 必须在 Thinking 参数之前解析: MiniMax 与 DeepSeek 的思考参数协议不同 ——
+	// 端点由调用方给出 (doStream=主路径 DeepSeek, 兜底=MiniMax), 必须在 Thinking
+	// 参数之前确定: MiniMax 与 DeepSeek 的思考参数协议不同 ——
 	// MiniMax = thinking.type:adaptive (且不认 reasoning_effort);
 	// DeepSeek = thinking.type:enabled + reasoning_effort。
-	ep := c.resolveEndpoint(model, messages)
 	reqBody.Model = ep.Model
 
 	// Thinking 模式显式声明 (deepseek-harness finding #1):
@@ -102,6 +148,8 @@ func (c *LLMClient) doStream(
 	} else {
 		reqBody.Thinking = &ThinkingConfig{Type: "disabled"}
 	}
+
+	applyMiniMaxReasoningSplit(&reqBody, ep)
 
 	// Deep-copy messages to avoid mutating the caller's slice (prevents tool_call_id
 	// mismatch when the same messages are reused across retries or turns).
@@ -269,7 +317,10 @@ func (c *LLMClient) handleSSEChunk(st *sseState, ch chan<- StreamEvent, model st
 		}
 		miss := cr.Usage.PromptCacheMissTokens
 		// 输出 token 同批落盘: 此前只记输入侧, 成本口径缺输出(4 元/M, 与命中价差 200x)
-		recordCacheStat(model, hit, miss, cr.Usage.CompletionTokens, currentSystemHash, sysChanged)
+		// 思考 tokens 一并落盘 (Out 的细分): .env 默认 DEEPSEEK_REASONING_EFFORT=high,
+		// 但此前无从判断思考占输出成本的比例。
+		recordCacheStat(model, hit, miss, cr.Usage.CompletionTokens, currentSystemHash, sysChanged,
+			usageReasoningTokens(cr.Usage))
 		// 会话级实时命中率: 经事件通道把本次 hit/miss 带回 agent.stats。
 		// 收尾阶段(toolDone)不再发事件, 保持只读收尾契约(与 reasoning/content/delta 一致)。
 		if !st.toolDone {
@@ -282,7 +333,7 @@ func (c *LLMClient) handleSSEChunk(st *sseState, ch chan<- StreamEvent, model st
 		if cr.Usage != nil {
 			out = cr.Usage.CompletionTokens
 		}
-		recordCacheStat(model, 0, 0, out, currentSystemHash, sysChanged)
+		recordCacheStat(model, 0, 0, out, currentSystemHash, sysChanged, usageReasoningTokens(cr.Usage))
 	}
 
 	if len(cr.Choices) == 0 {
@@ -350,4 +401,16 @@ func usageReasoningTokens(u *Usage) int {
 		return 0
 	}
 	return u.CompletionTokensDetail.ReasoningTokens
+}
+
+// applyMiniMaxReasoningSplit 让 MiniMax 把思维链与正文分离 (20261008 实测):
+// MiniMax-M3 默认把思维链写进 delta.content 且带 <think>...</think> 标签, reasoning_content
+// 恒空 —— 正文被思考污染, 「只给最终答案」类指令遵循任务实测生产参数组 0/6 全灭;
+// 下发 reasoning_split:true 后思维链改走 reasoning_content, 正文干净 (同题 6/6)。
+// thinking:disabled 实测无思维链 (无需分离); DeepSeek 不认该字段, 故只在 MiniMax 端点下发,
+// 保持 DeepSeek 请求体字节级不变 (前缀缓存纪律)。
+func applyMiniMaxReasoningSplit(req *chatRequest, ep Endpoint) {
+	if ep.Provider == EndpointMiniMax {
+		req.ReasoningSplit = true
+	}
 }

@@ -91,9 +91,9 @@ func TestSystemPromptDynamicGates(t *testing.T) {
 	}
 }
 
-// ── 四期 I: 18→12 裁剪验收 ──────────────────────────────────
+// ── 四期 I: gate 面裁剪验收 (面数以 铸剑炉_GATES 为准) ──────
 
-// TestTrimmedGateRegistry 验收: gate 注册表 8 个, 不含已删 gate
+// TestTrimmedGateRegistry 验收: 注册表面数正确, 不含已删 gate
 func TestTrimmedGateRegistry(t *testing.T) {
 	names := gateNames()
 	if len(names) != 11 {
@@ -106,7 +106,7 @@ func TestTrimmedGateRegistry(t *testing.T) {
 			}
 		}
 	}
-	// describeGates 输出 8 条 (立项书验收标准 3)
+	// describeGates 每条启用 gate 一行 (立项书验收标准 3)
 	all := describeGates(nil)
 	lines := strings.Count(all, "   - ")
 	if lines != 11 {
@@ -117,7 +117,7 @@ func TestTrimmedGateRegistry(t *testing.T) {
 	}
 }
 
-// TestTrimmedCompilers 验收: COMPILERS 13 个 (sh 退役后), 不含已删 7 个
+// TestTrimmedCompilers 验收: COMPILERS 面数正确 (sh 退役后), 不含已删项
 func TestTrimmedCompilers(t *testing.T) {
 	if len(铸剑炉_COMPILERS) != 14 {
 		t.Fatalf("COMPILERS 应为 14 个 (sh 已于 20261001 退役; 20261002 加 task), got %d", len(铸剑炉_COMPILERS))

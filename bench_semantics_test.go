@@ -149,8 +149,12 @@ func semCases() []semCase {
 			want: []string{"SyntaxError"}},
 
 		// ── 慢项 (网络) ──
+		// T41 (20261010): knowledge 与 browser 同为「依赖真实外网」的用例, 但此前只标了
+		// slow 没标 net —— 同一类网络抖动在 browser 降级、在 knowledge 判 FAIL, 判据自身不一致。
+		// 端点: knowledge_gate.go 的 wikidata/dbpedia SPARQL (经代理), 与 browser 同性质。
+		// 判据侧由 TestExternalGateCasesDeclareNet 钉住 (清单 + 双向断言)。
 		{gate: "knowledge", name: "SPARQL 查询", code: "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 2",
-			kind: "ok", want: []string{`"ok":true`}, slow: true},
+			kind: "ok", want: []string{`"ok":true`}, slow: true, net: true},
 		{gate: "browser", name: "抓取 example.com", code: "https://example.com",
 			kind: "ok", want: []string{"Example Domain"}, slow: true, net: true},
 	}
@@ -289,6 +293,8 @@ func TestBenchSemantics(t *testing.T) {
 		} else {
 			t.Logf("语义基准报告: %s", path)
 		}
+		// T39: 同 bench_test.go —— 生成端落盘后立即轮转 (判据即时, 处置不能等 hourly)。
+		rotateBenchReports(t, "TestBenchSemantics")
 	}
 	t.Logf("\n%s", report)
 }

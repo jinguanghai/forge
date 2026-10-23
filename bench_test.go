@@ -8,6 +8,8 @@ package main
 // 输出: 成功率 / 总耗时 / 估算成本 / 每任务明细 → bench/report_YYYYMMDD.md
 //
 // 20 任务: 5 数学(math gate) + 5 文件(python) + 5 代码(go/python) + 5 逻辑/正则/编排
+// 落盘约定: 文件类用例一律写仓库内 .forge-temp/bench/ —— 禁写 /tmp
+// (Windows 下 /tmp 解析为驱动器根, 会污染 D:\tmp 这类仓库外目录)
 
 import (
 	"fmt"
@@ -46,11 +48,11 @@ func benchCases() []benchCase {
 		{"1/2+1/2", "math", "math", "1/2+1/2", func(s string) bool { return strings.Contains(s, "1") }},
 
 		// ── 文件操作 (python) ──
-		{"写读文件", "file", "python", "open('/tmp/bf.txt','w').write('ok')\nprint(open('/tmp/bf.txt').read())", func(s string) bool { return strings.Contains(s, "ok") }},
+		{"写读文件", "file", "python", "import os\nos.makedirs('.forge-temp/bench', exist_ok=True)\nopen('.forge-temp/bench/bf.txt','w').write('ok')\nprint(open('.forge-temp/bench/bf.txt').read())", func(s string) bool { return strings.Contains(s, "ok") }},
 		{"列目录", "file", "python", "import os\nprint(len(os.listdir('.')) >= 0)", func(s string) bool { return strings.Contains(s, "True") }},
-		{"建目录", "file", "python", "import os\nos.makedirs('/tmp/bf_dir', exist_ok=True)\nprint(os.path.isdir('/tmp/bf_dir'))", func(s string) bool { return strings.Contains(s, "True") }},
+		{"建目录", "file", "python", "import os\nos.makedirs('.forge-temp/bench/bf_dir', exist_ok=True)\nprint(os.path.isdir('.forge-temp/bench/bf_dir'))", func(s string) bool { return strings.Contains(s, "True") }},
 		{"JSON 解析", "file", "python", "import json\nd=json.loads('{\"a\":1}')\nprint(d['a'])", func(s string) bool { return strings.Contains(s, "1") }},
-		{"统计行数", "file", "python", "open('/tmp/bf_l.txt','w').write('a\\nb\\nc\\n')\nprint(len(open('/tmp/bf_l.txt').readlines()))", func(s string) bool { return strings.Contains(s, "3") }},
+		{"统计行数", "file", "python", "import os\nos.makedirs('.forge-temp/bench', exist_ok=True)\nopen('.forge-temp/bench/bf_l.txt','w').write('a\\nb\\nc\\n')\nprint(len(open('.forge-temp/bench/bf_l.txt').readlines()))", func(s string) bool { return strings.Contains(s, "3") }},
 
 		// ── 代码生成 (python/go) ──
 		{"python hello", "code", "python", "print('hello')", func(s string) bool { return strings.Contains(s, "hello") }},
@@ -152,6 +154,9 @@ func TestBench(t *testing.T) {
 		report := filepath.Join(dir, "report_"+time.Now().Format("20060102")+".md")
 		_ = os.WriteFile(report, []byte(sb.String()), 0644)
 		t.Logf("报告已落盘: %s", report)
+		// T39: 落盘后立即轮转 —— 否则份数顶到上限+1, 而处置由 hourly 按小时跑,
+		// 这个窗口期内 TestBenchReportsWithinLimit 必红 (判据即时 vs 处置小时级)。
+		rotateBenchReports(t, "TestBench")
 	}
 
 	// 输出摘要到 stdout
@@ -161,5 +166,18 @@ func TestBench(t *testing.T) {
 	// 关键 gate (math/logic) 失败会打印, 不 fail 测试 (基准是报告不是门禁)
 	if pass < total*6/10 {
 		t.Logf("警告: 成功率低于 60%%, 请检查工具链状态")
+	}
+}
+
+// TestBenchCasesStayInRepo 基准用例的落盘路径必须在仓库内。
+// 动机(2026-10-11): 原 3 条文件用例写 '/tmp/xxx' —— Windows 下解析为 D:\tmp,
+// 铸剑炉每次跑基准都往驱动器根目录拉屎, 而全仓零判据看得见。
+func TestBenchCasesStayInRepo(t *testing.T) {
+	for _, c := range benchCases() {
+		for _, bad := range []string{"'/tmp/", "\"/tmp/", "'C:\\\\", "'D:\\\\"} {
+			if strings.Contains(c.code, bad) {
+				t.Errorf("bench 用例 %q 使用仓库外绝对路径 %s; 请改用 .forge-temp/bench/", c.name, bad)
+			}
+		}
 	}
 }
